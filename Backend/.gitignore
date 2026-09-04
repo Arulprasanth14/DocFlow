@@ -1,0 +1,26 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Sensitive credentials & keys
+*firebase-adminsdk*.json
+*.pem
+*.key
+*.cert
+serviceAccountKey.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+alembic/versions/*.pyc

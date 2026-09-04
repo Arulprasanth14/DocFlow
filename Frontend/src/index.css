@@ -1,0 +1,411 @@
+/* DocFlow Design System — CSS Custom Properties & Global Styles
+ * Glassmorphism dark theme with vibrant accents
+ * Typography: Inter (headings) + Inter (body)
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+/* ── Color Tokens ─────────────────────────────────────────────────────────── */
+:root {
+  /* Primary — Electric Blue */
+  --color-primary-50:  hsl(217, 100%, 97%);
+  --color-primary-100: hsl(217, 100%, 92%);
+  --color-primary-200: hsl(217, 100%, 82%);
+  --color-primary-300: hsl(217, 100%, 68%);
+  --color-primary-400: hsl(217, 100%, 58%);
+  --color-primary-500: hsl(217, 100%, 50%);
+  --color-primary-600: hsl(217, 100%, 43%);
+  --color-primary-700: hsl(217, 100%, 35%);
+  --color-primary-800: hsl(217, 100%, 25%);
+  --color-primary-900: hsl(217, 100%, 16%);
+
+  /* Accent — Violet */
+  --color-accent-400: hsl(258, 90%, 66%);
+  --color-accent-500: hsl(258, 90%, 58%);
+  --color-accent-600: hsl(258, 90%, 50%);
+
+  /* Success, Warning, Error */
+  --color-success-400: hsl(145, 70%, 55%);
+  --color-success-500: hsl(145, 70%, 45%);
+  --color-warning-400: hsl(38, 92%, 60%);
+  --color-warning-500: hsl(38, 92%, 50%);
+  --color-error-400:   hsl(0, 82%, 65%);
+  --color-error-500:   hsl(0, 82%, 55%);
+  --color-info-400:    hsl(210, 100%, 65%);
+
+  /* Background layers (dark by default) */
+  --bg-base:           hsl(222, 47%, 6%);
+  --bg-surface:        hsl(222, 40%, 9%);
+  --bg-elevated:       hsl(222, 35%, 13%);
+  --bg-overlay:        hsl(222, 30%, 17%);
+
+  /* Glass effect */
+  --glass-bg:          hsla(222, 40%, 12%, 0.8);
+  --glass-border:      hsla(217, 100%, 75%, 0.12);
+  --glass-blur:        16px;
+
+  /* Text */
+  --text-primary:      hsl(220, 20%, 96%);
+  --text-secondary:    hsl(220, 15%, 70%);
+  --text-muted:        hsl(220, 10%, 50%);
+  --text-disabled:     hsl(220, 8%, 35%);
+
+  /* Border */
+  --border-subtle:     hsla(220, 20%, 50%, 0.15);
+  --border-default:    hsla(220, 20%, 60%, 0.22);
+  --border-strong:     hsla(220, 20%, 70%, 0.35);
+
+  /* Shadows */
+  --shadow-sm:         0 1px 3px hsla(220, 50%, 5%, 0.4);
+  --shadow-md:         0 4px 16px hsla(220, 50%, 5%, 0.5);
+  --shadow-lg:         0 8px 32px hsla(220, 50%, 5%, 0.6);
+  --shadow-glow:       0 0 20px hsla(217, 100%, 50%, 0.25);
+
+  /* Typography */
+  --font-sans:         'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono:         'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Radius */
+  --radius-sm:         6px;
+  --radius-md:         10px;
+  --radius-lg:         16px;
+  --radius-xl:         24px;
+  --radius-full:       9999px;
+
+  /* Transitions */
+  --transition-fast:   150ms ease;
+  --transition-base:   250ms ease;
+  --transition-slow:   400ms ease;
+
+  /* Sidebar */
+  --sidebar-width:     260px;
+  --sidebar-collapsed: 72px;
+  --header-height:     64px;
+
+  /* Aliases used by document components */
+  --bg-main:           var(--bg-base);
+  --bg-card:           var(--bg-elevated);
+}
+
+/* ── Light Theme Override ───────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-base:        hsl(220, 20%, 97%);
+  --bg-surface:     hsl(220, 20%, 100%);
+  --bg-elevated:    hsl(220, 20%, 96%);
+  --bg-overlay:     hsl(220, 15%, 92%);
+  --glass-bg:       hsla(220, 20%, 100%, 0.85);
+  --glass-border:   hsla(217, 50%, 50%, 0.15);
+  --text-primary:   hsl(222, 47%, 10%);
+  --text-secondary: hsl(222, 30%, 35%);
+  --text-muted:     hsl(222, 20%, 55%);
+  --border-subtle:  hsla(220, 20%, 50%, 0.1);
+  --border-default: hsla(220, 20%, 40%, 0.18);
+}
+
+/* ── Base Styles ────────────────────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ── Glass Card ─────────────────────────────────────────────────────────────── */
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+}
+
+/* ── DocFlow Status Badges ──────────────────────────────────────────────────── */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.status-draft           { background: hsla(220, 15%, 40%, 0.2); color: var(--text-secondary); border: 1px solid var(--border-subtle); }
+.status-submitted       { background: hsla(217, 100%, 50%, 0.15); color: var(--color-primary-300); border: 1px solid hsla(217, 100%, 50%, 0.3); }
+.status-under_review    { background: hsla(258, 90%, 60%, 0.15); color: var(--color-accent-400); border: 1px solid hsla(258, 90%, 60%, 0.3); }
+.status-pending_approval{ background: hsla(38, 92%, 55%, 0.15);  color: var(--color-warning-400); border: 1px solid hsla(38, 92%, 55%, 0.3); }
+.status-approved        { background: hsla(145, 70%, 50%, 0.15); color: var(--color-success-400); border: 1px solid hsla(145, 70%, 50%, 0.3); }
+.status-rejected        { background: hsla(0, 82%, 60%, 0.15);   color: var(--color-error-400);   border: 1px solid hsla(0, 82%, 60%, 0.3); }
+.status-revision_requested { background: hsla(38, 92%, 55%, 0.15); color: var(--color-warning-400); border: 1px solid hsla(38, 92%, 55%, 0.3); }
+.status-archived        { background: hsla(220, 10%, 45%, 0.15); color: var(--text-muted); border: 1px solid var(--border-subtle); }
+.status-cancelled       { background: hsla(0, 60%, 50%, 0.12);   color: hsl(0, 60%, 65%); border: 1px solid hsla(0, 60%, 50%, 0.25); }
+
+/* ── Priority Badges ─────────────────────────────────────────────────────────── */
+.priority-low     { color: var(--text-muted); }
+.priority-normal  { color: var(--text-secondary); }
+.priority-high    { color: var(--color-warning-400); }
+.priority-urgent  { color: var(--color-error-400); animation: pulse-urgent 2s ease infinite; }
+
+@keyframes pulse-urgent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ── SLA Indicators ──────────────────────────────────────────────────────────── */
+.sla-on-time  { color: var(--color-success-400); }
+.sla-warning  { color: var(--color-warning-400); }
+.sla-breached { color: var(--color-error-400); animation: pulse-urgent 1.5s ease infinite; }
+
+/* ── Button System ───────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--color-primary-500), var(--color-primary-600));
+  color: white;
+  box-shadow: var(--shadow-sm), 0 0 0 0 hsla(217, 100%, 50%, 0);
+}
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--color-primary-400), var(--color-primary-500));
+  box-shadow: var(--shadow-md), var(--shadow-glow);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+.btn-secondary:hover {
+  background: var(--bg-overlay);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.btn-ghost:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.btn-danger {
+  background: hsla(0, 82%, 55%, 0.15);
+  color: var(--color-error-400);
+  border-color: hsla(0, 82%, 55%, 0.3);
+}
+.btn-danger:hover {
+  background: hsla(0, 82%, 55%, 0.25);
+}
+
+.btn-sm { padding: 6px 14px; font-size: 0.8125rem; }
+.btn-lg { padding: 14px 28px; font-size: 1rem; }
+.btn-icon { padding: 10px; }
+
+/* ── Input System ────────────────────────────────────────────────────────────── */
+.input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: var(--font-sans);
+  transition: all var(--transition-fast);
+  outline: none;
+}
+
+.input::placeholder { color: var(--text-muted); }
+
+.input:focus {
+  border-color: var(--color-primary-500);
+  box-shadow: 0 0 0 3px hsla(217, 100%, 50%, 0.15);
+  background: var(--bg-overlay);
+}
+
+.input:invalid:not(:placeholder-shown) {
+  border-color: var(--color-error-500);
+  box-shadow: 0 0 0 3px hsla(0, 82%, 55%, 0.12);
+}
+
+/* ── Animation Utilities ─────────────────────────────────────────────────────── */
+.fade-in { animation: fadeIn var(--transition-base) ease; }
+.slide-up { animation: slideUp var(--transition-base) ease; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Gradient Backgrounds ────────────────────────────────────────────────────── */
+.gradient-primary {
+  background: linear-gradient(135deg, var(--color-primary-500) 0%, var(--color-accent-500) 100%);
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-primary-300), var(--color-accent-400));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Page Layout ─────────────────────────────────────────────────────────────── */
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-layout {
+  display: flex;
+  width: 100%;
+}
+
+.main-content {
+  flex: 1;
+  margin-left: var(--sidebar-width);
+  min-height: 100vh;
+  transition: margin-left var(--transition-base);
+}
+
+.main-content.sidebar-collapsed {
+  margin-left: var(--sidebar-collapsed);
+}
+
+.mobile-menu-btn {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .app-sidebar {
+    transform: translateX(-100%);
+  }
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+  }
+  .main-content {
+    margin-left: 0 !important;
+  }
+  .sidebar-toggle-container {
+    display: none !important;
+  }
+  .mobile-menu-btn {
+    display: flex !important;
+  }
+  .mobile-overlay {
+    display: block !important;
+  }
+}
+
+.page-header {
+  padding: 24px 32px 0;
+  margin-bottom: 24px;
+}
+
+.page-content {
+  padding: 0 32px 32px;
+}
+
+/* ── Loading Spinner ──────────────────────────────────────────────────────────── */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--color-primary-500);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Empty State ─────────────────────────────────────────────────────────────── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 64px 32px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.empty-state svg {
+  opacity: 0.4;
+}
+
+/* ── Auth Card Responsive Layout ────────────────────────────────────────────── */
+.auth-container {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 16px;
+  position: relative;
+  box-sizing: border-box;
+}
+
+.auth-card {
+  padding: 40px 36px;
+  box-shadow: 0 32px 80px hsla(220, 50%, 5%, 0.6), 0 0 0 1px var(--glass-border);
+}
+
+@media (max-width: 480px) {
+  .auth-card {
+    padding: 28px 20px !important;
+  }
+}
+@custom-variant dark (&:is(.dark *));
