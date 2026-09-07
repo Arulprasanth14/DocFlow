@@ -29,7 +29,7 @@ export const documentKeys = {
 
 // ── Document Types Queries & Mutations ────────────────────────────────────────
 export function useDocumentTypes(activeOnly = true) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.types(activeOnly),
     queryFn: () => documentsApi.listDocumentTypes(activeOnly),
@@ -39,7 +39,7 @@ export function useDocumentTypes(activeOnly = true) {
 }
 
 export function useDocumentType(id: string) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.type(id),
     queryFn: () => documentsApi.getDocumentType(id),
@@ -82,7 +82,7 @@ export function useDeleteDocumentType() {
 
 // ── Documents Queries & Mutations ─────────────────────────────────────────────
 export function useDocuments(params?: DocumentFilterParams) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.list(params),
     queryFn: () => documentsApi.listDocuments(params),
@@ -92,7 +92,7 @@ export function useDocuments(params?: DocumentFilterParams) {
 }
 
 export function useDocument(id: string) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.detail(id),
     queryFn: () => documentsApi.getDocument(id),
@@ -149,7 +149,7 @@ export function useDeleteDocument() {
 
 // ── Document Versions ─────────────────────────────────────────────────────────
 export function useDocumentVersions(docId: string) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.versions(docId),
     queryFn: () => documentsApi.listVersions(docId),
@@ -160,7 +160,7 @@ export function useDocumentVersions(docId: string) {
 
 // ── Document Comments ─────────────────────────────────────────────────────────
 export function useDocumentComments(docId: string) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.comments(docId),
     queryFn: () => documentsApi.listComments(docId),
@@ -194,7 +194,7 @@ export function useUpdateDocumentComment() {
 
 // ── Document Attachments ──────────────────────────────────────────────────────
 export function useDocumentAttachments(docId: string) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: documentKeys.attachments(docId),
     queryFn: () => documentsApi.listAttachments(docId),

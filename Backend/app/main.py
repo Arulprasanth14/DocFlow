@@ -11,7 +11,6 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import settings
 from app.core.exceptions import DocFlowException
@@ -104,13 +103,6 @@ def create_app() -> FastAPI:
 
     # ── Custom Middleware ─────────────────────────────────────────────────────
     app.add_middleware(RequestLoggingMiddleware)
-
-    # ── Prometheus Metrics ────────────────────────────────────────────────────
-    Instrumentator(
-        should_group_status_codes=True,
-        should_ignore_untemplated=True,
-        excluded_handlers=["/health", "/health/live", "/metrics"],
-    ).instrument(app).expose(app, endpoint="/metrics")
 
     # ── Exception Handlers ─────────────────────────────────────────────────────
     @app.exception_handler(DocFlowException)

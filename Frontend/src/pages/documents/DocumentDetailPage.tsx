@@ -19,6 +19,7 @@ import { useDepartments } from '@/hooks/useOrg';
 import DynamicFormRenderer, { validateFormSchema } from '@/components/documents/DynamicFormRenderer';
 import CommentDrawer from '@/components/documents/CommentDrawer';
 import VersionHistoryModal from '@/components/documents/VersionHistoryModal';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 function getStatusBadge(status: string) {
   switch (status) {
@@ -72,6 +73,9 @@ export default function DocumentDetailPage() {
   const [newAttFileId, setNewAttFileId] = useState('');
   const [newAttLabel, setNewAttLabel] = useState('');
   const [attAdding, setAttAdding] = useState(false);
+  const [confirmState, setConfirmState] = useState<{ open: boolean; title: string; message: string; confirmLabel: string; onConfirm: () => void }>({
+    open: false, title: '', message: '', confirmLabel: 'Confirm', onConfirm: () => {}
+  });
 
   if (docLoading) {
     return (
@@ -149,9 +153,16 @@ export default function DocumentDetailPage() {
   };
 
   const handleSubmitDoc = async () => {
-    if (window.confirm('Submit this draft document for review/approval?')) {
-      await submitDoc.mutateAsync({ id: doc.id, changeReason: 'Submitted for approval' });
-    }
+    setConfirmState({
+      open: true,
+      title: 'Submit for Approval',
+      message: 'Submit this draft document for review/approval?',
+      confirmLabel: 'Submit',
+      onConfirm: async () => {
+        setConfirmState(prev => ({ ...prev, open: false }));
+        await submitDoc.mutateAsync({ id: doc.id, changeReason: 'Submitted for approval' });
+      }
+    });
   };
 
   const handleAddAttachment = async (e: React.FormEvent) => {
@@ -177,9 +188,16 @@ export default function DocumentDetailPage() {
   };
 
   const handleRemoveAtt = async (attId: string) => {
-    if (window.confirm('Remove this attachment?')) {
-      await removeAtt.mutateAsync({ docId: doc.id, attId });
-    }
+    setConfirmState({
+      open: true,
+      title: 'Remove Attachment',
+      message: 'Are you sure you want to remove this attachment?',
+      confirmLabel: 'Remove',
+      onConfirm: async () => {
+        setConfirmState(prev => ({ ...prev, open: false }));
+        await removeAtt.mutateAsync({ docId: doc.id, attId });
+      }
+    });
   };
 
   return (
@@ -597,6 +615,15 @@ export default function DocumentDetailPage() {
         docId={doc.id}
         docTitle={doc.title}
         currentVersionNum={doc.version_count || 1}
+      />
+
+      <ConfirmDialog
+        open={confirmState.open}
+        title={confirmState.title}
+        message={confirmState.message}
+        confirmLabel={confirmState.confirmLabel}
+        onConfirm={confirmState.onConfirm}
+        onCancel={() => setConfirmState(prev => ({ ...prev, open: false }))}
       />
     </div>
   );

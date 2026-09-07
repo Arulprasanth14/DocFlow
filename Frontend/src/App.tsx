@@ -37,6 +37,13 @@ import DashboardPage from '@/pages/dashboard/DashboardPage';
 // ── Approvals Page Imports (Milestone 5) ──────────────────────────────────────
 import ApprovalsPage from '@/pages/approvals/ApprovalsPage';
 
+// ── New Feature Pages ─────────────────────────────────────────────────────────
+import WorkflowsPage from '@/pages/workflows/WorkflowsPage';
+import SearchPage from '@/pages/search/SearchPage';
+import AnalyticsPage from '@/pages/analytics/AnalyticsPage';
+import ChatPage from '@/pages/chat/ChatPage';
+import SettingsPage from '@/pages/settings/SettingsPage';
+
 // ── Component Imports ─────────────────────────────────────────────────────────
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
 import AppLayout from '@/components/layout/AppLayout';
@@ -138,11 +145,13 @@ function AppInner() {
           <Route path="documents/new" element={<DocumentCreatePage />} />
           <Route path="documents/:id" element={<DocumentDetailPage />} />
 
-          {/* Milestone 5+ routes (coming soon UI) */}
+          {/* Feature routes */}
           <Route path="approvals/*" element={<ApprovalsPage />} />
-          <Route path="workflows/*" element={<ComingSoonPage title="Workflows" />} />
-          <Route path="search" element={<ComingSoonPage title="Search" />} />
-          <Route path="analytics/*" element={<ComingSoonPage title="Analytics" />} />
+          <Route path="workflows/*" element={<WorkflowsPage />} />
+          <Route path="search" element={<SearchPage />} />
+          <Route path="analytics/*" element={<AnalyticsPage />} />
+          <Route path="chat" element={<ChatPage />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
 
         {/* ── Catch-all ─────────────────────────────────────────────── */}

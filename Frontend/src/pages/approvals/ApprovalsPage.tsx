@@ -7,6 +7,10 @@ import {
   ArrowUpDown, AlignJustify
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
+import { useNavigate } from "react-router-dom";
+import { useMyApprovalQueue, useApprovals, useApproveStep, useRejectStep } from "@/hooks/useApprovals";
+import type { WorkflowStepInstance } from "@/types";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -51,21 +55,36 @@ const C = {
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
-const SEED: Approval[] = [
-  { id: "1",  title: "Q4 Financial Report 2024",               requester: "Sarah Chen",       initials: "SC", avatarBg: "#6366F1", type: "Finance",      stage: "Stage 2 of 3", stageSub: "Review",              requestedAt: "2h ago",  status: "pending"  },
-  { id: "2",  title: "Legal Services Agreement — Renewal",     requester: "Marcus Webb",      initials: "MW", avatarBg: "#F59E0B", type: "Legal",         stage: "Stage 1 of 2", stageSub: "Initial Review",      requestedAt: "4h ago",  status: "pending"  },
-  { id: "3",  title: "Product Roadmap H1 2025",                requester: "Priya Nair",       initials: "PN", avatarBg: "#22C55E", type: "Product",       stage: "Stage 3 of 3", stageSub: "Final Approval",      requestedAt: "6h ago",  status: "pending"  },
-  { id: "4",  title: "Vendor Contract — Accenture",            requester: "Tom Bradley",      initials: "TB", avatarBg: "#3B82F6", type: "Procurement",   stage: "Stage 1 of 3", stageSub: "Review",              requestedAt: "1d ago",  status: "pending"  },
-  { id: "5",  title: "HR Policy Update 2024",                  requester: "Aisha Patel",      initials: "AP", avatarBg: "#EC4899", type: "HR",            stage: "Stage 2 of 2", stageSub: "Final Sign-off",      requestedAt: "2d ago",  status: "pending"  },
-  { id: "6",  title: "Annual Budget Allocation FY2025",        requester: "James Liu",        initials: "JL", avatarBg: "#8B5CF6", type: "Finance",       stage: "Stage 1 of 4", stageSub: "Department Review",   requestedAt: "3d ago",  status: "pending"  },
-  { id: "7",  title: "Software License Agreement — Adobe",     requester: "Elena Costa",      initials: "EC", avatarBg: "#F97316", type: "IT",            stage: "Stage 2 of 2", stageSub: "Sign-off",            requestedAt: "5d ago",  status: "pending"  },
-  { id: "8",  title: "Marketing Campaign Brief Q1",            requester: "Noah Williams",    initials: "NW", avatarBg: "#14B8A6", type: "Marketing",     stage: "Stage 1 of 2", stageSub: "Creative Review",     requestedAt: "1w ago",  status: "pending"  },
-  { id: "9",  title: "Board Resolution — Dividend Declaration",requester: "Sophia Martinez",  initials: "SM", avatarBg: "#6366F1", type: "Finance",       stage: "Stage 3 of 3", stageSub: "Executive Sign-off",  requestedAt: "2w ago",  status: "approved" },
-  { id: "10", title: "Partnership Agreement — TechVentures",   requester: "Daniel Kim",       initials: "DK", avatarBg: "#22C55E", type: "Legal",         stage: "Stage 2 of 2", stageSub: "Final Approval",      requestedAt: "3w ago",  status: "approved" },
-  { id: "11", title: "Data Privacy Compliance Report",         requester: "Chloe Osei",       initials: "CO", avatarBg: "#A78BFA", type: "Legal",         stage: "Stage 2 of 3", stageSub: "Compliance Check",    requestedAt: "1mo ago", status: "approved" },
-  { id: "12", title: "Office Lease Renewal — HQ",              requester: "Rachel Thomas",    initials: "RT", avatarBg: "#F59E0B", type: "Facilities",    stage: "Stage 1 of 3", stageSub: "Initial Review",      requestedAt: "1mo ago", status: "rejected" },
-  { id: "13", title: "Cloud Infrastructure Budget Increase",   requester: "Kevin Okafor",     initials: "KO", avatarBg: "#3B82F6", type: "IT",            stage: "Stage 2 of 3", stageSub: "Finance Review",      requestedAt: "2mo ago", status: "rejected" },
-];
+function mapStepToApproval(step: WorkflowStepInstance): Approval {
+  const doc = step.workflow_instance?.document;
+  const submitter = doc?.submitter_name || "Unknown";
+  const initials = submitter.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase() || "U";
+  const avatarBg = "#6366F1";
+  const title = doc?.title || `Document for Step ${step.id}`;
+  const type = doc?.doc_type_name || "Document";
+  const stage = `Stage ${step.step_order}`;
+  const stageSub = step.step_type;
+  const requestedAt = new Date(step.workflow_instance?.started_at || Date.now()).toLocaleDateString();
+  
+  let status: Status = "pending";
+  if (step.status === "completed") {
+     if (step.decision === "approved") status = "approved";
+     else if (step.decision === "rejected") status = "rejected";
+  }
+
+  return {
+    id: step.id,
+    title,
+    requester: submitter,
+    initials,
+    avatarBg,
+    type,
+    stage,
+    stageSub,
+    requestedAt,
+    status
+  };
+}
 
 // ─── Small shared components ──────────────────────────────────────────────────
 
@@ -117,20 +136,39 @@ const GRID_COLS = "40px minmax(240px,1fr) 120px 200px 110px 110px 90px";
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function ApprovalsPage() {
-  const [approvals, setApprovals] = useState<Approval[]>(SEED);
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabKey>("pending");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [search, setSearch]       = useState("");
   const [page, setPage]           = useState(1);
   const [hovered, setHovered]     = useState<string | null>(null);
   const [exiting, setExiting]     = useState<Set<string>>(new Set());
+  const [actionModal, setActionModal] = useState<{ open: boolean; type: "approved"|"rejected"; id?: string; bulk?: boolean }>({ open: false, type: "approved" });
+  const [note, setNote] = useState("");
 
-  const counts = useMemo(() => ({
-    pending:  approvals.filter(a => a.status === "pending").length,
-    approved: approvals.filter(a => a.status === "approved").length,
-    rejected: approvals.filter(a => a.status === "rejected").length,
-    all:      approvals.length,
-  }), [approvals]);
+  const myQueueQ = useMyApprovalQueue();
+  const allApprovalsQ = useApprovals({ page: 1, limit: 100 });
+  const approveM = useApproveStep();
+  const rejectM = useRejectStep();
+
+  const approvals = useMemo(() => {
+    if (activeTab === "pending") {
+      return (myQueueQ.data || []).map(mapStepToApproval);
+    } else {
+      return (allApprovalsQ.data?.items || []).map(mapStepToApproval);
+    }
+  }, [activeTab, myQueueQ.data, allApprovalsQ.data]);
+
+  const counts = useMemo(() => {
+    const pendCount = (myQueueQ.data || []).length;
+    const allCount = (allApprovalsQ.data?.items || []).length;
+    return {
+      pending:  pendCount,
+      approved: (allApprovalsQ.data?.items || []).filter(a => a.status === "completed" && a.decision === "approved").length,
+      rejected: (allApprovalsQ.data?.items || []).filter(a => a.status === "completed" && a.decision === "rejected").length,
+      all:      allCount,
+    };
+  }, [myQueueQ.data, allApprovalsQ.data]);
 
   const filtered = useMemo(() => {
     let list = activeTab === "all" ? approvals : approvals.filter(a => a.status === activeTab);
@@ -165,24 +203,32 @@ export default function ApprovalsPage() {
   }
 
   function act(id: string, next: Status) {
-    setExiting(prev => new Set(prev).add(id));
-    setTimeout(() => {
-      setApprovals(prev => prev.map(a => a.id === id ? { ...a, status: next } : a));
-      setExiting(prev => { const n = new Set(prev); n.delete(id); return n; });
-      setSelected(prev => { const n = new Set(prev); n.delete(id); return n; });
-      toast[next === "approved" ? "success" : "error"](
-        next === "approved" ? "Document approved" : "Document rejected"
-      );
-    }, 260);
+    setActionModal({ open: true, type: next as "approved" | "rejected", id, bulk: false });
+    setNote("");
   }
 
   function bulkAct(next: Status) {
-    const count = selected.size;
-    setApprovals(prev => prev.map(a => selected.has(a.id) ? { ...a, status: next } : a));
-    setSelected(new Set());
-    toast[next === "approved" ? "success" : "error"](
-      `${count} item${count !== 1 ? "s" : ""} ${next}`
-    );
+    if (selected.size === 0) return;
+    setActionModal({ open: true, type: next as "approved" | "rejected", bulk: true });
+    setNote("");
+  }
+
+  async function confirmAction() {
+    const { type, id, bulk } = actionModal;
+    const isApprove = type === "approved";
+    const m = isApprove ? approveM : rejectM;
+    
+    if (!bulk && id) {
+      await m.mutateAsync({ stepId: id, note: note || undefined });
+      toast[isApprove ? "success" : "error"](`Document ${type}`);
+    } else if (bulk) {
+      for (const selId of selected) {
+         try { await m.mutateAsync({ stepId: selId, note: note || undefined }); } catch {}
+      }
+      toast[isApprove ? "success" : "error"](`${selected.size} items ${type}`);
+      setSelected(new Set());
+    }
+    setActionModal({ open: false, type: "approved" });
   }
 
   const allPageSelected = paged.length > 0 && selected.size >= paged.length;
@@ -219,6 +265,7 @@ export default function ApprovalsPage() {
             </p>
           </div>
           <button
+            onClick={() => navigate('/documents/new')}
             style={{
               display: "flex", alignItems: "center", gap: 8,
               padding: "10px 18px", borderRadius: 10,
@@ -743,6 +790,15 @@ export default function ApprovalsPage() {
         {/* bottom breathing room */}
         <div style={{ height: 32 }} />
       </div>
+
+      <ConfirmDialog
+        open={actionModal.open}
+        title={actionModal.type === "approved" ? "Approve Request" : "Reject Request"}
+        message={actionModal.bulk ? `Are you sure you want to ${actionModal.type} ${selected.size} requests?` : `Are you sure you want to ${actionModal.type} this request?`}
+        confirmLabel={actionModal.type === "approved" ? "Approve" : "Reject"}
+        onConfirm={confirmAction}
+        onCancel={() => setActionModal({ open: false, type: "approved" })}
+      />
     </div>
   );
 }

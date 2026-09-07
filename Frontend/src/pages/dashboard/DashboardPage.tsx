@@ -17,8 +17,10 @@ import {
   UserPlus
 } from "lucide-react";
 import { AreaChart, Area, ResponsiveContainer, Tooltip, XAxis } from "recharts";
-
-// ── colour tokens (match spec) ─────────────────────────────────────
+import { useNavigate } from "react-router-dom";
+import { useDashboardStats } from "@/hooks/useAnalytics";
+import { useMyApprovalQueue, useApproveStep, useRejectStep } from "@/hooks/useApprovals";
+import { useDocuments } from "@/hooks/useDocuments";
 const C = {
   bg: "var(--bg-base)",
   secondBg: "var(--bg-overlay)",
@@ -113,6 +115,35 @@ function ProgressBar({ value, color = C.primary }: { value: number; color?: stri
 }
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
+  const { data: stats } = useDashboardStats();
+  const { data: myQueue } = useMyApprovalQueue();
+  const { data: recentDocsData } = useDocuments({ page: 1, limit: 4, sort: '-updated_at' });
+  const approveM = useApproveStep();
+  const rejectM = useRejectStep();
+
+  const realPendingApprovals = (myQueue || []).slice(0, 4).map(step => {
+    const doc = step.workflow_instance?.document;
+    const submitter = doc?.submitter_name || "Unknown";
+    return {
+      id: step.id,
+      doc: doc?.title || `Step ${step.id}`,
+      owner: submitter,
+      avatar: submitter.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase() || "U",
+      time: new Date(step.workflow_instance?.started_at || Date.now()).toLocaleDateString(),
+      status: "pending",
+    };
+  });
+  const displayPending = realPendingApprovals.length > 0 ? realPendingApprovals : pendingApprovals;
+
+  const realRecentDocs = (recentDocsData?.items || []).map(doc => ({
+    name: doc.title,
+    type: doc.doc_type_name || "Document",
+    modified: new Date(doc.updated_at).toLocaleDateString(),
+    progress: doc.status === "approved" ? 100 : doc.status === "pending_approval" || doc.status === "under_review" ? 60 : 20,
+  }));
+  const displayRecent = realRecentDocs.length > 0 ? realRecentDocs : recentDocs;
+
   return (
     <div style={{ position: "relative", minHeight: "100%", overflow: "hidden" }}>
       {/* ══ BACKGROUND LAYERS (extracted for Dashboard specific effects) ══ */}
@@ -161,13 +192,14 @@ export default function DashboardPage() {
         {/* ── QUICK ACTIONS ── */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
           {[
-            { icon: Upload, label: "Upload Doc", sub: "Drag & drop files", color: C.primary },
-            { icon: GitBranch, label: "New Workflow", sub: "Automate approvals", color: C.purple },
-            { icon: CheckCircle, label: "Pending Review", sub: "5 awaiting you", color: C.warning },
-            { icon: UserPlus, label: "Invite Team", sub: "Add collaborators", color: C.success },
+            { icon: Upload, label: "Upload Doc", sub: "Drag & drop files", color: C.primary, action: () => navigate('/documents/new') },
+            { icon: GitBranch, label: "New Workflow", sub: "Automate approvals", color: C.purple, action: () => navigate('/workflows') },
+            { icon: CheckCircle, label: "Pending Review", sub: `${myQueue?.length || 5} awaiting you`, color: C.warning, action: () => navigate('/approvals') },
+            { icon: UserPlus, label: "Invite Team", sub: "Add collaborators", color: C.success, action: () => navigate('/admin/members') },
           ].map((a) => (
             <button
               key={a.label}
+              onClick={a.action}
               style={{
                 background: "var(--bg-elevated)",
                 backdropFilter: "blur(20px)",
@@ -204,7 +236,7 @@ export default function DashboardPage() {
             </div>
             <div style={{ height: 1, background: C.border }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {pendingApprovals.map((row) => (
+              {displayPending.map((row) => (
                 <div key={row.doc} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <Avatar initials={row.avatar} size={32} color={row.status === "urgent" ? C.danger : C.primary} />
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -212,17 +244,17 @@ export default function DashboardPage() {
                     <div style={{ color: C.secondary, fontSize: 11 }}>{row.owner} · {row.time}</div>
                   </div>
                   <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                    <button style={{ width: 28, height: 28, background: `${C.success}18`, border: `1px solid ${C.success}30`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                    <button onClick={async () => { if (row.id) { await approveM.mutateAsync({ stepId: row.id }); } }} style={{ width: 28, height: 28, background: `${C.success}18`, border: `1px solid ${C.success}30`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
                       <Check size={14} color={C.success} />
                     </button>
-                    <button style={{ width: 28, height: 28, background: `${C.danger}18`, border: `1px solid ${C.danger}30`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                    <button onClick={async () => { if (row.id) { await rejectM.mutateAsync({ stepId: row.id, note: "Rejected from dashboard" }); } }} style={{ width: 28, height: 28, background: `${C.danger}18`, border: `1px solid ${C.danger}30`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
                       <X size={14} color={C.danger} />
                     </button>
                   </div>
                 </div>
               ))}
             </div>
-            <button style={{ width: "100%", padding: "10px", background: `${C.primary}12`, border: `1px solid ${C.primary}20`, borderRadius: 12, color: C.primary, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            <button onClick={() => navigate('/approvals')} style={{ width: "100%", padding: "10px", background: `${C.primary}12`, border: `1px solid ${C.primary}20`, borderRadius: 12, color: C.primary, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
               View All Approvals →
             </button>
           </div>
@@ -231,13 +263,13 @@ export default function DashboardPage() {
           <div style={{ background: "var(--bg-elevated)", border: `1px solid var(--border-default)`, borderRadius: 20, padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <h3 style={{ color: C.heading, fontWeight: 700, fontSize: 16, margin: 0 }}>Recent Documents</h3>
-              <button style={{ color: C.secondary, fontSize: 12, background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+              <button onClick={() => navigate('/documents')} style={{ color: C.secondary, fontSize: 12, background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
                 All <ArrowUpRight size={12} />
               </button>
             </div>
             <div style={{ height: 1, background: C.border }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              {recentDocs.map((doc) => (
+              {displayRecent.map((doc) => (
                 <div key={doc.name}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                     <FileText size={14} color={C.secondary} />
@@ -360,7 +392,12 @@ export default function DashboardPage() {
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-              {statsData.map((s) => (
+              {[
+                { label: "Active Docs", value: stats?.documents_submitted.toString() || "0", change: "+0%", up: true, icon: FileText, color: C.primary },
+                { label: "Pending", value: stats?.pending_approvals.toString() || "0", change: "+0", up: false, icon: Clock, color: C.warning },
+                { label: "Teams", value: "12", change: "0 new", up: true, icon: Users, color: C.purple },
+                { label: "Completed", value: `${stats ? Math.round((stats.documents_approved / Math.max(1, stats.documents_submitted)) * 100) : 0}%`, change: "+0%", up: true, icon: TrendingUp, color: C.success },
+              ].map((s) => (
                 <div
                   key={s.label}
                   style={{

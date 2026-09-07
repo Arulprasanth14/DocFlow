@@ -276,6 +276,7 @@ export interface DocumentFilterParams {
   dept_id?: string;
   submitted_by?: string;
   search?: string;
+  sort?: string;
 }
 
 export interface DocumentVersion {
@@ -381,9 +382,9 @@ export interface WorkflowStepInstance {
   step_order: number;
   step_definition: WorkflowStepDefinition;
 
-  // Expanded
   assigned_user?: AuthUser;
   decided_by_user?: AuthUser;
+  workflow_instance?: WorkflowInstance;
 }
 
 export interface WorkflowInstance {
@@ -395,6 +396,7 @@ export interface WorkflowInstance {
   started_at: string;
   completed_at: string | null;
   steps: WorkflowStepInstance[];
+  document?: Document;
 }
 
 // ── Comments ──────────────────────────────────────────────────────────────────

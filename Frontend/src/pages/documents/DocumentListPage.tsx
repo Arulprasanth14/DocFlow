@@ -386,6 +386,7 @@ export default function DocumentListPage() {
   const [selectedTypeId, setSelectedTypeId] = useState('');
   const [selectedDeptId, setSelectedDeptId] = useState('');
   const [page, setPage] = useState(1);
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
 
   // Selection state
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -402,6 +403,7 @@ export default function DocumentListPage() {
     doc_type_id: selectedTypeId || undefined,
     dept_id: selectedDeptId || undefined,
     search: searchQuery || undefined,
+    sort: sortOrder === 'desc' ? '-updated_at' : '+updated_at',
   });
 
   const { data: docTypes = [] } = useDocumentTypes(true);
@@ -708,6 +710,7 @@ export default function DocumentListPage() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
             <button
+              onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
               style={{
                 display: 'flex', alignItems: 'center', gap: 6,
                 fontSize: '0.8rem', padding: '7px 12px',
@@ -717,7 +720,7 @@ export default function DocumentListPage() {
               }}
             >
               <ArrowUpDown size={13} />
-              Newest first
+              {sortOrder === 'desc' ? 'Newest first' : 'Oldest first'}
             </button>
           </div>
         </div>

@@ -9,6 +9,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/store/authStore';
 import { useLogout } from '@/hooks/useAuth';
+import { useNotifications, useUnreadCount, useMarkAllRead } from '@/hooks/useNotifications';
 
 // ── Nav item type ──────────────────────────────────────────────────────────────
 interface NavItem {
@@ -64,6 +65,12 @@ const navIcons = {
       <circle cx="12" cy="12" r="3"/>
       <path d="M19.07 4.93l-1.41 1.41M5.34 18.66l-1.41 1.41M19.07 19.07l-1.41-1.41M5.34 5.34L3.93 3.93"/>
       <path d="M12 2v2M12 20v2M2 12h2M20 12h2"/>
+    </svg>
+  ),
+  chat: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      <path d="M8 10h.01M12 10h.01M16 10h.01"/>
     </svg>
   ),
   org: (
@@ -235,13 +242,20 @@ export default function AppLayout() {
   const logout = useLogout();
   const navigate = useNavigate();
 
+  const { data: unreadCountData } = useUnreadCount();
+  const unreadCount = unreadCountData?.count || 0;
+  const { data: notificationsData } = useNotifications({ limit: 5 });
+  const markAllReadM = useMarkAllRead();
+  const notifications = notificationsData?.items || [];
+
   const navItemsMain: NavItem[] = [
     { to: '/dashboard', label: 'Dashboard', icon: navIcons.dashboard },
     { to: '/documents', label: 'Documents', icon: navIcons.documents },
     { to: '/approvals', label: 'Approvals', icon: navIcons.approvals },
-    { to: '/workflows', label: 'Workflows', icon: navIcons.workflows, comingSoon: true },
-    { to: '/search', label: 'Search', icon: navIcons.search, comingSoon: true },
-    { to: '/reports', label: 'Analytics', icon: navIcons.analytics, comingSoon: true },
+    { to: '/workflows', label: 'Workflows', icon: navIcons.workflows },
+    { to: '/search', label: 'Search', icon: navIcons.search },
+    { to: '/analytics', label: 'Analytics', icon: navIcons.analytics },
+    { to: '/chat', label: 'AI Chat', icon: navIcons.chat },
   ];
 
   const navItemsAdmin: NavItem[] = [
@@ -249,7 +263,7 @@ export default function AppLayout() {
     { to: '/admin/departments', label: 'Departments', icon: navIcons.depts },
     { to: '/admin/roles', label: 'Roles & Perms', icon: navIcons.roles },
     { to: '/admin/members', label: 'Members', icon: navIcons.members },
-    { to: '/admin/doc-types', label: 'Doc Types', icon: navIcons.docTypes },
+    { to: '/admin/document-types', label: 'Doc Types', icon: navIcons.docTypes },
     { to: '/settings', label: 'Settings', icon: navIcons.settings },
   ];
 
@@ -292,7 +306,9 @@ export default function AppLayout() {
           overflow: 'hidden',
         }}>
         {/* Logo */}
-        <div style={{
+        <div 
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          style={{
           height: 'var(--header-height)',
           display: 'flex',
           alignItems: 'center',
@@ -300,6 +316,7 @@ export default function AppLayout() {
           borderBottom: '1px solid var(--border-subtle)',
           gap: '10px',
           flexShrink: 0,
+          cursor: 'pointer',
         }}>
           <div style={{
             width: '32px', height: '32px', borderRadius: '8px',
@@ -365,7 +382,7 @@ export default function AppLayout() {
             {!sidebarCollapsed && (
               <div style={{ flex: 1, overflow: 'hidden' }}>
                 <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{user?.name ?? 'Alex Johnson'}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>Senior Manager</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{orgMembership?.role_name ?? 'Member'}</div>
               </div>
             )}
             {!sidebarCollapsed && (
@@ -443,11 +460,13 @@ export default function AppLayout() {
                   <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
                 </svg>
                 {/* Unread Badge */}
-                <span style={{
-                  position: 'absolute', top: 4, right: 6, width: 8, height: 8,
-                  background: 'var(--color-primary-500)', borderRadius: '50%',
-                  border: '2px solid var(--bg-surface)'
-                }} />
+                {unreadCount > 0 && (
+                  <span style={{
+                    position: 'absolute', top: 4, right: 6, width: 8, height: 8,
+                    background: 'var(--color-primary-500)', borderRadius: '50%',
+                    border: '2px solid var(--bg-surface)'
+                  }} />
+                )}
               </button>
 
               {/* Notification Dropdown Placeholder */}
@@ -470,8 +489,27 @@ export default function AppLayout() {
                         padding: '16px',
                       }}
                     >
-                      <h4 style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>Notifications</h4>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No new notifications.</p>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <h4 style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Notifications</h4>
+                        {unreadCount > 0 && (
+                          <button onClick={() => markAllReadM.mutate()} style={{ background: 'none', border: 'none', fontSize: '0.75rem', color: 'var(--color-primary-400)', cursor: 'pointer', padding: 0 }}>Mark all read</button>
+                        )}
+                      </div>
+                      {notifications.length === 0 ? (
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No new notifications.</p>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '300px', overflowY: 'auto' }}>
+                          {notifications.map(n => (
+                            <div key={n.id} style={{ display: 'flex', gap: '8px', opacity: n.read_at ? 0.7 : 1 }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '0.8125rem', color: 'var(--text-primary)', fontWeight: n.read_at ? 400 : 600 }}>{n.title}</div>
+                                {n.body && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '2px' }}>{n.body}</div>}
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '4px' }}>{new Date(n.created_at).toLocaleString()}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </motion.div>
                   </>
                 )}
