@@ -90,17 +90,311 @@
 
 /* ── Light Theme Override ───────────────────────────────────────────────────── */
 [data-theme="light"] {
-  --bg-base:        hsl(220, 20%, 97%);
-  --bg-surface:     hsl(220, 20%, 100%);
-  --bg-elevated:    hsl(220, 20%, 96%);
-  --bg-overlay:     hsl(220, 15%, 92%);
-  --glass-bg:       hsla(220, 20%, 100%, 0.85);
-  --glass-border:   hsla(217, 50%, 50%, 0.15);
-  --text-primary:   hsl(222, 47%, 10%);
-  --text-secondary: hsl(222, 30%, 35%);
-  --text-muted:     hsl(222, 20%, 55%);
-  --border-subtle:  hsla(220, 20%, 50%, 0.1);
-  --border-default: hsla(220, 20%, 40%, 0.18);
+  /* ── Background layers ── */
+  --bg-base:           #EEF5FC;
+  --bg-surface:        #E8F2FA;
+  --bg-elevated:       #F8FBFF;
+  --bg-overlay:        #F1F7FD;
+  --bg-main:           #EEF5FC;
+  --bg-card:           #F8FBFF;
+
+  /* ── Glass ── */
+  --glass-bg:          hsla(210, 60%, 98%, 0.88);
+  --glass-border:      hsla(213, 60%, 60%, 0.14);
+  --glass-blur:        12px;
+
+  /* ── Primary brand blue ── */
+  --color-primary-50:  #EDF5FD;
+  --color-primary-100: #DCEBFA;
+  --color-primary-200: #C7DDF5;
+  --color-primary-300: #8DB9EA;
+  --color-primary-400: #4A8FD4;
+  --color-primary-500: #2F6FD6;
+  --color-primary-600: #255FBD;
+  --color-primary-700: #1F56AD;
+  --color-primary-800: #183E82;
+  --color-primary-900: #102860;
+
+  /* ── Accent (purple — kept for dark compatibility, softened) ── */
+  --color-accent-400:  #8175D5;
+  --color-accent-500:  #6256B8;
+  --color-accent-600:  #4E469A;
+
+  /* ── Semantic colors (pastel for light mode) ── */
+  --color-success-400: #4FAF83;
+  --color-success-500: #247A4D;
+  --color-warning-400: #E8B84A;
+  --color-warning-500: #9A6B00;
+  --color-error-400:   #D96B6B;
+  --color-error-500:   #B54748;
+  --color-info-400:    #2F6FD6;
+
+  /* ── Text ── */
+  --text-primary:      #183153;
+  --text-secondary:    #49627D;
+  --text-muted:        #71869D;
+  --text-disabled:     #9AAABD;
+
+  /* ── Borders ── */
+  --border-subtle:     #E7EFF7;
+  --border-default:    #D5E3F0;
+  --border-strong:     #BDD0E4;
+
+  /* ── Shadows — very soft, navy-tinted ── */
+  --shadow-sm:         0 1px 3px rgba(24, 49, 83, 0.06);
+  --shadow-md:         0 4px 12px rgba(24, 49, 83, 0.08);
+  --shadow-lg:         0 8px 24px rgba(24, 49, 83, 0.10);
+  --shadow-glow:       0 0 0 3px rgba(47, 111, 214, 0.12);
+}
+
+/* ── Light Mode: Body & App background ─────────────────────────────────────── */
+[data-theme="light"] body {
+  background-color: #EEF5FC;
+  color: #183153;
+}
+
+/* ── Light Mode: Scrollbar ──────────────────────────────────────────────────── */
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #D5E3F0;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #BDD0E4;
+}
+
+/* ── Light Mode: Glass card ─────────────────────────────────────────────────── */
+[data-theme="light"] .glass-card {
+  background: #F8FBFF;
+  border-color: #DCE7F1;
+  box-shadow: 0 1px 3px rgba(24, 49, 83, 0.06);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ── Light Mode: Status badges ──────────────────────────────────────────────── */
+[data-theme="light"] .status-draft            { background: #EEF1F5; color: #5F6B7A; border-color: #DCE7F1; }
+[data-theme="light"] .status-submitted        { background: #E4F0FC; color: #2F6FD6; border-color: #C7DDF5; }
+[data-theme="light"] .status-under_review     { background: #E8E9FC; color: #6256B8; border-color: #CDD0F7; }
+[data-theme="light"] .status-pending_approval { background: #FFF4D6; color: #9A6B00; border-color: #F5DFA0; }
+[data-theme="light"] .status-approved         { background: #E5F6EE; color: #247A4D; border-color: #A8DFC0; }
+[data-theme="light"] .status-rejected         { background: #FDEBEC; color: #B54748; border-color: #F5B8B9; }
+[data-theme="light"] .status-revision_requested { background: #FFF4D6; color: #9A6B00; border-color: #F5DFA0; }
+[data-theme="light"] .status-archived         { background: #EEF2F7; color: #66758A; border-color: #D5E0EC; }
+[data-theme="light"] .status-cancelled        { background: #FCEAEA; color: #A33A3A; border-color: #F5C0C0; }
+
+/* ── Light Mode: Priority ────────────────────────────────────────────────────── */
+[data-theme="light"] .priority-high   { color: #9A6B00; }
+[data-theme="light"] .priority-urgent { color: #B54748; }
+
+/* ── Light Mode: Buttons ────────────────────────────────────────────────────── */
+[data-theme="light"] .btn-primary {
+  background: #2F6FD6;
+  color: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(24, 49, 83, 0.12);
+}
+[data-theme="light"] .btn-primary:hover {
+  background: #255FBD;
+  box-shadow: 0 4px 12px rgba(47, 111, 214, 0.22);
+  transform: translateY(-1px);
+}
+
+[data-theme="light"] .btn-secondary {
+  background: #E8F2FC;
+  color: #2F6FD6;
+  border-color: #D5E3F0;
+}
+[data-theme="light"] .btn-secondary:hover {
+  background: #DCEBFA;
+  border-color: #BDD0E4;
+}
+
+[data-theme="light"] .btn-ghost {
+  background: transparent;
+  color: #2F6FD6;
+}
+[data-theme="light"] .btn-ghost:hover {
+  background: #E8F2FC;
+  color: #255FBD;
+}
+
+[data-theme="light"] .btn-danger {
+  background: #FDEBEC;
+  color: #B54748;
+  border-color: #F5B8B9;
+}
+[data-theme="light"] .btn-danger:hover {
+  background: #FCEAEA;
+}
+
+/* ── Light Mode: Input system ────────────────────────────────────────────────── */
+[data-theme="light"] .input {
+  background: #F8FBFF;
+  border-color: #D5E3F0;
+  color: #183153;
+}
+[data-theme="light"] .input::placeholder {
+  color: #71869D;
+}
+[data-theme="light"] .input:focus {
+  border-color: #2F6FD6;
+  background: #FFFFFF;
+  box-shadow: 0 0 0 3px #DCEBFA;
+}
+
+/* ── Light Mode: App header ──────────────────────────────────────────────────── */
+[data-theme="light"] .app-header {
+  background: rgba(238, 245, 252, 0.92) !important;
+  border-bottom-color: #D5E3F0 !important;
+}
+
+/* Target the sticky header rendered inline in AppLayout */
+[data-theme="light"] header[style] {
+  background: rgba(238, 245, 252, 0.92) !important;
+  border-bottom-color: #D5E3F0 !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+}
+
+/* ── Light Mode: Sidebar ────────────────────────────────────────────────────── */
+[data-theme="light"] .app-sidebar {
+  background: #E8F2FA !important;
+  border-right-color: #D5E3F0 !important;
+}
+
+/* ── Light Mode: Mobile overlay ──────────────────────────────────────────────── */
+[data-theme="light"] .mobile-overlay {
+  background: rgba(24, 49, 83, 0.35) !important;
+}
+
+/* ── Light Mode: Auth card ───────────────────────────────────────────────────── */
+[data-theme="light"] .auth-card {
+  background: #FFFFFF;
+  box-shadow: 0 8px 32px rgba(24, 49, 83, 0.10), 0 0 0 1px #DCE7F1;
+}
+
+/* ── Light Mode: Spinner ────────────────────────────────────────────────────── */
+[data-theme="light"] .spinner {
+  border-color: #D5E3F0;
+  border-top-color: #2F6FD6;
+}
+
+/* ── Light Mode: Gradient text (ensure it stays vibrant) ──────────────────── */
+[data-theme="light"] .gradient-text {
+  background: linear-gradient(135deg, #2F6FD6, #6256B8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Light Mode: Nav active state (sidebar) ──────────────────────────────────── */
+[data-theme="light"] a[style*="hsla(217, 100%, 50%, 0.12)"] {
+  background: #D7E9FA !important;
+  border-color: #B8D4F0 !important;
+  color: #245EAA !important;
+}
+
+/* ── Light Mode: Dashboard ambient blobs (hide harsh dark glows) ─────────────── */
+[data-theme="light"] .bg-blob-blue {
+  background: radial-gradient(circle, rgba(47, 111, 214, 0.07) 0%, transparent 68%) !important;
+  filter: blur(200px) !important;
+}
+[data-theme="light"] .bg-blob-purple {
+  background: radial-gradient(circle, rgba(98, 86, 184, 0.06) 0%, transparent 65%) !important;
+  filter: blur(180px) !important;
+}
+
+/* ── Light Mode: Quick-action card hover (lighter shadow) ────────────────────── */
+[data-theme="light"] .quick-action-card:hover {
+  box-shadow: 0 12px 32px rgba(24, 49, 83, 0.12) !important;
+}
+[data-theme="light"] .quick-action-card:hover .quick-action-icon {
+  background: rgba(47, 111, 214, 0.10) !important;
+  filter: none !important;
+}
+
+/* ── Light Mode: Progress bar track ─────────────────────────────────────────── */
+[data-theme="light"] .progress-track,
+[data-theme="light"] [style*="var(--bg-overlay)"] {
+  /* The track uses --bg-overlay which is correctly set to #F1F7FD */
+}
+
+/* ── Light Mode: Recharts tooltip ────────────────────────────────────────────── */
+[data-theme="light"] .recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #FFFFFF !important;
+  border-color: #D5E3F0 !important;
+  color: #183153 !important;
+  box-shadow: 0 4px 12px rgba(24, 49, 83, 0.10) !important;
+}
+
+/* ── Light Mode: Notification / user-menu dropdown ──────────────────────────── */
+[data-theme="light"] [class*="dropdown"],
+[data-theme="light"] [role="menu"] {
+  background: #FFFFFF;
+  border-color: #D5E3F0;
+  box-shadow: 0 8px 24px rgba(24, 49, 83, 0.10);
+}
+
+/* ── Light Mode: Table aesthetics ───────────────────────────────────────────── */
+[data-theme="light"] table {
+  background: #F8FBFF;
+}
+[data-theme="light"] thead,
+[data-theme="light"] th {
+  background: #EAF3FB;
+  color: #49627D;
+}
+[data-theme="light"] tr:hover {
+  background: #EEF6FD;
+}
+[data-theme="light"] td {
+  color: #183153;
+  border-color: #E1EBF4;
+}
+[data-theme="light"] tr.selected,
+[data-theme="light"] tr[aria-selected="true"] {
+  background: #E2F0FC;
+}
+
+/* ── Light Mode: Sidebar logo title text ─────────────────────────────────────
+   The "DocFlow" text in AppLayout is hardcoded color:white.
+   We override the span inside the sidebar logo area to use the brand navy.     */
+[data-theme="light"] .app-sidebar > div:first-child span {
+  color: #183153 !important;
+}
+
+/* ── Light Mode: Sidebar section labels ("ADMINISTRATION", "WORKSPACE") ─────── */
+[data-theme="light"] .app-sidebar p[style*="text-disabled"],
+[data-theme="light"] .app-sidebar div[style*="text-disabled"] {
+  color: #9AAABD !important;
+}
+
+/* ── Light Mode: SLA indicators — keep them readable in soft palette ─────────── */
+[data-theme="light"] .sla-on-time  { color: #247A4D; }
+[data-theme="light"] .sla-warning  { color: #9A6B00; }
+[data-theme="light"] .sla-breached { color: #B54748; }
+
+/* ── Light Mode: AppLoadingScreen ────────────────────────────────────────────── */
+[data-theme="light"] .app-loading-screen {
+  background: #EEF5FC;
+}
+
+/* ── Light Mode: ConfirmDialog / Modal overlays ───────────────────────────────
+   Modals use pure white as elevated surfaces — this is correct per spec.       */
+[data-theme="light"] [role="dialog"],
+[data-theme="light"] .modal,
+[data-theme="light"] .confirm-dialog {
+  background: #FFFFFF;
+  border-color: #D5E3F0;
+  box-shadow: 0 8px 32px rgba(24, 49, 83, 0.12), 0 0 0 1px #DCE7F1;
+}
+
+/* ── Light Mode: Empty state icon ────────────────────────────────────────────── */
+[data-theme="light"] .empty-state svg {
+  opacity: 0.35;
+}
+
+/* ── Light Mode: Notification badge dot on bell icon ────────────────────────── */
+[data-theme="light"] [style*="border: 2px solid var(--bg-surface)"] {
+  border-color: #E8F2FA !important;
 }
 
 /* ── Base Styles ────────────────────────────────────────────────────────────── */

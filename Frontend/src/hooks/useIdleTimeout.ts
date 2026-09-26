@@ -30,18 +30,7 @@ export function useIdleTimeout(isAuthenticated: boolean) {
   useEffect(() => {
     if (!isAuthenticated) return;
 
-    // 1. Update timestamp on user activity (throttled)
-    const touch = throttle(() => {
-      localStorage.setItem(IDLE_KEY, String(Date.now()));
-    }, THROTTLE_MS);
-    
-    // Initialize touch
-    touch();
-
-    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
-    events.forEach((e) => window.addEventListener(e, touch, { passive: true }));
-
-    // 2. Check on load + every 60s
+    // 1. Check on load + every 60s (Done FIRST before overwriting timestamp)
     function check() {
       const last = parseInt(localStorage.getItem(IDLE_KEY) ?? '0', 10);
       if (last && Date.now() - last > IDLE_LIMIT_MS) {
@@ -53,6 +42,17 @@ export function useIdleTimeout(isAuthenticated: boolean) {
     }
     check();
     const interval = setInterval(check, 60_000);
+
+    // 2. Update timestamp on user activity (throttled)
+    const touch = throttle(() => {
+      localStorage.setItem(IDLE_KEY, String(Date.now()));
+    }, THROTTLE_MS);
+    
+    // Initialize touch AFTER checking for old timeout
+    touch();
+
+    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+    events.forEach((e) => window.addEventListener(e, touch, { passive: true }));
 
     // 3. Cross-tab sync via storage event
     const onStorage = (e: StorageEvent) => {

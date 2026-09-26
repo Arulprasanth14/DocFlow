@@ -41,10 +41,10 @@ const C = {
 
 // ── sample data ────────────────────────────────────────────────────
 const pendingApprovals = [
-  { doc: "Q4 Financial Report", owner: "Sarah Chen", avatar: "SC", time: "2h ago", status: "urgent" },
-  { doc: "Product Roadmap 2025", owner: "Marcus Lee", avatar: "ML", time: "4h ago", status: "pending" },
-  { doc: "HR Policy Update", owner: "Anika Patel", avatar: "AP", time: "6h ago", status: "pending" },
-  { doc: "Vendor Contract — AWS", owner: "James Wright", avatar: "JW", time: "1d ago", status: "review" },
+  { id: "mock1", doc: "Q4 Financial Report", owner: "Sarah Chen", avatar: "SC", time: "2h ago", status: "urgent" },
+  { id: "mock2", doc: "Product Roadmap 2025", owner: "Marcus Lee", avatar: "ML", time: "4h ago", status: "pending" },
+  { id: "mock3", doc: "HR Policy Update", owner: "Anika Patel", avatar: "AP", time: "6h ago", status: "pending" },
+  { id: "mock4", doc: "Vendor Contract — AWS", owner: "James Wright", avatar: "JW", time: "1d ago", status: "review" },
 ];
 
 const recentDocs = [

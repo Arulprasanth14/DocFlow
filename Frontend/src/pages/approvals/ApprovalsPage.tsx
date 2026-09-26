@@ -33,24 +33,24 @@ interface Approval {
 // ─── Design tokens ────────────────────────────────────────────────────────────
 
 const C = {
-  bg:          "#0B0D12",
-  surface:     "#12141C",
-  hover:       "#161923",
-  text:        "#F5F6F8",
-  muted:       "#8B90A0",
-  accent:      "#6366F1",
-  accentHover: "#5457E5",
-  accentTint:  "rgba(99,102,241,0.12)",
-  accentSel:   "rgba(99,102,241,0.08)",
-  green:       "#22C55E",
-  greenTint:   "rgba(34,197,94,0.12)",
-  red:         "#EF4444",
-  redTint:     "rgba(239,68,68,0.12)",
-  amber:       "#F59E0B",
-  amberTint:   "rgba(245,158,11,0.12)",
-  blue:        "#3B82F6",
-  blueTint:    "rgba(59,130,246,0.12)",
-  border:      "rgba(255,255,255,0.06)",
+  bg:          "var(--bg-base)",
+  surface:     "var(--bg-elevated)",
+  hover:       "var(--bg-overlay)",
+  text:        "var(--text-primary)",
+  muted:       "var(--text-muted)",
+  accent:      "var(--color-primary-500)",
+  accentHover: "var(--color-primary-400)",
+  accentTint:  "color-mix(in srgb, var(--color-primary-500) 12%, transparent)",
+  accentSel:   "color-mix(in srgb, var(--color-primary-500) 8%, transparent)",
+  green:       "var(--color-success-500)",
+  greenTint:   "color-mix(in srgb, var(--color-success-500) 12%, transparent)",
+  red:         "var(--color-error-500)",
+  redTint:     "color-mix(in srgb, var(--color-error-500) 12%, transparent)",
+  amber:       "var(--color-warning-500)",
+  amberTint:   "color-mix(in srgb, var(--color-warning-500) 12%, transparent)",
+  blue:        "var(--color-primary-400)",
+  blueTint:    "color-mix(in srgb, var(--color-primary-400) 12%, transparent)",
+  border:      "var(--border-default)",
 };
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
@@ -67,10 +67,8 @@ function mapStepToApproval(step: WorkflowStepInstance): Approval {
   const requestedAt = new Date(step.workflow_instance?.started_at || Date.now()).toLocaleDateString();
   
   let status: Status = "pending";
-  if (step.status === "completed") {
-     if (step.decision === "approved") status = "approved";
-     else if (step.decision === "rejected") status = "rejected";
-  }
+  if (step.status === "approved") status = "approved";
+  else if (step.status === "rejected") status = "rejected";
 
   return {
     id: step.id,
@@ -164,8 +162,8 @@ export default function ApprovalsPage() {
     const allCount = (allApprovalsQ.data?.items || []).length;
     return {
       pending:  pendCount,
-      approved: (allApprovalsQ.data?.items || []).filter(a => a.status === "completed" && a.decision === "approved").length,
-      rejected: (allApprovalsQ.data?.items || []).filter(a => a.status === "completed" && a.decision === "rejected").length,
+      approved: (allApprovalsQ.data?.items || []).filter(a => a.status === "approved").length,
+      rejected: (allApprovalsQ.data?.items || []).filter(a => a.status === "rejected").length,
       all:      allCount,
     };
   }, [myQueueQ.data, allApprovalsQ.data]);
