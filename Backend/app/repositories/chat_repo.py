@@ -26,8 +26,10 @@ class ConversationRepository:
         workflow_instance_id: uuid.UUID | None = None,
         approval_step_id: uuid.UUID | None = None,
         title: str | None = None,
+        org_id: uuid.UUID | None = None,
     ) -> Conversation:
         conv = Conversation(
+            org_id=org_id,
             kind=kind,
             created_by=created_by,
             workflow_instance_id=workflow_instance_id,
@@ -38,16 +40,39 @@ class ConversationRepository:
         await self.db.flush()
         return conv
 
-    async def get_by_id(self, conversation_id: uuid.UUID) -> Conversation | None:
-        return await self.db.get(Conversation, conversation_id)
+    async def get_by_id(
+        self, conversation_id: uuid.UUID, org_id: uuid.UUID | None = None
+    ) -> Conversation | None:
+        """
+        Fetch a conversation, optionally enforcing the tenant boundary at
+        the data layer (§15). `org_id=None` preserves the older
+        participation-only behaviour for callers that have already checked
+        membership; new callers should always pass it.
 
-    async def get_by_approval_step(self, approval_step_id: uuid.UUID) -> Conversation | None:
+        Rows created before conversations had an org_id have org_id NULL and
+        are matched by participation alone rather than being made invisible.
+        """
+        conv = await self.db.get(Conversation, conversation_id)
+        if conv is None:
+            return None
+        if org_id is not None and conv.org_id is not None and conv.org_id != org_id:
+            return None
+        return conv
+
+    async def get_by_approval_step(
+        self, approval_step_id: uuid.UUID, org_id: uuid.UUID | None = None
+    ) -> Conversation | None:
         """Get the workflow-context conversation for a specific approval step."""
-        result = await self.db.execute(
-            select(Conversation).where(
-                Conversation.approval_step_id == approval_step_id
-            )
+        q = select(Conversation).where(
+            Conversation.approval_step_id == approval_step_id
         )
+        if org_id is not None:
+            from sqlalchemy import or_
+
+            q = q.where(
+                or_(Conversation.org_id == org_id, Conversation.org_id.is_(None))
+            )
+        result = await self.db.execute(q)
         return result.scalar_one_or_none()
 
     async def list_for_user(
@@ -56,9 +81,10 @@ class ConversationRepository:
         kind: str | None = None,
         page: int = 1,
         limit: int = 20,
+        org_id: uuid.UUID | None = None,
     ) -> tuple[Sequence[Conversation], int]:
-        """List conversations where user is a participant."""
-        from sqlalchemy import func
+        """List conversations where user is a participant, scoped to the org."""
+        from sqlalchemy import func, or_
         base_q = (
             select(Conversation)
             .join(
@@ -67,6 +93,10 @@ class ConversationRepository:
             )
             .where(ConversationParticipant.user_id == user_id)
         )
+        if org_id is not None:
+            base_q = base_q.where(
+                or_(Conversation.org_id == org_id, Conversation.org_id.is_(None))
+            )
         if kind:
             base_q = base_q.where(Conversation.kind == kind)
 
@@ -110,6 +140,19 @@ class ConversationRepository:
             )
         )
         return result.scalar_one_or_none() is not None
+
+    async def get_participant_ids(self, conversation_id: uuid.UUID) -> list[uuid.UUID]:
+        """
+        Participant user_ids for a conversation, fetched explicitly rather
+        than via Conversation.participants (lazy="noload" — reading it off a
+        bare db.get()'d Conversation always returns an empty list).
+        """
+        result = await self.db.execute(
+            select(ConversationParticipant.user_id).where(
+                ConversationParticipant.conversation_id == conversation_id,
+            )
+        )
+        return list(result.scalars().all())
 
     async def update_last_read(self, conversation_id: uuid.UUID, user_id: uuid.UUID) -> None:
         result = await self.db.execute(

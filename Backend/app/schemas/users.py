@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.schemas.auth import OrgMembershipResponse, UserResponse
+from app.schemas.auth import OrgMembershipResponse, PendingRequestInfo, UserResponse
 
 
 class SyncUserRequest(BaseModel):
@@ -29,3 +29,5 @@ class SyncUserResponse(BaseModel):
     """Response from POST /users/me/sync."""
     user: UserResponse
     org_membership: OrgMembershipResponse | None
+    state: str = "NO_ORG"
+    pending_request: PendingRequestInfo | None = None

@@ -4,8 +4,8 @@
  * version audit trail modal, slide-over comment drawer, and file attachments manager.
  */
 
-import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   useDocument,
   useDocumentType,
@@ -14,25 +14,39 @@ import {
   useDocumentAttachments,
   useAddDocumentAttachment,
   useRemoveDocumentAttachment,
+  useUploadFile,
 } from '@/hooks/useDocuments';
+import { useReviseAndResume, useCancelWorkflow } from '@/hooks/useWorkflows';
+import documentsApi from '@/lib/api/documents';
 import { useDepartments } from '@/hooks/useOrg';
+import { useAuthStore } from '@/store/authStore';
 import DynamicFormRenderer, { validateFormSchema } from '@/components/documents/DynamicFormRenderer';
 import CommentDrawer from '@/components/documents/CommentDrawer';
 import VersionHistoryModal from '@/components/documents/VersionHistoryModal';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { WorkflowChatPanel } from '@/components/ui/WorkflowChatPanel';
+import SubmitWorkflowModal from '@/components/documents/SubmitWorkflowModal';
 
+// NOTE: must match Backend/app/models/document.py::DocumentStatus exactly
+// (draft, submitted, pending, approved, rejected, sent_back, archived, expired).
 function getStatusBadge(status: string) {
   switch (status) {
     case 'approved':
       return { label: 'Approved', bg: 'hsla(150, 80%, 40%, 0.15)', color: 'var(--color-success-400)' };
-    case 'in_review':
-      return { label: 'In Review', bg: 'hsla(217, 100%, 50%, 0.15)', color: 'var(--color-primary-300)' };
+    case 'pending':
+      return { label: 'Pending Approval', bg: 'hsla(217, 100%, 50%, 0.15)', color: 'var(--color-primary-300)' };
+    case 'sent_back':
+      return { label: 'Sent Back', bg: 'hsla(280, 75%, 60%, 0.15)', color: 'var(--color-accent-400)' };
     case 'submitted':
       return { label: 'Submitted', bg: 'hsla(260, 90%, 65%, 0.15)', color: 'var(--color-accent-400)' };
     case 'rejected':
       return { label: 'Rejected', bg: 'hsla(0, 84%, 60%, 0.15)', color: 'var(--color-error-400)' };
     case 'archived':
       return { label: 'Archived', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
+    case 'expired':
+      return { label: 'Expired', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
+    case 'cancelled':
+      return { label: 'Cancelled', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
     case 'draft':
     default:
       return { label: 'Draft', bg: 'hsla(45, 90%, 50%, 0.15)', color: 'var(--color-warning-400)' };
@@ -42,6 +56,7 @@ function getStatusBadge(status: string) {
 export default function DocumentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // Queries
   const { data: doc, isLoading: docLoading } = useDocument(id || '');
@@ -54,6 +69,10 @@ export default function DocumentDetailPage() {
   const submitDoc = useSubmitDocument();
   const addAtt = useAddDocumentAttachment();
   const removeAtt = useRemoveDocumentAttachment();
+  const uploadFile = useUploadFile();
+  const reviseAndResume = useReviseAndResume();
+  const cancelWorkflow = useCancelWorkflow();
+  const currentUserId = useAuthStore((s) => s.user?.id);
 
   // UI state
   const [isEditing, setIsEditing] = useState(false);
@@ -68,14 +87,29 @@ export default function DocumentDetailPage() {
   // Modals / Drawers state
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [workflowChatOpen, setWorkflowChatOpen] = useState(false);
+  const [submitModalOpen, setSubmitModalOpen] = useState(false);
 
   // New Attachment state
-  const [newAttFileId, setNewAttFileId] = useState('');
+  const [newAttFile, setNewAttFile] = useState<File | null>(null);
   const [newAttLabel, setNewAttLabel] = useState('');
   const [attAdding, setAttAdding] = useState(false);
+  const [attError, setAttError] = useState('');
   const [confirmState, setConfirmState] = useState<{ open: boolean; title: string; message: string; confirmLabel: string; onConfirm: () => void }>({
     open: false, title: '', message: '', confirmLabel: 'Confirm', onConfirm: () => {}
   });
+
+  // Arrived here straight from "Continue to Submit →" on the create page —
+  // open the review-and-submit modal immediately instead of making the user
+  // find the button again. Clear the state so a later back/refresh doesn't
+  // reopen it.
+  useEffect(() => {
+    if ((location.state as { openSubmit?: boolean } | null)?.openSubmit && doc?.status === 'draft') {
+      setSubmitModalOpen(true);
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.status]);
 
   if (docLoading) {
     return (
@@ -133,6 +167,8 @@ export default function DocumentDetailPage() {
       }
     }
 
+    const wasSentBack = doc.status === 'sent_back';
+
     try {
       await updateDoc.mutateAsync({
         id: doc.id,
@@ -142,9 +178,24 @@ export default function DocumentDetailPage() {
           dept_id: editDeptId || null,
           due_at: editDueAt ? new Date(editDueAt).toISOString() : null,
           form_data: editFormData,
-          change_reason: 'Updated document details',
+          change_reason: wasSentBack ? 'Revised after changes requested' : 'Updated document details',
         },
       });
+
+      // If the approver sent this back for changes, saving the edit also
+      // resumes the workflow at the same stage (revise-and-resume) instead of
+      // leaving the document stuck in 'sent_back' with no way forward.
+      if (wasSentBack) {
+        const versions = await documentsApi.listVersions(doc.id);
+        const latest = versions[0];
+        if (latest) {
+          await reviseAndResume.mutateAsync({
+            documentId: doc.id,
+            payload: { new_version_id: latest.id, note: 'Revised and resubmitted' },
+          });
+        }
+      }
+
       setIsEditing(false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to update document';
@@ -152,36 +203,97 @@ export default function DocumentDetailPage() {
     }
   };
 
-  const handleSubmitDoc = async () => {
+  const handleOpenSubmitModal = () => {
+    setSubmitModalOpen(true);
+  };
+
+  const handleConfirmSubmit = async ({ workflowTemplateId, dueAt }: { workflowTemplateId: string; dueAt: string | null }) => {
+    // submitDoc.isPending (checked by the modal's isSubmitting prop) already
+    // guards against a double-click re-firing this while the first request
+    // is in flight; the backend's own status check (only DRAFT documents
+    // can be submitted) is the second line of defense.
+    if (dueAt !== (doc.due_at || null)) {
+      await updateDoc.mutateAsync({ id: doc.id, data: { due_at: dueAt } });
+    }
+    await submitDoc.mutateAsync({
+      id: doc.id,
+      payload: { change_reason: 'Submitted for approval', workflow_template_id: workflowTemplateId },
+    });
+    setSubmitModalOpen(false);
+  };
+
+  const handleCancelWorkflow = async () => {
+    if (!doc.current_workflow_instance_id) return;
+    const instanceId = doc.current_workflow_instance_id;
     setConfirmState({
       open: true,
-      title: 'Submit for Approval',
-      message: 'Submit this draft document for review/approval?',
-      confirmLabel: 'Submit',
+      title: 'Cancel Workflow',
+      message: 'This withdraws the document from approval. This cannot be undone — you\'ll need to resubmit from scratch.',
+      confirmLabel: 'Cancel Workflow',
       onConfirm: async () => {
         setConfirmState(prev => ({ ...prev, open: false }));
-        await submitDoc.mutateAsync({ id: doc.id, changeReason: 'Submitted for approval' });
+        try {
+          await cancelWorkflow.mutateAsync({ instanceId, payload: { reason: 'Cancelled by submitter' } });
+        } catch {
+          // Error surfaced via cancelWorkflow.error in the UI if needed
+        }
       }
     });
   };
 
+  const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // matches Backend/app/core/storage.py MAX_FILE_SIZE_BYTES
+  const ALLOWED_MIME_TYPES = new Set([
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'image/jpeg',
+    'image/png',
+    'image/tiff',
+    'image/webp',
+    'text/plain',
+    'text/csv',
+  ]);
+
+  const handleFileSelected = (file: File | null) => {
+    setAttError('');
+    if (!file) {
+      setNewAttFile(null);
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setAttError(`File is too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)`);
+      setNewAttFile(null);
+      return;
+    }
+    if (!ALLOWED_MIME_TYPES.has(file.type)) {
+      setAttError(`File type "${file.type || 'unknown'}" is not allowed`);
+      setNewAttFile(null);
+      return;
+    }
+    setNewAttFile(file);
+  };
+
   const handleAddAttachment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newAttFileId.trim()) return;
+    if (!newAttFile) return;
 
     try {
       setAttAdding(true);
+      setAttError('');
+      const fileAssetId = await uploadFile.mutateAsync(newAttFile);
       await addAtt.mutateAsync({
         docId: doc.id,
         data: {
-          file_asset_id: newAttFileId.trim(),
+          file_asset_id: fileAssetId,
           label: newAttLabel.trim() || undefined,
         },
       });
-      setNewAttFileId('');
+      setNewAttFile(null);
       setNewAttLabel('');
-    } catch {
-      // Handled
+    } catch (err) {
+      setAttError(err instanceof Error ? err.message : 'Failed to upload file');
     } finally {
       setAttAdding(false);
     }
@@ -305,6 +417,17 @@ export default function DocumentDetailPage() {
             <span>Comments ({doc.comment_count || 0})</span>
           </button>
 
+          {doc.current_approval_step_id && (
+            <button
+              onClick={() => setWorkflowChatOpen(true)}
+              className="btn btn-secondary"
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              <span>🗨️</span>
+              <span>{doc.status === 'sent_back' ? 'Discuss Changes Requested' : 'Approver Discussion'}</span>
+            </button>
+          )}
+
           {isEditing ? (
             <>
               <button
@@ -316,9 +439,11 @@ export default function DocumentDetailPage() {
               <button
                 onClick={handleSave}
                 className="btn btn-primary"
-                disabled={updateDoc.isPending}
+                disabled={updateDoc.isPending || reviseAndResume.isPending}
               >
-                {updateDoc.isPending ? 'Saving...' : 'Save Changes'}
+                {updateDoc.isPending || reviseAndResume.isPending
+                  ? (doc.status === 'sent_back' ? 'Resubmitting...' : 'Saving...')
+                  : (doc.status === 'sent_back' ? 'Save & Resubmit →' : 'Save Changes')}
               </button>
             </>
           ) : (
@@ -327,17 +452,30 @@ export default function DocumentDetailPage() {
                 onClick={startEdit}
                 className="btn btn-secondary"
               >
-                Edit Document
+                {doc.status === 'sent_back' ? 'Revise Document' : 'Edit Document'}
               </button>
 
               {doc.status === 'draft' && (
                 <button
-                  onClick={handleSubmitDoc}
+                  onClick={handleOpenSubmitModal}
                   className="btn btn-primary"
                   disabled={submitDoc.isPending}
                   style={{ background: 'var(--color-primary-600)' }}
                 >
                   Submit for Approval →
+                </button>
+              )}
+
+              {doc.current_workflow_instance_id &&
+                ['pending', 'sent_back'].includes(doc.status) &&
+                doc.submitted_by === currentUserId && (
+                <button
+                  onClick={handleCancelWorkflow}
+                  className="btn btn-ghost"
+                  disabled={cancelWorkflow.isPending}
+                  style={{ color: 'var(--color-error-400)' }}
+                >
+                  {cancelWorkflow.isPending ? 'Cancelling...' : 'Cancel Workflow'}
                 </button>
               )}
             </>
@@ -572,12 +710,12 @@ export default function DocumentDetailPage() {
               }}
             >
               <input
-                type="text"
+                type="file"
                 className="input"
-                placeholder="Enter File Asset UUID..."
-                value={newAttFileId}
-                onChange={(e) => setNewAttFileId(e.target.value)}
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tiff,.webp,.txt,.csv"
+                onChange={(e) => handleFileSelected(e.target.files?.[0] ?? null)}
                 style={{ fontSize: '0.8rem' }}
+                disabled={attAdding}
               />
               <input
                 type="text"
@@ -586,14 +724,22 @@ export default function DocumentDetailPage() {
                 value={newAttLabel}
                 onChange={(e) => setNewAttLabel(e.target.value)}
                 style={{ fontSize: '0.8rem' }}
+                disabled={attAdding}
               />
+              {attError && (
+                <div style={{ color: 'var(--color-error-400)', fontSize: '0.75rem' }}>
+                  {attError}
+                </div>
+              )}
               <button
                 type="submit"
-                disabled={!newAttFileId.trim() || attAdding}
+                disabled={!newAttFile || attAdding}
                 className="btn btn-secondary btn-sm"
                 style={{ width: '100%' }}
               >
-                {attAdding ? 'Attaching...' : '+ Attach File Asset'}
+                {attAdding
+                  ? (uploadFile.isPending ? 'Uploading...' : 'Attaching...')
+                  : '+ Upload & Attach File'}
               </button>
             </form>
           </div>
@@ -617,6 +763,16 @@ export default function DocumentDetailPage() {
         currentVersionNum={doc.version_count || 1}
       />
 
+      {/* Workflow Chat — discussion pinned to the current/most recent approval step */}
+      {doc.current_approval_step_id && (
+        <WorkflowChatPanel
+          approvalStepId={doc.current_approval_step_id}
+          contextLabel={`${doc.title} — ${doc.doc_type_name || 'Document'}`}
+          isOpen={workflowChatOpen}
+          onClose={() => setWorkflowChatOpen(false)}
+        />
+      )}
+
       <ConfirmDialog
         open={confirmState.open}
         title={confirmState.title}
@@ -624,6 +780,15 @@ export default function DocumentDetailPage() {
         confirmLabel={confirmState.confirmLabel}
         onConfirm={confirmState.onConfirm}
         onCancel={() => setConfirmState(prev => ({ ...prev, open: false }))}
+      />
+
+      <SubmitWorkflowModal
+        open={submitModalOpen}
+        documentTitle={doc.title}
+        initialDueAt={doc.due_at}
+        onCancel={() => setSubmitModalOpen(false)}
+        onConfirm={handleConfirmSubmit}
+        isSubmitting={updateDoc.isPending || submitDoc.isPending}
       />
     </div>
   );

@@ -44,30 +44,38 @@ const STATUS_TABS: { key: TabKey; label: string }[] = [
   { key: '', label: 'All' },
   { key: 'draft', label: 'Draft' },
   { key: 'submitted', label: 'Submitted' },
-  { key: 'under_review', label: 'Under Review' },
-  { key: 'pending_approval', label: 'Pending Approval' },
+  { key: 'pending', label: 'Pending Approval' },
+  { key: 'sent_back', label: 'Sent Back' },
   { key: 'approved', label: 'Approved' },
   { key: 'rejected', label: 'Rejected' },
   { key: 'archived', label: 'Archived' },
 ];
 
 // ── Badge helpers ─────────────────────────────────────────────────────────────
+// NOTE: these must match Backend/app/models/document.py::DocumentStatus exactly
+// (draft, submitted, pending, approved, rejected, sent_back, archived, expired).
+// The previous case values here ('under_review', 'in_review', 'pending_approval')
+// were never real backend statuses — pending/sent_back documents silently fell
+// through to the 'draft' default, showing the wrong badge.
 
 function getStatusStyle(status: string): { color: string; bg: string; label: string } {
   switch (status) {
     case 'approved':
       return { label: 'Approved', bg: 'hsla(145, 70%, 50%, 0.15)', color: 'var(--color-success-400)' };
-    case 'under_review':
-    case 'in_review':
-      return { label: 'Under Review', bg: 'hsla(258, 90%, 60%, 0.15)', color: 'var(--color-accent-400)' };
+    case 'pending':
+      return { label: 'Pending Approval', bg: 'hsla(38, 92%, 55%, 0.15)', color: 'var(--color-warning-400)' };
+    case 'sent_back':
+      return { label: 'Sent Back', bg: 'hsla(280, 75%, 60%, 0.15)', color: 'var(--color-accent-400)' };
     case 'submitted':
       return { label: 'Submitted', bg: 'hsla(217, 100%, 50%, 0.15)', color: 'var(--color-primary-300)' };
-    case 'pending_approval':
-      return { label: 'Pending Approval', bg: 'hsla(38, 92%, 55%, 0.15)', color: 'var(--color-warning-400)' };
     case 'rejected':
       return { label: 'Rejected', bg: 'hsla(0, 82%, 60%, 0.15)', color: 'var(--color-error-400)' };
     case 'archived':
       return { label: 'Archived', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
+    case 'expired':
+      return { label: 'Expired', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
+    case 'cancelled':
+      return { label: 'Cancelled', bg: 'hsla(215, 20%, 50%, 0.15)', color: 'var(--text-muted)' };
     case 'draft':
     default:
       return { label: 'Draft', bg: 'hsla(38, 92%, 50%, 0.15)', color: 'var(--color-warning-400)' };
@@ -387,6 +395,8 @@ export default function DocumentListPage() {
   const [selectedDeptId, setSelectedDeptId] = useState('');
   const [page, setPage] = useState(1);
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [priorityFilter, setPriorityFilter] = useState<string>('');
+  const [tagFilter, setTagFilter] = useState<string>('');
 
   // Selection state
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -403,6 +413,8 @@ export default function DocumentListPage() {
     doc_type_id: selectedTypeId || undefined,
     dept_id: selectedDeptId || undefined,
     search: searchQuery || undefined,
+    priority: priorityFilter || undefined,
+    tags: tagFilter ? [tagFilter] : undefined,
     sort: sortOrder === 'desc' ? '-updated_at' : '+updated_at',
   });
 
@@ -420,7 +432,7 @@ export default function DocumentListPage() {
   const statCounts = useMemo(() => ({
     total: allDocs.data?.total || 0,
     draft: allItems.filter((d) => d.status === 'draft').length,
-    inReview: allItems.filter((d) => ['submitted', 'under_review', 'pending_approval'].includes(d.status)).length,
+    inReview: allItems.filter((d) => ['submitted', 'pending'].includes(d.status)).length,
     approved: allItems.filter((d) => d.status === 'approved').length,
   }), [allItems, allDocs.data]);
 
@@ -691,12 +703,47 @@ export default function DocumentListPage() {
             ))}
           </select>
 
+          {/* Priority filter */}
+          <select
+            value={priorityFilter}
+            onChange={(e) => { setPriorityFilter(e.target.value); setPage(1); }}
+            style={{
+              width: 140, fontSize: '0.82rem',
+              padding: '8px 12px',
+              background: 'var(--bg-elevated)', border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)', color: 'var(--text-primary)',
+              fontFamily: 'var(--font-sans)', outline: 'none', cursor: 'pointer',
+            }}
+          >
+            <option value="">All Priorities</option>
+            <option value="low">Low</option>
+            <option value="normal">Normal</option>
+            <option value="high">High</option>
+            <option value="urgent">Urgent</option>
+          </select>
+          
+          {/* Tag filter */}
+          <input
+            type="text"
+            value={tagFilter}
+            onChange={(e) => { setTagFilter(e.target.value); setPage(1); }}
+            placeholder="Filter by tag..."
+            style={{
+              width: 160, boxSizing: 'border-box',
+              padding: '8px 14px',
+              background: 'var(--bg-elevated)', border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)', color: 'var(--text-primary)',
+              fontSize: '0.85rem', fontFamily: 'var(--font-sans)',
+              outline: 'none',
+            }}
+          />
+
           {/* Clear filters */}
-          {(searchQuery || selectedTypeId || selectedDeptId || activeTab) && (
+          {(searchQuery || selectedTypeId || selectedDeptId || priorityFilter || tagFilter || activeTab) && (
             <button
               onClick={() => {
                 setSearchQuery(''); setSelectedTypeId('');
-                setSelectedDeptId(''); setActiveTab(''); setPage(1);
+                setSelectedDeptId(''); setPriorityFilter(''); setTagFilter(''); setActiveTab(''); setPage(1);
               }}
               style={{
                 fontSize: '0.8rem', color: 'var(--text-muted)',

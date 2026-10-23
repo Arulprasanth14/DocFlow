@@ -37,6 +37,8 @@ class WorkflowTemplateRepository:
         doc_type_id: uuid.UUID | None = None,
         document_type_scope: str | None = None,
         is_active: bool = True,
+        created_by: uuid.UUID | None = None,
+        visibility: str = "organization",
     ) -> WorkflowTemplate:
         tmpl = WorkflowTemplate(
             org_id=org_id,
@@ -46,6 +48,8 @@ class WorkflowTemplateRepository:
             doc_type_id=doc_type_id,
             document_type_scope=document_type_scope,
             is_active=is_active,
+            created_by=created_by,
+            visibility=visibility,
         )
         self.db.add(tmpl)
         await self.db.flush()
@@ -68,7 +72,24 @@ class WorkflowTemplateRepository:
         org_id: uuid.UUID,
         active_only: bool = True,
         department_id: uuid.UUID | None = None,
+        *,
+        visible_to_user_id: uuid.UUID | None = None,
+        include_private_of_others: bool = False,
+        owned_by: uuid.UUID | None = None,
+        search: str | None = None,
     ) -> Sequence[WorkflowTemplate]:
+        """
+        List templates for an org.
+
+        `visible_to_user_id` applies §7's private-workflow rule: a template
+        with visibility='private' is only listed for its own owner. Pass
+        `include_private_of_others=True` for org administrators, who manage
+        every workflow in the org. `owned_by` narrows to one user's own
+        workflows ("my workflows"), and `search` does a case-insensitive
+        name match ("the user can search workflows by name").
+        """
+        from sqlalchemy import or_
+
         q = select(WorkflowTemplate).where(
             WorkflowTemplate.org_id == org_id,
             WorkflowTemplate.deleted_at.is_(None),
@@ -77,12 +98,23 @@ class WorkflowTemplateRepository:
             q = q.where(WorkflowTemplate.is_active.is_(True))
         if department_id:
             q = q.where(WorkflowTemplate.department_id == department_id)
+        if owned_by:
+            q = q.where(WorkflowTemplate.created_by == owned_by)
+        if search:
+            q = q.where(WorkflowTemplate.name.ilike(f"%{search}%"))
+        if visible_to_user_id is not None and not include_private_of_others:
+            q = q.where(
+                or_(
+                    WorkflowTemplate.visibility != "private",
+                    WorkflowTemplate.created_by == visible_to_user_id,
+                )
+            )
         result = await self.db.execute(q.order_by(WorkflowTemplate.name))
         return result.scalars().all()
 
-    async def update(self, template_id: uuid.UUID, **kwargs) -> WorkflowTemplate | None:
+    async def update(self, template_id: uuid.UUID, org_id: uuid.UUID, **kwargs) -> WorkflowTemplate | None:
         tmpl = await self.db.get(WorkflowTemplate, template_id)
-        if not tmpl:
+        if not tmpl or tmpl.org_id != org_id:
             return None
         for k, v in kwargs.items():
             if hasattr(tmpl, k):
@@ -113,6 +145,7 @@ class WorkflowStageRepository:
         min_approvals_required: int = 1,
         sla_hours: int | None = None,
         reapproval_on_revision: bool = False,
+        requires_signature: bool = False,
     ) -> WorkflowStage:
         stage = WorkflowStage(
             template_id=template_id,
@@ -122,6 +155,7 @@ class WorkflowStageRepository:
             min_approvals_required=min_approvals_required,
             sla_hours=sla_hours,
             reapproval_on_revision=reapproval_on_revision,
+            requires_signature=requires_signature,
         )
         self.db.add(stage)
         await self.db.flush()
@@ -182,7 +216,15 @@ class WorkflowInstanceRepository:
         return instance
 
     async def get_by_id(self, instance_id: uuid.UUID, org_id: uuid.UUID | None = None) -> WorkflowInstance | None:
-        q = select(WorkflowInstance).where(WorkflowInstance.id == instance_id)
+        # approval_steps is lazy="noload" — eager-load it explicitly, otherwise
+        # WorkflowInstanceResponse.approval_steps always serializes as [] even
+        # when steps exist (confirmed live: a freshly-resumed instance with a
+        # real pending step still returned "approval_steps":[]).
+        q = (
+            select(WorkflowInstance)
+            .options(selectinload(WorkflowInstance.approval_steps))
+            .where(WorkflowInstance.id == instance_id)
+        )
         if org_id:
             q = q.where(WorkflowInstance.org_id == org_id)
         result = await self.db.execute(q)
@@ -300,6 +342,18 @@ class ApprovalStepRepository:
         )
         return result.scalars().all()
 
+    async def get_for_instance(self, instance_id: uuid.UUID) -> Sequence[ApprovalStep]:
+        """Every ApprovalStep row for an instance, across all stages and
+        rounds — the raw material for the §6.6 chain-of-custody view and for
+        the finalization/recall checks that must consider the whole history,
+        not just the current stage."""
+        result = await self.db.execute(
+            select(ApprovalStep)
+            .where(ApprovalStep.instance_id == instance_id)
+            .order_by(ApprovalStep.round_number, ApprovalStep.created_at)
+        )
+        return result.scalars().all()
+
     async def get_current_round_steps(
         self,
         instance_id: uuid.UUID,
@@ -365,7 +419,23 @@ class ApprovalStepRepository:
         ip_address: str | None = None,
         user_agent: str | None = None,
         provider_reference: str | None = None,
+        *,
+        signed_payload: dict | None = None,
+        payload_hash: str | None = None,
+        signature_b64: str | None = None,
+        algorithm: str | None = None,
+        key_id: str | None = None,
     ) -> ESignature:
+        """
+        Persist the signature record for a decided step.
+
+        The keyword-only fields carry the real cryptographic proof
+        (requirements §6.4) produced by app/core/signing.py: the exact
+        canonical payload that was signed, its hash, the RSA-PSS-SHA256
+        signature, the algorithm name, and the signing key's fingerprint.
+        `signature_method`/`signed_hash`/`ip_address`/`user_agent`/
+        `provider_reference` remain supplementary ceremony metadata.
+        """
         sig = ESignature(
             approval_step_id=step_id,
             signature_method=signature_method,
@@ -373,10 +443,21 @@ class ApprovalStepRepository:
             ip_address=ip_address,
             user_agent=user_agent,
             provider_reference=provider_reference,
+            signed_payload=signed_payload,
+            payload_hash=payload_hash,
+            signature_b64=signature_b64,
+            algorithm=algorithm,
+            key_id=key_id,
         )
         self.db.add(sig)
         await self.db.flush()
         return sig
+
+    async def get_esignature(self, step_id: uuid.UUID) -> ESignature | None:
+        result = await self.db.execute(
+            select(ESignature).where(ESignature.approval_step_id == step_id)
+        )
+        return result.scalar_one_or_none()
 
 
 class DelegationRepository:

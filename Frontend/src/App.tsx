@@ -11,15 +11,14 @@ import { useEffect } from 'react';
 
 import { AuthProvider } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { useAuthStore } from '@/store/authStore';
 import { useUIStore } from '@/store/uiStore';
-import { wsManager } from '@/lib/ws';
 import { useIdleTimeout } from '@/hooks/useIdleTimeout';
 
 // ── Page Imports ──────────────────────────────────────────────────────────────
 import LoginPage from '@/pages/auth/LoginPage';
 import RegisterPage from '@/pages/auth/RegisterPage';
 import ProfilePage from '@/pages/auth/ProfilePage';
+import OnboardingPage from '@/pages/onboarding/OnboardingPage';
 
 // ── Admin Page Imports (Milestone 3) ──────────────────────────────────────────
 import OrganizationSettingsPage from '@/pages/admin/OrganizationSettingsPage';
@@ -27,6 +26,11 @@ import DepartmentsPage from '@/pages/admin/DepartmentsPage';
 import RolesPage from '@/pages/admin/RolesPage';
 import MembersPage from '@/pages/admin/MembersPage';
 import DocumentTypesAdminPage from '@/pages/admin/DocumentTypesAdminPage';
+import WorkflowTemplatesAdminPage from '@/pages/admin/WorkflowTemplatesAdminPage';
+// ── Admin Portal Imports (Auth & RBAC Completion) ─────────────────────────────
+import AdminLoginPage from '@/pages/admin/AdminLoginPage';
+import AdminDashboardPage from '@/pages/admin/AdminDashboardPage';
+import AdminLayout from '@/components/layout/AdminLayout';
 
 // ── Document Page Imports (Milestone 4) ───────────────────────────────────────
 import DocumentListPage from '@/pages/documents/DocumentListPage';
@@ -43,6 +47,9 @@ import SearchPage from '@/pages/search/SearchPage';
 import AnalyticsPage from '@/pages/analytics/AnalyticsPage';
 import ChatPage from '@/pages/chat/ChatPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
+import DraftsPage from '@/pages/drafts/DraftsPage';
+import AgentPage from '@/pages/agent/AgentPage';
+import AgentKnowledgePage from '@/pages/admin/AgentKnowledgePage';
 
 // ── Component Imports ─────────────────────────────────────────────────────────
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
@@ -63,35 +70,11 @@ const queryClient = new QueryClient({
   },
 });
 
-// ── Coming Soon Placeholder ───────────────────────────────────────────────────
-function ComingSoonPage({ title }: { title: string }) {
-  return (
-    <div className="empty-state" style={{ minHeight: 'calc(100vh - 64px)' }}>
-      <div style={{
-        width: '64px', height: '64px', borderRadius: '16px',
-        background: 'hsla(217, 100%, 50%, 0.08)',
-        border: '1px solid hsla(217, 100%, 50%, 0.2)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        marginBottom: '8px',
-      }}>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary-400)" strokeWidth="2">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
-      </div>
-      <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>{title}</h2>
-      <p style={{ color: 'var(--text-muted)', maxWidth: '400px' }}>
-        This feature is coming in a future milestone. Check back soon!
-      </p>
-    </div>
-  );
-}
-
 // ── Inner App (inside AuthProvider, so it can read auth context) ──────────────
 function AppInner() {
   const { isAuthenticated } = useAuth();
   const { theme } = useUIStore();
-  
+
   useIdleTimeout(isAuthenticated);
 
   // Apply theme
@@ -99,21 +82,29 @@ function AppInner() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
-  // Connect WebSocket when authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      wsManager.connect();
-    } else {
-      wsManager.disconnect();
-    }
-    return () => wsManager.disconnect();
-  }, [isAuthenticated]);
+  // NOTE: real-time push is handled by the two feature-specific hooks
+  // (useChatWebSocket, useNotificationWebSocket), which connect to the
+  // actual backend routes (/ws/chat/{id}, /ws/notifications). The generic
+  // `wsManager` in lib/ws.ts pointed at a URL matching neither route and
+  // was previously wired up here, producing a doomed connect/retry loop on
+  // every page load — removed rather than "fixed" since it was redundant
+  // with the two working hooks.
 
   return (
     <Routes>
       {/* ── Public Auth Routes ────────────────────────────────────── */}
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+
+        {/* ── Onboarding (authenticated, but no org yet) ────────────── */}
+        <Route
+          path="/onboarding"
+          element={
+            <ProtectedRoute allowNoOrg>
+              <OnboardingPage />
+            </ProtectedRoute>
+          }
+        />
 
         {/* ── Protected App Routes (inside AppLayout) ───────────────── */}
         <Route
@@ -133,12 +124,7 @@ function AppInner() {
           {/* Profile / Settings */}
           <Route path="profile" element={<ProfilePage />} />
 
-          {/* ── Milestone 3: Administration Routes ──────────────────── */}
-          <Route path="admin/organization" element={<OrganizationSettingsPage />} />
-          <Route path="admin/departments" element={<DepartmentsPage />} />
-          <Route path="admin/roles" element={<RolesPage />} />
-          <Route path="admin/members" element={<MembersPage />} />
-          <Route path="admin/document-types" element={<DocumentTypesAdminPage />} />
+          {/* ── Milestone 3: Administration Routes (Moved to /admin portal) ── */}
 
           {/* ── Milestone 4: Documents & Forms Routes ───────────────── */}
           <Route path="documents" element={<DocumentListPage />} />
@@ -151,11 +137,61 @@ function AppInner() {
           <Route path="search" element={<SearchPage />} />
           <Route path="analytics/*" element={<AnalyticsPage />} />
           <Route path="chat" element={<ChatPage />} />
+          {/* §11 Drafts and §12 Agent — available to every role (the Agent's
+              knowledge ADMINISTRATION is Main-Admin-only, see /admin below). */}
+          <Route path="drafts" element={<DraftsPage />} />
+          <Route path="agent" element={<AgentPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
 
         {/* ── Catch-all ─────────────────────────────────────────────── */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
+
+        {/* ── Admin Portal (/admin) ─────────────────────────────────── */}
+        {/* Separate login page — not shared with employee login */}
+        <Route path="/admin/login" element={<AdminLoginPage />} />
+        {/* Protected admin shell — Main Admin + HR (superadmin bypasses via
+            hasRole()). HR's day-to-day access per requirements §2.2; pages
+            reserved for the Main Administrator only (Roles & Perms, Agent
+            legal knowledge) gate themselves further inside the shell. */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute requireRole={['admin', 'hr']}>
+              <AdminLayout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<Navigate to="/admin/dashboard" replace />} />
+          <Route path="dashboard" element={<AdminDashboardPage />} />
+          {/* Re-use existing admin section pages under the new Admin shell */}
+          <Route path="organization" element={<OrganizationSettingsPage />} />
+          <Route path="departments" element={<DepartmentsPage />} />
+          {/* Main Administrator only (§13.4) — HR's day-to-day access does
+              not extend to roles/permissions management under this baseline. */}
+          <Route
+            path="roles"
+            element={
+              <ProtectedRoute requireRole={['admin']}>
+                <RolesPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="members" element={<MembersPage />} />
+          <Route path="document-types" element={<DocumentTypesAdminPage />} />
+          <Route path="workflow-templates" element={<WorkflowTemplatesAdminPage />} />
+          {/* §13.6 Agent legal knowledge — Main Administrator only; HR does
+              not receive this privilege by default (§2.5). Enforced again
+              server-side in AgentService.assert_can_manage_knowledge. */}
+          <Route
+            path="agent-knowledge"
+            element={
+              <ProtectedRoute requireRole={['admin']}>
+                <AgentKnowledgePage />
+              </ProtectedRoute>
+            }
+          />
+        </Route>
       </Routes>
   );
 }

@@ -49,6 +49,7 @@ async def sync_user(
         name=body.name or firebase_user.name,
         avatar_url=body.avatar_url or firebase_user.avatar_url,
         org_name=body.org_name,
+        email_verified=firebase_user.email_verified,
     )
 
     logger.info(

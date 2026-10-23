@@ -8,6 +8,7 @@ import math
 import structlog
 from typing import Any
 from uuid import UUID
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,11 +16,16 @@ from app.core.exceptions import (
     ConflictException,
     ForbiddenException,
     NotFoundException,
+    UnprocessableEntityException,
     ValidationException,
 )
 from app.core.redis import cache_delete, cache_get, cache_set
+from app.core.events import EventBus
+from app.domain.enums import NotificationType
+from app.domain.permissions import AuthUser
 from app.models.base import utcnow
-from app.models.document import Document, DocumentType
+from app.models.document import Document, DocumentType, DocumentTemplate, DocumentStatus, DocumentVersion
+from app.models.organization import OrganizationMember
 from app.repositories.document_repo import (
     AttachmentRepository,
     CommentRepository,
@@ -53,6 +59,36 @@ _DOC_TYPES_CACHE_TTL = 600  # 10 minutes
 
 def _doc_types_cache_key(org_id: UUID) -> str:
     return f"doc_types:list:{org_id}"
+
+
+async def get_user_departments(db: AsyncSession, user_id: UUID, org_id: UUID) -> list[UUID]:
+    from sqlalchemy import select
+    result = await db.execute(
+        select(OrganizationMember.dept_id)
+        .where(
+            OrganizationMember.user_id == user_id,
+            OrganizationMember.org_id == org_id,
+            OrganizationMember.deleted_at.is_(None)
+        )
+    )
+    return [d for d in result.scalars() if d is not None]
+
+
+async def can_user_access_document(db: AsyncSession, user: AuthUser, doc: Document) -> bool:
+    """Visibility Rule for Documents."""
+    if user.id == doc.submitted_by:
+        return True
+    if "admin" in user.roles or "hr" in user.roles:
+        return True
+
+    if "worker" in user.roles:
+        if doc.dept_id is None:
+            return True
+        user_depts = await get_user_departments(db, user.id, doc.org_id)
+        if doc.dept_id in user_depts:
+            return True
+            
+    return False
 
 
 def validate_form_data(form_schema: list[Any], form_data: dict[str, Any]) -> None:
@@ -199,6 +235,22 @@ class DocumentService:
         dt = doc.doc_type
         sub = doc.submitter
 
+        current_step_id: UUID | None = None
+        current_instance_id: UUID | None = None
+        if doc.status not in (DocumentStatus.DRAFT,):
+            from sqlalchemy import select
+            from app.models.workflow import ApprovalStep, WorkflowInstance
+            step_result = await self.db.execute(
+                select(ApprovalStep.id, WorkflowInstance.id)
+                .join(WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id)
+                .where(WorkflowInstance.document_id == doc.id)
+                .order_by(ApprovalStep.created_at.desc())
+                .limit(1)
+            )
+            row = step_result.first()
+            if row:
+                current_step_id, current_instance_id = row
+
         return DocumentResponse(
             id=doc.id,
             org_id=doc.org_id,
@@ -210,6 +262,7 @@ class DocumentService:
             title=doc.title,
             status=doc.status,
             priority=doc.priority,
+            tags=doc.tags or [],
             form_data=doc.form_data or {},
             metadata=doc.metadata_ or {},
             submitted_by=doc.submitted_by,
@@ -222,17 +275,21 @@ class DocumentService:
             attachment_count=att_count,
             comment_count=com_count,
             version_count=max(ver_count, 1),
+            current_approval_step_id=current_step_id,
+            current_workflow_instance_id=current_instance_id,
         )
 
-    async def get_document(self, doc_id: UUID, org_id: UUID) -> DocumentResponse:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+    async def get_document(self, doc_id: UUID, user: AuthUser) -> DocumentResponse:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to view this document")
         return await self._format_doc_response(doc)
 
     async def list_documents(
         self,
-        org_id: UUID,
+        user: AuthUser,
         page: int = 1,
         limit: int = 20,
         status: str | None = None,
@@ -240,18 +297,62 @@ class DocumentService:
         dept_id: UUID | None = None,
         submitted_by: UUID | None = None,
         search: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
     ) -> PaginatedDocumentsResponse:
         limit = min(limit, 100)
+        accessible_dept_ids = await get_user_departments(self.db, user.id, user.org_id)
+        
         items_db, total = await self.doc_repo.list_by_org(
-            org_id, page=page, limit=limit,
+            user.org_id,
+            user_id=user.id,
+            is_admin="admin" in user.roles or "hr" in user.roles,
+            is_approver="worker" in user.roles,
+            accessible_dept_ids=accessible_dept_ids,
+            page=page, limit=limit,
             status=status, doc_type_id=doc_type_id, dept_id=dept_id,
             submitted_by=submitted_by, search=search,
+            tags=tags, priority=priority, date_from=date_from, date_to=date_to,
         )
         items = [await self._format_doc_response(d) for d in items_db]
         pages = math.ceil(total / limit) if limit else 1
         return PaginatedDocumentsResponse(
             items=items, total=total, page=page, limit=limit, pages=pages
         )
+
+    async def get_analytics(self, user: AuthUser) -> dict[str, int]:
+        from sqlalchemy import select, func
+        accessible_dept_ids = await get_user_departments(self.db, user.id, user.org_id)
+        
+        q = select(Document.status, func.count()).where(
+            Document.org_id == user.org_id,
+            Document.deleted_at.is_(None)
+        )
+        
+        if "admin" not in user.roles and "hr" not in user.roles:
+            from sqlalchemy import or_
+            if "worker" in user.roles:
+                q = q.where(
+                    or_(
+                        Document.submitted_by == user.id,
+                        Document.dept_id.in_(accessible_dept_ids),
+                        Document.dept_id.is_(None)
+                    )
+                )
+            else:
+                q = q.where(Document.submitted_by == user.id)
+                
+        q = q.group_by(Document.status)
+        result = await self.db.execute(q)
+        counts = {r[0].value if hasattr(r[0], 'value') else r[0]: r[1] for r in result.all()}
+        
+        # Ensure base keys exist
+        for k in ["draft", "submitted", "pending", "approved", "rejected"]:
+            if k not in counts:
+                counts[k] = 0
+        return counts
 
     async def create_document(
         self,
@@ -268,7 +369,7 @@ class DocumentService:
             validate_form_data(dt.form_schema, req.form_data)
 
         public_id = await self.doc_repo.generate_public_id(org_id)
-        status = "submitted" if req.submit_immediately else "draft"
+        status = DocumentStatus.SUBMITTED if req.submit_immediately else DocumentStatus.DRAFT
         submitted_at = utcnow() if req.submit_immediately else None
 
         doc = await self.doc_repo.create(
@@ -278,6 +379,7 @@ class DocumentService:
             title=req.title,
             status=status,
             priority=req.priority,
+            tags=req.tags,
             form_data=req.form_data,
             metadata_=req.metadata_,
             dept_id=req.dept_id,
@@ -303,18 +405,47 @@ class DocumentService:
 
         # Re-fetch with relationships
         doc_loaded = await self.doc_repo.get_by_id(doc.id, org_id)
-        return await self._format_doc_response(doc_loaded)  # type: ignore[arg-type]
+        resp = await self._format_doc_response(doc_loaded)  # type: ignore[arg-type]
+        
+        if req.submit_immediately:
+            EventBus.publish("document.submitted", {"doc_id": str(doc.id), "org_id": str(org_id), "user_id": str(submitted_by)})
+            
+        return resp
+
+    async def create_from_template(
+        self,
+        user: AuthUser,
+        template_id: UUID,
+        req: DocumentCreateRequest,
+    ) -> DocumentResponse:
+        from sqlalchemy import select
+        result = await self.db.execute(
+            select(DocumentTemplate).where(
+                DocumentTemplate.id == template_id,
+                DocumentTemplate.org_id == user.org_id
+            )
+        )
+        template = result.scalar_one_or_none()
+        if not template:
+            raise NotFoundException("Template not found")
+        
+        # Merge template default values with provided form data
+        merged_form_data = {**template.default_field_values, **req.form_data}
+        req.form_data = merged_form_data
+        
+        return await self.create_document(user.org_id, user.id, req)
 
     async def update_document(
         self,
         doc_id: UUID,
-        org_id: UUID,
-        user_id: UUID,
+        user: AuthUser,
         req: DocumentUpdateRequest,
     ) -> DocumentResponse:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to edit this document")
 
         dt = doc.doc_type
         if req.form_data is not None and dt and dt.form_schema:
@@ -339,9 +470,10 @@ class DocumentService:
                 version_num=latest_num + 1,
                 title=doc.title,
                 form_data=doc.form_data,
-                changed_by=user_id,
+                changed_by=user.id,
                 change_reason=req.change_reason or "Document updated",
             )
+            EventBus.publish("document.version_uploaded", {"doc_id": str(doc.id), "org_id": str(user.org_id), "user_id": str(user.id), "version": latest_num + 1})
 
         await self.db.commit()
         return await self._format_doc_response(doc)
@@ -349,16 +481,43 @@ class DocumentService:
     async def submit_document(
         self,
         doc_id: UUID,
-        org_id: UUID,
-        user_id: UUID,
+        user: AuthUser,
         req: DocumentSubmitRequest,
     ) -> DocumentResponse:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+        """
+        Atomically submit a document AND start its approval workflow.
+
+        Transaction:
+        1. Validate doc is DRAFT + user has access
+        2. Validate form_data
+        3. Create version snapshot
+        4. Set doc.status = SUBMITTED
+        5. Resolve workflow_template_id (from request or doc_type default)
+        6. Call WorkflowService.start_workflow() → sets doc.status = PENDING,
+           creates WorkflowInstance + Stage-1 ApprovalStep rows, notifies approvers
+        7. Single commit
+        8. Fire EventBus.publish (after commit — no partial events)
+        """
+        from app.services.workflow_service import WorkflowService
+
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to submit this document")
 
-        if doc.status != "draft":
+        if doc.status != DocumentStatus.DRAFT:
             raise ConflictException(f"Only draft documents can be submitted (current status: {doc.status})")
+
+        # Resolve workflow_template_id. NOTE: DocumentType has no
+        # "default per doc type" column today, so this must always be
+        # supplied explicitly by the caller — see PENDING_WORK.md if a
+        # default-template-per-doc-type feature is wanted (needs a migration).
+        template_id = req.workflow_template_id
+        if template_id is None:
+            raise UnprocessableEntityException(
+                "No workflow template specified. Provide workflow_template_id in the request body."
+            )
 
         dt = doc.doc_type
         if dt and dt.form_schema:
@@ -367,37 +526,81 @@ class DocumentService:
         now = utcnow()
         doc = await self.doc_repo.update(
             doc,
-            status="submitted",
+            status=DocumentStatus.SUBMITTED,
             submitted_at=now,
         )
         doc.submitter_snapshot = {"form_data": doc.form_data, "title": doc.title, "submitted_at": now.isoformat()}
 
+        # Create version snapshot (flush only — no commit yet)
         latest_num = await self.ver_repo.get_latest_version_num(doc.id)
-        await self.ver_repo.create(
+        new_ver = await self.ver_repo.create(
             document_id=doc.id,
             version_num=latest_num + 1,
             title=doc.title,
             form_data=doc.form_data,
-            changed_by=user_id,
+            changed_by=user.id,
             change_reason=req.change_reason or "Submitted document",
         )
+        # Set current_version_id so WorkflowService can FK to it
+        doc.current_version_id = new_ver.id
+        await self.db.flush()
 
+        # Start workflow in the same transaction (no commit inside start_workflow)
+        wf_svc = WorkflowService(self.db)
+        await wf_svc.start_workflow(
+            org_id=user.org_id,
+            document_id=doc.id,
+            template_id=template_id,
+            requester_id=user.id,
+            current_version_id=new_ver.id,
+            doc_title=doc.title,
+        )
+
+        # Single commit for everything above
         await self.db.commit()
         logger.info("document_submitted", doc_id=str(doc_id))
+
+        # EventBus fires after successful commit only
+        EventBus.publish("document.submitted", {
+            "doc_id": str(doc.id),
+            "org_id": str(user.org_id),
+            "user_id": str(user.id),
+        })
+        # Confirmation to the submitter that their submission went through —
+        # distinct from the approver-assignment notifications start_workflow()
+        # already sent above. Without notif_user_id here, subscribers.py's
+        # handler no-ops (it's informational-only for call-sites that don't
+        # name a recipient), so the submitter never heard back at all.
+        EventBus.publish("document.status_changed", {
+            "doc_id": str(doc.id),
+            "org_id": str(user.org_id),
+            "new_status": DocumentStatus.PENDING,
+            "event": "workflow_started",
+            "notif_user_id": str(user.id),
+            "notif_type": NotificationType.SYSTEM,
+            "notif_title": "Document submitted",
+            "notif_body": f"'{doc.title}' was submitted successfully and is now awaiting approval.",
+            "notif_deep_link": f"/documents/{doc.id}",
+        })
         return await self._format_doc_response(doc)
 
-    async def delete_document(self, doc_id: UUID, org_id: UUID) -> None:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+
+    async def delete_document(self, doc_id: UUID, user: AuthUser) -> None:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to delete this document")
         await self.doc_repo.soft_delete(doc)
         await self.db.commit()
         logger.info("document_deleted", doc_id=str(doc_id))
 
-    async def list_versions(self, doc_id: UUID, org_id: UUID) -> list[DocumentVersionResponse]:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+    async def list_versions(self, doc_id: UUID, user: AuthUser) -> list[DocumentVersionResponse]:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to view this document")
 
         versions = await self.ver_repo.list_by_doc(doc_id)
         result = []
@@ -418,10 +621,45 @@ class DocumentService:
             )
         return result
 
-    async def list_comments(self, doc_id: UUID, org_id: UUID) -> list[CommentResponse]:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+    async def restore_version(self, doc_id: UUID, version_id: UUID, user: AuthUser) -> DocumentResponse:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to edit this document")
+            
+        from sqlalchemy import select
+        res = await self.db.execute(select(DocumentVersion).where(DocumentVersion.id == version_id, DocumentVersion.document_id == doc_id))
+        ver = res.scalar_one_or_none()
+        if not ver:
+            raise NotFoundException("Version not found")
+            
+        # Create new version duplicating the old one
+        latest_num = await self.ver_repo.get_latest_version_num(doc.id)
+        await self.ver_repo.create(
+            document_id=doc.id,
+            version_num=latest_num + 1,
+            title=ver.title,
+            form_data=ver.form_data,
+            changed_by=user.id,
+            change_reason=f"Restored from version {ver.version_num}",
+        )
+        
+        doc = await self.doc_repo.update(
+            doc,
+            title=ver.title,
+            form_data=ver.form_data,
+        )
+        await self.db.commit()
+        EventBus.publish("document.version_uploaded", {"doc_id": str(doc.id), "org_id": str(user.org_id), "user_id": str(user.id), "version": latest_num + 1})
+        return await self._format_doc_response(doc)
+
+    async def list_comments(self, doc_id: UUID, user: AuthUser) -> list[CommentResponse]:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
+        if not doc:
+            raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to view comments on this document")
 
         all_comments = await self.comment_repo.list_by_doc(doc_id)
 
@@ -480,24 +718,25 @@ class DocumentService:
     async def add_comment(
         self,
         doc_id: UUID,
-        org_id: UUID,
-        author_id: UUID,
+        user: AuthUser,
         req: CommentCreateRequest,
     ) -> CommentResponse:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to comment on this document")
 
         if req.parent_id:
-            parent = await self.comment_repo.get_by_id(req.parent_id, org_id)
+            parent = await self.comment_repo.get_by_id(req.parent_id, user.org_id)
             if not parent:
                 raise NotFoundException("Parent comment not found")
 
         com = await self.comment_repo.create(
-            org_id=org_id,
+            org_id=user.org_id,
             document_id=doc_id,
             body=req.body,
-            author_id=author_id,
+            author_id=user.id,
             parent_id=req.parent_id,
             is_internal=req.is_internal,
         )
@@ -507,8 +746,9 @@ class DocumentService:
 
         await self.db.commit()
         logger.info("comment_added", doc_id=str(doc_id), comment_id=str(com.id))
+        EventBus.publish("document.comment_added", {"doc_id": str(doc.id), "org_id": str(user.org_id), "user_id": str(user.id), "comment_id": str(com.id)})
 
-        u = await self.user_repo.get_by_id(author_id)
+        u = await self.user_repo.get_by_id(user.id)
         return CommentResponse(
             id=com.id,
             document_id=com.document_id,
@@ -530,13 +770,14 @@ class DocumentService:
         self,
         comment_id: UUID,
         doc_id: UUID,
-        org_id: UUID,
-        author_id: UUID,
+        user: AuthUser,
         req: CommentUpdateRequest,
     ) -> CommentResponse:
-        com = await self.comment_repo.get_by_id(comment_id, org_id)
+        com = await self.comment_repo.get_by_id(comment_id, user.org_id)
         if not com or com.document_id != doc_id:
             raise NotFoundException("Comment not found")
+        if com.author_id != user.id:
+            raise ForbiddenException("You can only edit your own comments")
 
         com = await self.comment_repo.update(com, body=req.body, is_resolved=req.is_resolved)
         await self.db.commit()
@@ -559,10 +800,12 @@ class DocumentService:
             mentions=[],
         )
 
-    async def list_attachments(self, doc_id: UUID, org_id: UUID) -> list[AttachmentResponse]:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+    async def list_attachments(self, doc_id: UUID, user: AuthUser) -> list[AttachmentResponse]:
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to view this document's attachments")
 
         atts = await self.att_repo.list_by_doc(doc_id)
         result = []
@@ -589,25 +832,39 @@ class DocumentService:
     async def add_attachment(
         self,
         doc_id: UUID,
-        org_id: UUID,
-        attached_by: UUID,
+        user: AuthUser,
         file_asset_id: UUID,
         label: str | None = None,
     ) -> AttachmentResponse:
-        doc = await self.doc_repo.get_by_id(doc_id, org_id)
+        doc = await self.doc_repo.get_by_id(doc_id, user.org_id)
         if not doc:
             raise NotFoundException("Document not found")
+        if not await can_user_access_document(self.db, user, doc):
+            raise ForbiddenException("You do not have permission to add attachments to this document")
+            
+        # Update FileAsset doc_id
+        from app.models.document import FileAsset
+        from sqlalchemy import select
+        res = await self.db.execute(select(FileAsset).where(FileAsset.id == file_asset_id, FileAsset.org_id == user.org_id))
+        asset = res.scalar_one_or_none()
+        if not asset:
+            raise NotFoundException("FileAsset not found")
+        asset.document_id = doc_id
 
         att = await self.att_repo.create(
             document_id=doc_id,
             file_asset_id=file_asset_id,
             label=label,
-            attached_by=attached_by,
+            attached_by=user.id,
         )
         await self.db.commit()
 
-        u = await self.user_repo.get_by_id(attached_by)
-        f = att.file_asset
+        u = await self.user_repo.get_by_id(user.id)
+        # NOTE: att.file_asset is lazy="noload" and att_repo.create() doesn't
+        # eager-load it, so it would be None here. Use `asset` (already fetched
+        # above, with real data) instead of re-reading the unset relationship —
+        # otherwise the response right after a successful attach would show
+        # "Attached File" / 0 bytes until the next GET /attachments refetch.
         return AttachmentResponse(
             id=att.id,
             document_id=att.document_id,
@@ -615,10 +872,10 @@ class DocumentService:
             label=att.label,
             attached_by=att.attached_by,
             attacher_name=u.name if u else None,
-            filename=f.filename if f else "Attached File",
-            mime_type=f.mime_type if f else "application/octet-stream",
-            size_bytes=f.size_bytes if f else 0,
-            preview_url=f.preview_url if f else None,
+            filename=asset.filename,
+            mime_type=asset.mime_type,
+            size_bytes=asset.size_bytes,
+            preview_url=asset.preview_url,
             created_at=att.created_at,
         )
 

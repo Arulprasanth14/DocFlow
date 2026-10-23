@@ -52,7 +52,8 @@ class User(BaseModel):
         "Session", back_populates="user", lazy="noload", cascade="all, delete-orphan"
     )
     memberships: Mapped[list["OrganizationMember"]] = relationship(  # type: ignore[name-defined]
-        "OrganizationMember", back_populates="user", lazy="noload"
+        "OrganizationMember", back_populates="user", lazy="noload",
+        foreign_keys="OrganizationMember.user_id",
     )
 
 

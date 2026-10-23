@@ -13,6 +13,7 @@ import documentsApi, {
   type UpdateCommentPayload,
   type CreateAttachmentPayload,
 } from '@/lib/api/documents';
+import filesApi from '@/lib/api/files';
 import type { DocumentFilterParams } from '@/types';
 import { useAuthStore } from '@/store/authStore';
 
@@ -127,8 +128,8 @@ export function useUpdateDocument() {
 export function useSubmitDocument() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, changeReason }: { id: string; changeReason?: string }) =>
-      documentsApi.submitDocument(id, changeReason),
+    mutationFn: ({ id, payload }: { id: string; payload?: { change_reason?: string; workflow_template_id?: string } }) =>
+      documentsApi.submitDocument(id, payload),
     onSuccess: (updated, variables) => {
       queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
       queryClient.setQueryData(documentKeys.detail(variables.id), updated);
@@ -155,6 +156,19 @@ export function useDocumentVersions(docId: string) {
     queryFn: () => documentsApi.listVersions(docId),
     enabled: isAuthenticated && Boolean(docId),
     staleTime: 1000 * 30,
+  });
+}
+
+export function useRestoreDocumentVersion() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, versionId }: { docId: string; versionId: string }) =>
+      documentsApi.restoreVersion(docId, versionId),
+    onSuccess: (updated, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
+      queryClient.setQueryData(documentKeys.detail(variables.docId), updated);
+      queryClient.invalidateQueries({ queryKey: documentKeys.versions(variables.docId) });
+    },
   });
 }
 
@@ -223,6 +237,41 @@ export function useRemoveDocumentAttachment() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: documentKeys.attachments(variables.docId) });
       queryClient.invalidateQueries({ queryKey: documentKeys.detail(variables.docId) });
+    },
+  });
+}
+
+/**
+ * Upload a raw File: presigned URL → direct PUT to storage → confirm → file_asset_id.
+ * The file bytes never pass through our own backend. Returns the file_asset_id,
+ * which the caller then attaches to a document via useAddDocumentAttachment.
+ */
+export function useUploadFile() {
+  return useMutation({
+    mutationFn: async (file: File): Promise<string> => {
+      const { upload_url, storage_key, bucket } = await filesApi.getUploadUrl(
+        file.name,
+        file.type,
+        file.size,
+      );
+
+      const putResponse = await fetch(upload_url, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!putResponse.ok) {
+        throw new Error(`File upload to storage failed (HTTP ${putResponse.status})`);
+      }
+
+      const { file_asset_id } = await filesApi.confirmUpload({
+        storage_key,
+        bucket,
+        filename: file.name,
+        mime_type: file.type,
+        size_bytes: file.size,
+      });
+      return file_asset_id;
     },
   });
 }

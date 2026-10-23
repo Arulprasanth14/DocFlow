@@ -7,7 +7,6 @@ import {
   Check,
   X,
   TrendingUp,
-  AlertCircle,
   ArrowUpRight,
   Circle,
   Activity,
@@ -21,6 +20,9 @@ import { useNavigate } from "react-router-dom";
 import { useDashboardStats } from "@/hooks/useAnalytics";
 import { useMyApprovalQueue, useApproveStep, useRejectStep } from "@/hooks/useApprovals";
 import { useDocuments } from "@/hooks/useDocuments";
+import { useNotifications } from "@/hooks/useNotifications";
+import { useOrgStats } from "@/hooks/useOrg";
+import { useAuthStore } from "@/store/authStore";
 const C = {
   bg: "var(--bg-base)",
   secondBg: "var(--bg-overlay)",
@@ -38,49 +40,6 @@ const C = {
   secondary: "var(--text-muted)",
   disabled: "var(--text-disabled)",
 };
-
-// ── sample data ────────────────────────────────────────────────────
-const pendingApprovals = [
-  { id: "mock1", doc: "Q4 Financial Report", owner: "Sarah Chen", avatar: "SC", time: "2h ago", status: "urgent" },
-  { id: "mock2", doc: "Product Roadmap 2025", owner: "Marcus Lee", avatar: "ML", time: "4h ago", status: "pending" },
-  { id: "mock3", doc: "HR Policy Update", owner: "Anika Patel", avatar: "AP", time: "6h ago", status: "pending" },
-  { id: "mock4", doc: "Vendor Contract — AWS", owner: "James Wright", avatar: "JW", time: "1d ago", status: "review" },
-];
-
-const recentDocs = [
-  { name: "Annual Budget Draft", type: "Finance", modified: "Today, 10:42", progress: 78 },
-  { name: "Brand Guidelines v3", type: "Design", modified: "Today, 09:15", progress: 100 },
-  { name: "Security Audit Report", type: "IT", modified: "Yesterday", progress: 45 },
-  { name: "Partnership MOU", type: "Legal", modified: "Yesterday", progress: 60 },
-];
-
-const timelineItems = [
-  { user: "Sofia Reyes", avatar: "SR", action: "approved", doc: "Marketing Plan Q1", time: "12 min ago", color: C.success },
-  { user: "David Kim", avatar: "DK", action: "uploaded", doc: "Tech Specs v2.4", time: "34 min ago", color: C.primary },
-  { user: "Lena Müller", avatar: "LM", action: "rejected", doc: "Budget Revision", time: "1h ago", color: C.danger },
-  { user: "Chris Obi", avatar: "CO", action: "commented on", doc: "Product Brief", time: "2h ago", color: C.warning },
-  { user: "Yuki Tanaka", avatar: "YT", action: "shared", doc: "Investor Deck", time: "3h ago", color: C.purple },
-];
-
-const workflowNodes = [
-  { label: "Draft", count: 12, color: C.secondary, done: true },
-  { label: "Review", count: 8, color: C.warning, done: false },
-  { label: "Approve", count: 5, color: C.primary, done: false },
-  { label: "Sign", count: 3, color: C.purple, done: false },
-  { label: "Archive", count: 24, color: C.success, done: true },
-];
-
-const statsData = [
-  { label: "Active Docs", value: "148", change: "+12%", up: true, icon: FileText, color: C.primary },
-  { label: "Pending", value: "37", change: "+3", up: false, icon: Clock, color: C.warning },
-  { label: "Teams", value: "12", change: "2 new", up: true, icon: Users, color: C.purple },
-  { label: "Completed", value: "94%", change: "+4%", up: true, icon: TrendingUp, color: C.success },
-];
-
-const chartData = [
-  { day: "Mon", docs: 14 }, { day: "Tue", docs: 22 }, { day: "Wed", docs: 18 },
-  { day: "Thu", docs: 31 }, { day: "Fri", docs: 27 }, { day: "Sat", docs: 9 }, { day: "Sun", docs: 15 },
-];
 
 // ── helpers ────────────────────────────────────────────────────────
 function Avatar({ initials, size = 32, color = C.primary }: { initials: string; size?: number; color?: string }) {
@@ -119,30 +78,50 @@ export default function DashboardPage() {
   const { data: stats } = useDashboardStats();
   const { data: myQueue } = useMyApprovalQueue();
   const { data: recentDocsData } = useDocuments({ page: 1, limit: 4, sort: '-updated_at' });
+  const { data: recentNotifications } = useNotifications({ page: 1, limit: 5 });
+  const canViewOrgStats = useAuthStore((s) => s.hasPermission('admin:orgs') || s.isSuperAdmin());
+  const { data: orgStats } = useOrgStats(canViewOrgStats);
   const approveM = useApproveStep();
   const rejectM = useRejectStep();
 
-  const realPendingApprovals = (myQueue || []).slice(0, 4).map(step => {
-    const doc = step.workflow_instance?.document;
-    const submitter = doc?.submitter_name || "Unknown";
+  const displayPending = (myQueue?.items || []).slice(0, 4).map((step: any) => {
+    const submitter = step.submitter_name || step.document_title || "Unassigned";
     return {
       id: step.id,
-      doc: doc?.title || `Step ${step.id}`,
-      owner: submitter,
-      avatar: submitter.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase() || "U",
-      time: new Date(step.workflow_instance?.started_at || Date.now()).toLocaleDateString(),
+      doc: step.document_title || `Approval Step ${String(step.id).split('-')[0]}`,
+      owner: step.submitter_name || "Unknown submitter",
+      avatar: submitter.split(" ").map((w: string) => w[0]).slice(0, 2).join("").toUpperCase() || "U",
+      time: new Date(step.created_at || Date.now()).toLocaleDateString(),
       status: "pending",
     };
   });
-  const displayPending = realPendingApprovals.length > 0 ? realPendingApprovals : pendingApprovals;
 
-  const realRecentDocs = (recentDocsData?.items || []).map(doc => ({
+  const displayRecent = (recentDocsData?.items || []).map(doc => ({
     name: doc.title,
     type: doc.doc_type_name || "Document",
     modified: new Date(doc.updated_at).toLocaleDateString(),
-    progress: doc.status === "approved" ? 100 : doc.status === "pending_approval" || doc.status === "under_review" ? 60 : 20,
+    progress: doc.status === "approved" ? 100 : doc.status === "pending" || doc.status === "sent_back" ? 60 : doc.status === "draft" ? 10 : 20,
   }));
-  const displayRecent = realRecentDocs.length > 0 ? realRecentDocs : recentDocs;
+
+  const timelineItems = (recentNotifications?.items || []).slice(0, 5).map((n) => ({
+    title: n.title,
+    body: n.body,
+    time: new Date(n.created_at).toLocaleString(),
+    color: n.type === "rejected" ? C.danger : n.type === "approved" ? C.success : C.primary,
+  }));
+
+  // Real pipeline counts from the same analytics source as the Statistics
+  // panel below — no fabricated "Sign"/"Archive" stages that don't
+  // correspond to any actual DocumentStatus.
+  const workflowNodes = stats ? [
+    { label: "Submitted", count: stats.documents_submitted, color: C.secondary, done: true },
+    { label: "Pending", count: stats.pending_approvals, color: C.warning, done: false },
+    { label: "Approved", count: stats.documents_approved, color: C.success, done: true },
+    { label: "Rejected", count: stats.documents_rejected, color: C.danger, done: true },
+  ] : [];
+
+  const trendData = stats?.trend_data || [];
+  const now = new Date();
 
   return (
     <div style={{ position: "relative", minHeight: "100%", overflow: "hidden" }}>
@@ -181,11 +160,12 @@ export default function DashboardPage() {
             </p>
           </div>
           <button
+            onClick={() => navigate('/documents/new')}
             style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 20px", background: C.primary, border: "none", borderRadius: 12, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
             className="hover:opacity-90 transition-opacity"
           >
             <Zap size={16} />
-            New Workflow
+            New Document
           </button>
         </div>
 
@@ -194,7 +174,7 @@ export default function DashboardPage() {
           {[
             { icon: Upload, label: "Upload Doc", sub: "Drag & drop files", color: C.primary, action: () => navigate('/documents/new') },
             { icon: GitBranch, label: "New Workflow", sub: "Automate approvals", color: C.purple, action: () => navigate('/workflows') },
-            { icon: CheckCircle, label: "Pending Review", sub: `${myQueue?.length || 5} awaiting you`, color: C.warning, action: () => navigate('/approvals') },
+            { icon: CheckCircle, label: "Pending Review", sub: `${myQueue?.total ?? myQueue?.items?.length ?? 0} awaiting you`, color: C.warning, action: () => navigate('/approvals') },
             { icon: UserPlus, label: "Invite Team", sub: "Add collaborators", color: C.success, action: () => navigate('/admin/members') },
           ].map((a) => (
             <button
@@ -232,10 +212,15 @@ export default function DashboardPage() {
           <div style={{ background: "var(--bg-elevated)", border: `1px solid var(--border-default)`, borderRadius: 20, padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <h3 style={{ color: C.heading, fontWeight: 700, fontSize: 16, margin: 0 }}>Pending Approvals</h3>
-              <Badge label="5 new" color={C.danger} />
+              <Badge label={`${myQueue?.total ?? displayPending.length} new`} color={C.danger} />
             </div>
             <div style={{ height: 1, background: C.border }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {displayPending.length === 0 && (
+                <div style={{ color: C.secondary, fontSize: 13, textAlign: "center", padding: "12px 0" }}>
+                  Nothing waiting on your approval right now.
+                </div>
+              )}
               {displayPending.map((row) => (
                 <div key={row.doc} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <Avatar initials={row.avatar} size={32} color={row.status === "urgent" ? C.danger : C.primary} />
@@ -269,6 +254,11 @@ export default function DashboardPage() {
             </div>
             <div style={{ height: 1, background: C.border }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {displayRecent.length === 0 && (
+                <div style={{ color: C.secondary, fontSize: 13, textAlign: "center", padding: "12px 0" }}>
+                  No documents yet — create your first one.
+                </div>
+              )}
               {displayRecent.map((doc) => (
                 <div key={doc.name}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -290,17 +280,21 @@ export default function DashboardPage() {
             <h3 style={{ color: C.heading, fontWeight: 700, fontSize: 16, margin: 0 }}>Activity Timeline</h3>
             <div style={{ height: 1, background: C.border }} />
             <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+              {timelineItems.length === 0 && (
+                <div style={{ color: C.secondary, fontSize: 13, textAlign: "center", padding: "12px 0" }}>
+                  No recent activity yet.
+                </div>
+              )}
               {timelineItems.map((item, i) => (
                 <div key={i} style={{ display: "flex", gap: 12, paddingBottom: i < timelineItems.length - 1 ? 16 : 0, position: "relative" }}>
                   {i < timelineItems.length - 1 && (
                     <div style={{ position: "absolute", left: 16, top: 32, bottom: 0, width: 1, background: C.border }} />
                   )}
-                  <Avatar initials={item.avatar} size={32} color={item.color} />
+                  <Avatar initials="●" size={32} color={item.color} />
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, lineHeight: 1.5 }}>
-                      <span style={{ color: C.heading, fontWeight: 600 }}>{item.user} </span>
-                      <span style={{ color: C.secondary }}>{item.action} </span>
-                      <span style={{ color: item.color, fontWeight: 500 }}>{item.doc}</span>
+                      <span style={{ color: C.heading, fontWeight: 600 }}>{item.title}</span>
+                      {item.body && <span style={{ color: C.secondary }}> — {item.body}</span>}
                     </div>
                     <div style={{ color: C.disabled, fontSize: 11, marginTop: 2 }}>{item.time}</div>
                   </div>
@@ -322,6 +316,9 @@ export default function DashboardPage() {
               <Badge label="Live" color={C.success} />
             </div>
 
+            {workflowNodes.length === 0 && (
+              <div style={{ color: C.secondary, fontSize: 13, marginBottom: 24 }}>No document activity yet.</div>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 0, marginBottom: 24, overflowX: "auto" }}>
               {workflowNodes.map((node, i) => (
                 <div key={node.label} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 60 }}>
@@ -347,23 +344,29 @@ export default function DashboardPage() {
             </div>
 
             <div>
-              <div style={{ color: C.secondary, fontSize: 12, marginBottom: 8 }}>Documents processed — this week</div>
-              <ResponsiveContainer width="100%" height={80}>
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={C.primary} stopOpacity={0.3} />
-                      <stop offset="95%" stopColor={C.primary} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis dataKey="day" tick={{ fill: C.disabled, fontSize: 10 }} axisLine={false} tickLine={false} />
-                  <Tooltip
-                    contentStyle={{ background: C.secondBg, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.body }}
-                    cursor={{ stroke: C.primary, strokeWidth: 1, strokeDasharray: "4 4" }}
-                  />
-                  <Area type="monotone" dataKey="docs" stroke={C.primary} strokeWidth={2} fill="url(#areaGrad)" dot={false} />
-                </AreaChart>
-              </ResponsiveContainer>
+              <div style={{ color: C.secondary, fontSize: 12, marginBottom: 8 }}>Documents processed over time</div>
+              {trendData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={80}>
+                  <AreaChart data={trendData}>
+                    <defs>
+                      <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={C.primary} stopOpacity={0.3} />
+                        <stop offset="95%" stopColor={C.primary} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="date" tick={{ fill: C.disabled, fontSize: 10 }} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      contentStyle={{ background: C.secondBg, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, color: C.body }}
+                      cursor={{ stroke: C.primary, strokeWidth: 1, strokeDasharray: "4 4" }}
+                    />
+                    <Area type="monotone" dataKey="count" stroke={C.primary} strokeWidth={2} fill="url(#areaGrad)" dot={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div style={{ color: C.secondary, fontSize: 12, padding: "16px 0", textAlign: "center" }}>
+                  Trend data isn't available yet.
+                </div>
+              )}
             </div>
           </div>
 
@@ -372,7 +375,9 @@ export default function DashboardPage() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
               <div>
                 <h3 style={{ color: C.heading, fontWeight: 700, fontSize: 16, margin: 0 }}>Statistics</h3>
-                <p style={{ color: C.secondary, fontSize: 12, marginTop: 4 }}>Workspace metrics — August 2026</p>
+                <p style={{ color: C.secondary, fontSize: 12, marginTop: 4 }}>
+                  Workspace metrics — {now.toLocaleString(undefined, { month: 'long', year: 'numeric' })}
+                </p>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 {["Week", "Month", "Year"].map((t, i) => (
@@ -393,10 +398,10 @@ export default function DashboardPage() {
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
               {[
-                { label: "Active Docs", value: stats?.documents_submitted.toString() || "0", change: "+0%", up: true, icon: FileText, color: C.primary },
-                { label: "Pending", value: stats?.pending_approvals.toString() || "0", change: "+0", up: false, icon: Clock, color: C.warning },
-                { label: "Teams", value: "12", change: "0 new", up: true, icon: Users, color: C.purple },
-                { label: "Completed", value: `${stats ? Math.round((stats.documents_approved / Math.max(1, stats.documents_submitted)) * 100) : 0}%`, change: "+0%", up: true, icon: TrendingUp, color: C.success },
+                { label: "Active Docs", value: stats?.documents_submitted.toString() || "0", icon: FileText, color: C.primary },
+                { label: "Pending", value: stats?.pending_approvals.toString() || "0", icon: Clock, color: C.warning },
+                { label: "Teams", value: canViewOrgStats ? (orgStats?.team_count.toString() || "0") : "—", icon: Users, color: C.purple },
+                { label: "Completed", value: `${stats && stats.documents_submitted > 0 ? Math.round((stats.documents_approved / stats.documents_submitted) * 100) : 0}%`, icon: TrendingUp, color: C.success },
               ].map((s) => (
                 <div
                   key={s.label}
@@ -413,10 +418,6 @@ export default function DashboardPage() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div style={{ width: 36, height: 36, background: `${s.color}18`, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>
                       <s.icon size={18} color={s.color} />
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 4, color: s.up ? C.success : C.warning, fontSize: 11, fontWeight: 600 }}>
-                      {s.up ? <TrendingUp size={12} /> : <AlertCircle size={12} />}
-                      {s.change}
                     </div>
                   </div>
                   <div>

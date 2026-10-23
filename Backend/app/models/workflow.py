@@ -63,6 +63,29 @@ class WorkflowTemplate(BaseModel):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
+    # ── Ownership & sharing (§7) ───────────────────────────────────────────
+    # Requirements §7 + the §2.5 matrix ("Create and manage own workflows:
+    # Yes" for all four roles): workflows are no longer admin-authored only —
+    # any member can define their own named, reusable approval routes.
+    # `created_by` is the owner; NULL means an org-level template authored
+    # before ownership existed (treated as organization-visible, admin-managed).
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True,
+    )
+    # 'private'      — only the owner (and org admins) can see/use/edit it
+    # 'organization' — any member of the org can see and use it; still only
+    #                  the owner or an org admin may EDIT it ("Prevent
+    #                  unauthorized users from editing another user's private
+    #                  workflow unless sharing or administration permissions
+    #                  allow it").
+    visibility: Mapped[str] = mapped_column(
+        String(20), default="organization", server_default="organization", nullable=False,
+    )
+
+    owner: Mapped["User | None"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload", foreign_keys=[created_by],
+    )
+
     # Relationships
     stages: Mapped[list["WorkflowStage"]] = relationship(
         "WorkflowStage", back_populates="template",
@@ -96,6 +119,9 @@ class WorkflowStage(BaseModel):
     sla_hours: Mapped[int | None] = mapped_column(Integer)
     # When True, this stage must re-approve if a later stage requests changes
     reapproval_on_revision: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # When True, an Approve decision on this stage REQUIRES a digital e-signature;
+    # the decision endpoint will reject 'approved' without a valid ESignatureRequest.
+    requires_signature: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Relationships
     template: Mapped["WorkflowTemplate"] = relationship(
@@ -281,6 +307,29 @@ class ApprovalStep(BaseModel):
     # Round number (1 = first pass, 2 = after first revision, etc.)
     round_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
+    # ── Revocation / invalidation (§6.5) ───────────────────────────────────
+    # A revoked decision is NEVER deleted and its `decision` field is NEVER
+    # rewritten — the original decision stays exactly as recorded, and these
+    # columns mark that it no longer counts toward stage gating, with who
+    # revoked it, when, and why ("Never delete the original approval record.
+    # Preserve it as an audit event with its status, timestamp, reason, and
+    # relationship to the subsequent revocation/correction").
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    revocation_reason: Mapped[str | None] = mapped_column(Text)
+    # Set when a NEW document version invalidates this decision (it was made
+    # against a version that is no longer current), requiring re-approval.
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    @property
+    def is_counted(self) -> bool:
+        """True when this decision still counts toward stage gating — i.e.
+        it has not been revoked and has not been superseded by a newer
+        document version."""
+        return self.revoked_at is None and self.superseded_at is None
+
     # Relationships
     instance: Mapped["WorkflowInstance"] = relationship(
         "WorkflowInstance", back_populates="approval_steps", lazy="noload",
@@ -321,8 +370,20 @@ class ApprovalStep(BaseModel):
 
 class ESignature(BaseModel):
     """
-    Electronic signature evidence captured when an approver signs a step.
-    Stored for legal defensibility: hash + IP + timestamp.
+    Signature evidence captured when an approver signs a step.
+
+    Requirements report §6.4: a drawn/typed signature image ALONE is not a
+    cryptographic digital signature. Every row created by the current
+    ApprovalService.decide() flow populates the `signature_b64`/
+    `algorithm`/`key_id`/`signed_payload`/`payload_hash` fields with a real
+    RSA-PSS-SHA256 signature (app/core/signing.py) binding the approver
+    identity, document version hash, decision, timestamp, and workflow
+    step together — `signature_method` stays as supplementary UI/ceremony
+    metadata (how the approver indicated intent to sign), not the proof
+    itself. The legacy `signed_hash`/`ip_address`/`user_agent`/
+    `provider_reference` fields are kept for rows created before this
+    (or by a future external e-sign provider integration) and are not
+    required for a row to be considered a valid cryptographic signature.
     """
     __tablename__ = "esignatures"
 
@@ -330,9 +391,12 @@ class ESignature(BaseModel):
         UUID(as_uuid=True), ForeignKey("approval_steps.id", ondelete="CASCADE"),
         nullable=False, unique=True,
     )
-    # 'drawn' | 'typed' | 'provider_docusign' | 'provider_adobe' | 'click_to_sign'
+    # 'drawn' | 'typed' | 'provider_docusign' | 'provider_adobe' | 'click_to_sign' |
+    # 'system' (no separate UI ceremony — the act of deciding IS the signing event)
     signature_method: Mapped[str] = mapped_column(String(100), nullable=False)
-    # SHA-256 hash of the signed document bytes at signing time
+    # SHA-256 hash of the signed document bytes at signing time (legacy —
+    # superseded by `payload_hash`, which covers the full signed payload
+    # including this same document-version hash plus approver/decision/step)
     signed_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     ip_address: Mapped[str | None] = mapped_column(String(50))
     user_agent: Mapped[str | None] = mapped_column(Text)
@@ -342,8 +406,93 @@ class ESignature(BaseModel):
     # Optional: external provider reference (DocuSign envelope ID, etc.)
     provider_reference: Mapped[str | None] = mapped_column(String(255))
 
+    # ── Cryptographic signature (§6.4) ─────────────────────────────────────
+    # The exact canonicalized payload that was signed — approver_id,
+    # document_version_id, document_hash, decision, step_id, instance_id,
+    # signed_at (ISO) — persisted so verification never has to guess at
+    # reconstruction and any later edit to this row is itself detectable
+    # (the stored payload_hash must match a fresh hash of signed_payload).
+    signed_payload: Mapped[dict | None] = mapped_column(JSONB)
+    payload_hash: Mapped[str | None] = mapped_column(String(64))
+    signature_b64: Mapped[str | None] = mapped_column(Text)
+    algorithm: Mapped[str | None] = mapped_column(String(50))
+    key_id: Mapped[str | None] = mapped_column(String(32))
+    # Cached result of the most recent verify_signature() call (§6.4: "record
+    # signature verification results... and relevant audit events") — the
+    # authoritative check always re-verifies live; this is a fast-path cache
+    # for list views, refreshed whenever the signature is re-checked.
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_verification_valid: Mapped[bool | None] = mapped_column(Boolean)
+
     approval_step: Mapped["ApprovalStep"] = relationship(
         "ApprovalStep", back_populates="esignature", lazy="noload",
+    )
+
+
+class ApprovalRevocation(BaseModel):
+    """
+    A request to revoke/recall an already-recorded approval decision (§6.5).
+
+    Two paths, distinguished by `status` at creation time:
+
+      'applied'   — nothing downstream had happened yet, so the revocation
+                    took effect immediately: the original ApprovalStep is
+                    marked revoked (never deleted) and the document went
+                    back to its owner for correction.
+      'requested' — the document had already moved to a later approver, so
+                    the earlier approver may NOT silently roll it back. The
+                    request is recorded, the instance enters
+                    RECALL_REQUESTED (and stays OPEN), affected participants
+                    are notified, and an authorized actor later resolves it
+                    to 'approved' (apply the recall, invalidating affected
+                    downstream approvals) or 'denied' (workflow continues).
+
+    The row itself is the durable audit record of the revocation and its
+    relationship to the original decision.
+    """
+    __tablename__ = "approval_revocations"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # The decision being revoked — preserved, never deleted.
+    approval_step_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("approval_steps.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'applied' | 'requested' | 'approved' | 'denied'
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="requested")
+    # Steps whose decisions this recall invalidated (or would invalidate)
+    affected_step_ids: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]",
+    )
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    instance: Mapped["WorkflowInstance"] = relationship(
+        "WorkflowInstance", lazy="noload", foreign_keys=[instance_id],
+    )
+    approval_step: Mapped["ApprovalStep"] = relationship(
+        "ApprovalStep", lazy="noload", foreign_keys=[approval_step_id],
+    )
+    requester: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload", foreign_keys=[requested_by],
+    )
+
+    __table_args__ = (
+        Index("idx_approval_revocation_instance_status", "instance_id", "status"),
     )
 
 

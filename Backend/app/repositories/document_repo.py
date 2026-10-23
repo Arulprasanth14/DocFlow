@@ -145,7 +145,6 @@ class DocumentRepository:
         prefix = f"DOC-{year}-"
         result = await self.db.execute(
             select(func.count()).select_from(Document).where(
-                Document.org_id == org_id,
                 Document.public_id.like(f"{prefix}%"),
             )
         )
@@ -170,6 +169,10 @@ class DocumentRepository:
     async def list_by_org(
         self,
         org_id: UUID,
+        user_id: UUID,
+        is_admin: bool,
+        is_approver: bool,
+        accessible_dept_ids: list[UUID],
         page: int = 1,
         limit: int = 20,
         status: str | None = None,
@@ -177,6 +180,10 @@ class DocumentRepository:
         dept_id: UUID | None = None,
         submitted_by: UUID | None = None,
         search: str | None = None,
+        tags: list[str] | None = None,
+        priority: str | None = None,
+        date_from: datetime.datetime | None = None,
+        date_to: datetime.datetime | None = None,
     ) -> tuple[list[Document], int]:
         q = (
             select(Document)
@@ -190,6 +197,18 @@ class DocumentRepository:
             )
         )
 
+        if not is_admin:
+            if is_approver:
+                q = q.where(
+                    or_(
+                        Document.submitted_by == user_id,
+                        Document.dept_id.in_(accessible_dept_ids),
+                        Document.dept_id.is_(None),
+                    )
+                )
+            else:
+                q = q.where(Document.submitted_by == user_id)
+
         if status:
             q = q.where(Document.status == status)
         if doc_type_id:
@@ -198,6 +217,14 @@ class DocumentRepository:
             q = q.where(Document.dept_id == dept_id)
         if submitted_by:
             q = q.where(Document.submitted_by == submitted_by)
+        if priority:
+            q = q.where(Document.priority == priority)
+        if tags:
+            q = q.where(Document.tags.contains(tags))
+        if date_from:
+            q = q.where(Document.created_at >= date_from)
+        if date_to:
+            q = q.where(Document.created_at <= date_to)
         if search:
             search_pattern = f"%{search}%"
             q = q.where(
@@ -234,6 +261,7 @@ class DocumentRepository:
         submitted_by: UUID,
         submitted_at: datetime.datetime | None = None,
         submitter_snapshot: dict | None = None,
+        tags: list[str] | None = None,
     ) -> Document:
         doc = Document(
             org_id=org_id,
@@ -249,6 +277,7 @@ class DocumentRepository:
             submitted_by=submitted_by,
             submitted_at=submitted_at,
             submitter_snapshot=submitter_snapshot,
+            tags=tags or [],
         )
         self.db.add(doc)
         await self.db.flush()
@@ -346,6 +375,11 @@ class DocumentVersionRepository:
             version_num=version_num,
             title=title,
             form_data=form_data,
+            # uploaded_by is the canonical, NOT NULL authorship column;
+            # changed_by is a legacy, nullable duplicate kept for compatibility.
+            # None of the 4 call sites (create/update/submit/restore) pass a
+            # separate uploader, so uploaded_by == changed_by here.
+            uploaded_by=changed_by,
             changed_by=changed_by,
             change_reason=change_reason,
         )

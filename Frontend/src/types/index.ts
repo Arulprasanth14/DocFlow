@@ -21,18 +21,17 @@ export interface ApiError {
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
+// Must match Backend/app/models/document.py::DocumentStatus exactly.
 export type DocumentStatus =
   | 'draft'
   | 'submitted'
-  | 'under_review'
-  | 'pending_approval'
-  | 'revision_requested'
+  | 'pending'
   | 'approved'
   | 'rejected'
-  | 'executed'
+  | 'sent_back'
   | 'archived'
-  | 'cancelled'
-  | 'closed';
+  | 'expired'
+  | 'cancelled';
 
 export type DocumentPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -51,16 +50,26 @@ export type WorkflowStepStatus =
   | 'skipped'
   | 'cancelled';
 
+// Must match Backend/app/domain/enums.py::NotificationType exactly. The
+// values actually fired by NotificationService.notify()/notify_many() calls
+// throughout the backend are the plain-word ones (assigned/approved/
+// rejected/...); the dotted document.* values are declared on the backend
+// enum but not currently fired by any call site — kept here so this type
+// doesn't drift out of sync again if that changes.
 export type NotificationType =
-  | 'approval.requested'
-  | 'approval.approved'
-  | 'approval.rejected'
-  | 'approval.returned'
+  | 'assigned'
+  | 'approved'
+  | 'rejected'
+  | 'changes_requested'
+  | 'sla_breach_warning'
+  | 'escalated'
+  | 'new_message'
+  | 'delegated'
   | 'document.submitted'
   | 'document.approved'
   | 'document.rejected'
-  | 'sla.warning'
-  | 'sla.breach'
+  | 'document.cancelled'
+  | 'document.comment'
   | 'mention'
   | 'system';
 
@@ -80,11 +89,27 @@ export interface AuthUser {
   status: string;
 }
 
+/**
+ * The only thing the UI routes on after sign-in. These are normal outcomes
+ * returned with HTTP 200 - not errors.
+ *   HAS_ORG         -> dashboard
+ *   PENDING_REQUEST -> "waiting for approval" screen
+ *   NO_ORG          -> create / join organization
+ */
+export type AccountState = 'HAS_ORG' | 'PENDING_REQUEST' | 'NO_ORG';
+
+export interface PendingRequestInfo {
+  org_name: string;
+  requested_at: string | null;
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: 'bearer';
   user: AuthUser;
   org_membership: OrgMembership | null;
+  state: AccountState;
+  pending_request: PendingRequestInfo | null;
 }
 
 // ── Organization ──────────────────────────────────────────────────────────────
@@ -97,6 +122,16 @@ export interface Organization {
   plan: string;
   status: string;
   settings?: Record<string, unknown>;
+  industry?: string | null;
+  timezone?: string | null;
+  branding_primary_color?: string | null;
+  branding_accent_color?: string | null;
+  notification_defaults?: {
+    email: boolean;
+    sms: boolean;
+    push: boolean;
+    in_app: boolean;
+  } | null;
   created_at: string;
 }
 
@@ -237,6 +272,7 @@ export interface Document {
   title: string;
   status: DocumentStatus;
   priority: DocumentPriority;
+  tags: string[];
   form_data: Record<string, unknown>;
   metadata: Record<string, unknown>;
   submitted_by: string;
@@ -249,6 +285,10 @@ export interface Document {
   attachment_count?: number;
   comment_count?: number;
   version_count?: number;
+  /** Latest ApprovalStep for this document's workflow instance, if any — used to open WorkflowChatPanel. */
+  current_approval_step_id?: string | null;
+  /** This document's active WorkflowInstance id, if any — used to call cancelWorkflow. */
+  current_workflow_instance_id?: string | null;
 
   // Expanded relations (when fetched with ?expand=true)
   doc_type?: DocumentType;
@@ -277,6 +317,10 @@ export interface DocumentFilterParams {
   submitted_by?: string;
   search?: string;
   sort?: string;
+  tags?: string[];
+  priority?: string;
+  date_from?: string;
+  date_to?: string;
 }
 
 export interface DocumentVersion {

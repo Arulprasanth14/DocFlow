@@ -20,6 +20,8 @@ from app.core.websocket import ws_manager
 from app.middleware.logging import RequestLoggingMiddleware, configure_logging
 from app.routers import (
     admin,
+    agent,
+    analytics,
     approvals,
     auth,
     chat,
@@ -28,9 +30,12 @@ from app.routers import (
     health,
     notifications,
     organizations,
+    search,
     users,
+    workflow_templates_public,
     workflows,
     ws_chat,
+    ws_notifications,
 )
 
 logger = structlog.get_logger(__name__)
@@ -50,6 +55,12 @@ async def lifespan(app: FastAPI):
     # Configure structured logging
     configure_logging()
 
+    # Use the OS certificate store for outbound TLS so a private/corporate
+    # root CA is honoured (see app/core/trust.py). Must run before any
+    # outbound HTTPS client is created.
+    from app.core.trust import ensure_os_trust_store
+    ensure_os_trust_store()
+
     # Initialize Firebase (non-fatal if not configured)
     firebase_ok = initialize_firebase()
     logger.info("Firebase status", enabled=firebase_ok)
@@ -68,7 +79,11 @@ async def lifespan(app: FastAPI):
     await ws_manager.start_redis_subscriber()
     logger.info("WebSocket Redis subscriber started")
 
-    logger.info("DocFlow ready ✓")
+    # Register EventBus subscribers (must run after startup so the process is live)
+    import app.subscribers  # noqa: F401 — side-effect import registers all handlers
+    logger.info("EventBus subscribers registered")
+
+    logger.info("DocFlow ready")
 
     yield   # ── APPLICATION RUNNING ──
 
@@ -146,11 +161,23 @@ def create_app() -> FastAPI:
     # Workflows, Approvals, and Templates
     app.include_router(workflows.router, prefix=f"{API_PREFIX}")
     app.include_router(approvals.router, prefix=f"{API_PREFIX}")
+    # Public (non-admin) template read — GET /api/v1/workflow-templates
+    app.include_router(workflow_templates_public.router, prefix=f"{API_PREFIX}")
 
     # Chat & Notifications
     app.include_router(chat.router, prefix=f"{API_PREFIX}")
-    app.include_router(ws_chat.router)  # /ws/chat/{conversation_id} WebSocket
+    app.include_router(ws_chat.router)          # /ws/chat/{conversation_id} WebSocket
+    app.include_router(ws_notifications.router) # /ws/notifications WebSocket
     app.include_router(notifications.router, prefix=f"{API_PREFIX}")
+
+    # Analytics
+    app.include_router(analytics.router, prefix=f"{API_PREFIX}")
+
+    # Unified search (documents / workflows / members / messages)
+    app.include_router(search.router, prefix=f"{API_PREFIX}")
+
+    # AI Agent (organization-scoped RAG) + knowledge administration
+    app.include_router(agent.router, prefix=f"{API_PREFIX}")
 
     # Admin Management & Audit Logs
     app.include_router(admin.router, prefix=f"{API_PREFIX}")

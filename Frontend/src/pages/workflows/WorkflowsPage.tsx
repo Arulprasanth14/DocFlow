@@ -1,16 +1,23 @@
 /**
  * DocFlow Frontend — Workflows Page
  * Full workflow management UI: pipeline visualization, stats, filters, workflow cards.
+ * Updated Phase 2: replaces mockWorkflows with live data from GET /workflow-templates.
  */
 
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast, Toaster } from 'sonner';
 import {
-  GitBranch, Plus, Clock, CheckCircle, XCircle,
-  ArrowRight, Filter, Search, AlertCircle,
+  GitBranch, Plus, Clock, CheckCircle,
+  Filter, Search, AlertCircle,
   TrendingUp, Zap, MoreVertical, ChevronRight,
-  FileText, Users, BarChart2
+  FileText
 } from 'lucide-react';
+import { useWorkflowTemplates } from '@/hooks/useWorkflows';
+import { workflowsApi } from '@/lib/api/workflows';
+import { useAuthStore } from '@/store/authStore';
+import WorkflowBuilderModal from '@/components/workflows/WorkflowBuilderModal';
 
 // ── Design tokens (matching DashboardPage) ───────────────────────────────────
 const C = {
@@ -57,87 +64,9 @@ interface Workflow {
   priority: 'low' | 'normal' | 'high' | 'urgent';
 }
 
-// ── Mock Data ─────────────────────────────────────────────────────────────────
-const mockWorkflows: Workflow[] = [
-  {
-    id: 'wf-001', name: 'Finance Approval Chain', document: 'Q4 Budget Report 2026',
-    docType: 'Finance', status: 'active',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'done', color: C.primary400 },
-      { label: 'Approve', status: 'active', color: C.warning },
-      { label: 'Sign', status: 'pending', color: C.purple },
-      { label: 'Archive', status: 'pending', color: C.success },
-    ],
-    currentStep: 'Approval', progress: 60, assignees: ['SM', 'JL', 'AP'],
-    createdAt: '2 days ago', sla: 'warning', slaText: '6h left', priority: 'high',
-  },
-  {
-    id: 'wf-002', name: 'Legal Contract Review', document: 'AWS Vendor Contract 2026',
-    docType: 'Legal', status: 'active',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'active', color: C.primary400 },
-      { label: 'Approve', status: 'pending', color: C.warning },
-      { label: 'Sign', status: 'pending', color: C.purple },
-      { label: 'Archive', status: 'pending', color: C.success },
-    ],
-    currentStep: 'Legal Review', progress: 35, assignees: ['KP', 'MW'],
-    createdAt: '1 day ago', sla: 'on-time', slaText: '3d left', priority: 'normal',
-  },
-  {
-    id: 'wf-003', name: 'HR Policy Update', document: 'Remote Work Policy v2.1',
-    docType: 'HR', status: 'active',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'done', color: C.primary400 },
-      { label: 'Approve', status: 'done', color: C.warning },
-      { label: 'Sign', status: 'active', color: C.purple },
-      { label: 'Archive', status: 'pending', color: C.success },
-    ],
-    currentStep: 'Digital Signing', progress: 80, assignees: ['LR', 'CO'],
-    createdAt: '4 days ago', sla: 'on-time', slaText: '1d left', priority: 'urgent',
-  },
-  {
-    id: 'wf-004', name: 'Product Roadmap Sign-off', document: 'Product Roadmap H1 2027',
-    docType: 'Strategy', status: 'completed',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'done', color: C.primary400 },
-      { label: 'Approve', status: 'done', color: C.warning },
-      { label: 'Sign', status: 'done', color: C.purple },
-      { label: 'Archive', status: 'done', color: C.success },
-    ],
-    currentStep: 'Archived', progress: 100, assignees: ['YT', 'DK', 'SR'],
-    createdAt: '1 week ago', sla: 'on-time', slaText: 'Completed', priority: 'normal',
-  },
-  {
-    id: 'wf-005', name: 'IT Security Audit', document: 'Security Audit Report Q3',
-    docType: 'IT', status: 'paused',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'active', color: C.primary400 },
-      { label: 'Approve', status: 'pending', color: C.warning },
-      { label: 'Sign', status: 'pending', color: C.purple },
-      { label: 'Archive', status: 'pending', color: C.success },
-    ],
-    currentStep: 'Paused — awaiting IT', progress: 25, assignees: ['CB'],
-    createdAt: '3 days ago', sla: 'breached', slaText: 'Overdue 1d', priority: 'urgent',
-  },
-  {
-    id: 'wf-006', name: 'Marketing Campaign Brief', document: 'Q1 2027 Campaign Brief',
-    docType: 'Marketing', status: 'active',
-    steps: [
-      { label: 'Draft', status: 'done', color: C.muted },
-      { label: 'Review', status: 'active', color: C.primary400 },
-      { label: 'Approve', status: 'pending', color: C.warning },
-      { label: 'Sign', status: 'pending', color: C.purple },
-      { label: 'Archive', status: 'pending', color: C.success },
-    ],
-    currentStep: 'Creative Review', progress: 40, assignees: ['NA', 'PQ', 'RS'],
-    createdAt: 'Today', sla: 'on-time', slaText: '5d left', priority: 'low',
-  },
-];
+// Note: mockWorkflows removed — replaced with live API data below (useWorkflowTemplates).
+// The UI below adapts workflow templates into the WFStatus display model.
+
 
 const tabFilters: { key: 'all' | WFStatus; label: string; color: string }[] = [
   { key: 'all', label: 'All', color: C.primary400 },
@@ -237,7 +166,21 @@ function ProgressBar({ value, color = C.primary400 }: { value: number; color?: s
   );
 }
 
-function WorkflowCard({ wf, onView }: { wf: Workflow; onView: (id: string) => void }) {
+function WorkflowCard({
+  wf,
+  onView,
+  onEdit,
+  onDuplicate,
+  onToggleActive,
+  onDelete,
+}: {
+  wf: Workflow;
+  onView: (id: string) => void;
+  onEdit: (id: string) => void;
+  onDuplicate: (id: string) => void;
+  onToggleActive: (id: string, next: boolean) => void;
+  onDelete: (id: string) => void;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   const statusColors: Record<WFStatus, string> = {
@@ -294,12 +237,28 @@ function WorkflowCard({ wf, onView }: { wf: Workflow; onView: (id: string) => vo
                 background: C.card, border: `1px solid ${C.border}`, borderRadius: 12,
                 boxShadow: '0 8px 32px rgba(0,0,0,0.4)', minWidth: 140, overflow: 'hidden',
               }}>
-                {['View Details', 'Edit Workflow', 'Pause', 'Archive'].map(action => (
-                  <button key={action} onClick={() => setMenuOpen(false)} style={{ width: '100%', background: 'none', border: 'none', padding: '9px 14px', color: action === 'Archive' ? C.danger : C.body, fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s' }}
+                {/* Each item now performs a real action against the API.
+                    They previously all just closed the menu. */}
+                {([
+                  { label: 'Edit workflow', run: () => onEdit(wf.id) },
+                  { label: 'Duplicate', run: () => onDuplicate(wf.id) },
+                  {
+                    label: wf.status === 'active' ? 'Disable' : 'Enable',
+                    run: () => onToggleActive(wf.id, wf.status !== 'active'),
+                  },
+                  { label: 'Delete', run: () => onDelete(wf.id), danger: true },
+                ] as { label: string; run: () => void; danger?: boolean }[]).map(action => (
+                  <button
+                    key={action.label}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      action.run();
+                    }}
+                    style={{ width: '100%', background: 'none', border: 'none', padding: '9px 14px', color: action.danger ? C.danger : C.body, fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s' }}
                     onMouseEnter={e => (e.currentTarget.style.background = C.overlay)}
                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                   >
-                    {action}
+                    {action.label}
                   </button>
                 ))}
               </div>
@@ -358,10 +317,75 @@ function WorkflowCard({ wf, onView }: { wf: Workflow; onView: (id: string) => vo
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function WorkflowsPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const myUserId = useAuthStore((s) => s.user?.id);
   const [activeTab, setActiveTab] = useState<'all' | WFStatus>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  // §7 builder — null = closed, '' = creating new, id = editing that one.
+  const [builderFor, setBuilderFor] = useState<string | null | ''>(null);
 
-  const filtered = mockWorkflows.filter(wf => {
+  // ── Live Data: pull workflow templates from the API ───────────────────────
+  const { data: templatesData } = useWorkflowTemplates({ active_only: false });
+
+  const refreshWorkflows = () => {
+    queryClient.invalidateQueries({ queryKey: ['workflowTemplates'] });
+    queryClient.invalidateQueries({ queryKey: ['workflow-templates'] });
+  };
+
+  // §7: enable/disable and delete a workflow I own (backend enforces that
+  // only the owner or an org admin may do either).
+  const setActiveM = useMutation({
+    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
+      workflowsApi.setWorkflowActive(id, isActive),
+    onSuccess: () => {
+      toast.success('Workflow updated');
+      refreshWorkflows();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const duplicateM = useMutation({
+    mutationFn: (id: string) => workflowsApi.duplicateWorkflow(id),
+    onSuccess: () => {
+      toast.success('Workflow duplicated — the copy is private to you');
+      refreshWorkflows();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const deleteM = useMutation({
+    mutationFn: (id: string) => workflowsApi.deleteWorkflow(id),
+    onSuccess: () => {
+      toast.success('Workflow deleted');
+      refreshWorkflows();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  // Adapt WorkflowTemplateSummary[] to the local display shape.
+  //
+  // NOTE: the summary endpoint intentionally doesn't return stages, so the
+  // per-card "pipeline" this used to render (a hardcoded Draft → Review →
+  // Approve with progress: 0) was pure decoration unrelated to the actual
+  // workflow. It's replaced with the real metadata we do have; the full
+  // stage definition is loaded on demand when the builder opens.
+  const liveWorkflows: Workflow[] = (templatesData ?? []).map((t) => ({
+    id: t.id,
+    name: t.name,
+    document: t.description || 'No description',
+    docType: t.visibility === 'private' ? 'Private' : 'Shared',
+    status: t.is_active ? 'active' : 'archived',
+    steps: [],
+    currentStep: t.created_by === myUserId ? 'Created by you' : 'Organization workflow',
+    progress: 0,
+    assignees: [],
+    createdAt: new Date(t.created_at).toLocaleDateString(),
+    sla: 'on-time',
+    slaText: `v${t.version}`,
+    priority: 'normal',
+  }));
+
+  const filtered = liveWorkflows.filter(wf => {
     const matchesTab = activeTab === 'all' || wf.status === activeTab;
     const matchesSearch = wf.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       wf.document.toLowerCase().includes(searchQuery.toLowerCase());
@@ -369,10 +393,10 @@ export default function WorkflowsPage() {
   });
 
   const stats = {
-    total: mockWorkflows.length,
-    active: mockWorkflows.filter(w => w.status === 'active').length,
-    completed: mockWorkflows.filter(w => w.status === 'completed').length,
-    breached: mockWorkflows.filter(w => w.sla === 'breached').length,
+    total: liveWorkflows.length,
+    active: liveWorkflows.filter(w => w.status === 'active').length,
+    completed: liveWorkflows.filter(w => w.status === 'completed').length,
+    breached: liveWorkflows.filter(w => w.sla === 'breached').length,
   };
 
   return (
@@ -394,7 +418,7 @@ export default function WorkflowsPage() {
             <p style={{ color: C.muted, fontSize: 14, margin: 0 }}>Manage and track document approval pipelines across your organization</p>
           </div>
           <button
-            onClick={() => navigate('/documents/new')}
+            onClick={() => setBuilderFor('')}
             style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px',
               background: `linear-gradient(135deg, ${C.primary}, var(--color-primary-600))`,
@@ -468,7 +492,7 @@ export default function WorkflowsPage() {
               {searchQuery ? 'Try adjusting your search query' : 'Start by creating a new workflow to automate your document approvals'}
             </div>
             <button
-              onClick={() => navigate('/documents/new')}
+              onClick={() => setBuilderFor('')}
               style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: C.primary, border: 'none', borderRadius: 12, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
             >
               <Plus size={16} /> Create Workflow
@@ -477,7 +501,15 @@ export default function WorkflowsPage() {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 16 }}>
             {filtered.map(wf => (
-              <WorkflowCard key={wf.id} wf={wf} onView={(id) => console.log('View', id)} />
+              <WorkflowCard
+                key={wf.id}
+                wf={wf}
+                onView={(id) => setBuilderFor(id)}
+                onEdit={(id) => setBuilderFor(id)}
+                onDuplicate={(id) => duplicateM.mutate(id)}
+                onToggleActive={(id, next) => setActiveM.mutate({ id, isActive: next })}
+                onDelete={(id) => deleteM.mutate(id)}
+              />
             ))}
           </div>
         )}
@@ -498,6 +530,14 @@ export default function WorkflowsPage() {
           50% { opacity: 0.2; transform: scale(1.15); }
         }
       `}</style>
+
+      {builderFor !== null && (
+        <WorkflowBuilderModal
+          templateId={builderFor || null}
+          onClose={() => setBuilderFor(null)}
+        />
+      )}
+      <Toaster position="top-right" theme="dark" />
     </div>
   );
 }

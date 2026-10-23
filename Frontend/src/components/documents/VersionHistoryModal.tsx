@@ -6,7 +6,8 @@
 
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useDocumentVersions } from '@/hooks/useDocuments';
+import { useDocumentVersions, useRestoreDocumentVersion } from '@/hooks/useDocuments';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 export interface VersionHistoryModalProps {
   isOpen: boolean;
@@ -24,7 +25,9 @@ export function VersionHistoryModal({
   currentVersionNum,
 }: VersionHistoryModalProps) {
   const { data: versions = [], isLoading } = useDocumentVersions(docId);
+  const restoreVer = useRestoreDocumentVersion();
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const selectedVersion =
     versions.find((v) => v.id === selectedVersionId) || versions[0] || null;
@@ -273,6 +276,17 @@ export function VersionHistoryModal({
                       >
                         Version {selectedVersion.version_num}
                       </span>
+                      
+                      {selectedVersion.version_num !== currentVersionNum && (
+                        <button
+                          onClick={() => setConfirmOpen(true)}
+                          disabled={restoreVer.isPending}
+                          className="btn btn-secondary btn-sm"
+                          style={{ marginLeft: '12px' }}
+                        >
+                          {restoreVer.isPending && selectedVersionId === selectedVersion.id ? 'Restoring...' : 'Restore Version'}
+                        </button>
+                      )}
                     </div>
 
                     {/* Snapshot Form Data Table */}
@@ -389,6 +403,21 @@ export function VersionHistoryModal({
               </button>
             </div>
           </motion.div>
+          
+          <ConfirmDialog
+            open={confirmOpen}
+            title="Restore Version"
+            message={`Are you sure you want to restore Version ${selectedVersion?.version_num}? This will create a new current version with these values.`}
+            confirmLabel="Restore"
+            onConfirm={async () => {
+              if (selectedVersion) {
+                setConfirmOpen(false);
+                await restoreVer.mutateAsync({ docId, versionId: selectedVersion.id });
+                onClose();
+              }
+            }}
+            onCancel={() => setConfirmOpen(false)}
+          />
         </>
       )}
     </AnimatePresence>

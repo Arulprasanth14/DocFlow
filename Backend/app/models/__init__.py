@@ -69,6 +69,15 @@ from app.models.audit import AuditLog  # noqa: F401
 # ── AI / ML Extensions ────────────────────────────────────────────────────────
 from app.models.ai import DocumentEmbedding, AIChatSession, AIProcessingLog  # noqa: F401
 
+# ── AI Agent / RAG knowledge base (§12) ───────────────────────────────────────
+from app.models.agent import (  # noqa: F401
+    AgentChunk,
+    AgentConversation,
+    AgentKnowledgeSource,
+    AgentMessage,
+    IngestionStatus,
+)
+
 
 __all__ = [
     # Base
@@ -119,4 +128,10 @@ __all__ = [
     "DocumentEmbedding",
     "AIChatSession",
     "AIProcessingLog",
+    # AI Agent / RAG
+    "AgentKnowledgeSource",
+    "AgentChunk",
+    "AgentConversation",
+    "AgentMessage",
+    "IngestionStatus",
 ]

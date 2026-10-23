@@ -5,16 +5,35 @@
  * Step 2: Fill general properties and dynamic form schema fields with validation.
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   useDocumentTypes,
   useCreateDocument,
+  useUploadFile,
+  useAddDocumentAttachment,
 } from '@/hooks/useDocuments';
 import { useDepartments } from '@/hooks/useOrg';
+import { useAuthStore } from '@/store/authStore';
 import type { DocumentType } from '@/types';
 import DynamicFormRenderer, { validateFormSchema } from '@/components/documents/DynamicFormRenderer';
+
+// Matches Backend/app/core/storage.py MAX_FILE_SIZE_BYTES / ALLOWED_MIME_TYPES.
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const ALLOWED_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'image/jpeg',
+  'image/png',
+  'image/tiff',
+  'image/webp',
+  'text/plain',
+  'text/csv',
+]);
 
 export default function DocumentCreatePage() {
   const navigate = useNavigate();
@@ -26,6 +45,7 @@ export default function DocumentCreatePage() {
   // Common properties
   const [title, setTitle] = useState('');
   const [priority, setPriority] = useState('normal');
+  const [tags, setTags] = useState('');
   const [deptId, setDeptId] = useState('');
   const [dueAt, setDueAt] = useState('');
 
@@ -38,6 +58,52 @@ export default function DocumentCreatePage() {
   const { data: docTypes = [], isLoading: typesLoading } = useDocumentTypes(true);
   const { data: departments = [] } = useDepartments(true);
   const createDoc = useCreateDocument();
+  const uploadFile = useUploadFile();
+  const addAttachment = useAddDocumentAttachment();
+  const canManageDocTypes = useAuthStore((s) => s.hasPermission('admin:doc_types'));
+
+  // "Create from scratch" / "Upload existing document" both need *some*
+  // DocumentType to satisfy the required doc_type_id FK, but neither wants
+  // a schema-driven form — so both use the first type with no custom
+  // fields defined (e.g. the "General Document" type seeded for every new
+  // org). If an org only has schema-driven types, these two options are
+  // disabled rather than fabricating a fake type client-side.
+  const blankType = docTypes.find((dt) => !dt.form_schema || dt.form_schema.length === 0) || null;
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+
+  const handleUploadFileSelected = async (file: File | null) => {
+    if (!file || !blankType) return;
+    setUploadError('');
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setUploadError(`File is too large (max ${MAX_UPLOAD_BYTES / 1024 / 1024} MB)`);
+      return;
+    }
+    if (!ALLOWED_MIME_TYPES.has(file.type)) {
+      setUploadError(`File type "${file.type || 'unknown'}" is not allowed`);
+      return;
+    }
+    setUploadBusy(true);
+    try {
+      const newDoc = await createDoc.mutateAsync({
+        doc_type_id: blankType.id,
+        title: file.name.replace(/\.[^.]+$/, '') || file.name,
+        priority: 'normal',
+        tags: [],
+        form_data: {},
+        metadata: {},
+        submit_immediately: false,
+      });
+      const fileAssetId = await uploadFile.mutateAsync(file);
+      await addAttachment.mutateAsync({ docId: newDoc.id, data: { file_asset_id: fileAssetId } });
+      navigate(`/documents/${newDoc.id}`);
+    } catch (err: unknown) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to upload document.');
+      setUploadBusy(false);
+    }
+  };
 
   const handleTypeSelect = (dt: DocumentType) => {
     setSelectedType(dt);
@@ -75,18 +141,26 @@ export default function DocumentCreatePage() {
     }
 
     try {
+      // Always create as a draft — "submit immediately" used to flip the
+      // document straight to SUBMITTED status without ever starting an
+      // approval workflow (no template, no approvers, no ApprovalStep),
+      // which left it permanently stuck with no way forward. Approvers,
+      // their sequence, and a deadline must be configured and reviewed
+      // first (see SubmitWorkflowModal), so "Submit" here just takes the
+      // user straight to that review step instead of submitting blind.
       const newDoc = await createDoc.mutateAsync({
         doc_type_id: selectedType.id,
         title: title.trim(),
         priority,
+        tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
         dept_id: deptId || null,
         due_at: dueAt ? new Date(dueAt).toISOString() : null,
         form_data: formData,
         metadata: {},
-        submit_immediately: submitImmediately,
+        submit_immediately: false,
       });
 
-      navigate(`/documents/${newDoc.id}`);
+      navigate(`/documents/${newDoc.id}`, { state: submitImmediately ? { openSubmit: true } : undefined });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to create document.';
       setGeneralError(msg);
@@ -118,6 +192,66 @@ export default function DocumentCreatePage() {
       {/* STEP 1: Select Document Type */}
       {step === 1 && (
         <div>
+          {/* Alternatives to picking a structured template */}
+          {!typesLoading && (
+            <div
+              style={{
+                display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '24px',
+                padding: '16px', borderRadius: 'var(--radius-md)',
+                background: 'var(--bg-overlay)', border: '1px solid var(--border-subtle)',
+              }}
+            >
+              <div style={{ flex: '1 1 auto', minWidth: '200px' }}>
+                <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
+                  Don't see a suitable template?
+                </p>
+                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  Start blank, or upload a file you already have.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!blankType}
+                title={!blankType ? 'Ask your admin to create a general-purpose document type with no custom fields first' : undefined}
+                onClick={() => blankType && handleTypeSelect(blankType)}
+              >
+                + Create Blank Document
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!blankType || uploadBusy}
+                title={!blankType ? 'Ask your admin to create a general-purpose document type with no custom fields first' : undefined}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {uploadBusy ? 'Uploading...' : '📎 Upload Existing Document'}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0] || null;
+                  handleUploadFileSelected(file);
+                  e.target.value = '';
+                }}
+              />
+            </div>
+          )}
+
+          {uploadError && (
+            <div
+              style={{
+                padding: '12px 16px', marginBottom: '20px', borderRadius: 'var(--radius-md)',
+                background: 'hsla(0, 84%, 60%, 0.12)', border: '1px solid var(--color-error-400)',
+                color: 'var(--color-error-400)', fontSize: '0.85rem', fontWeight: 600,
+              }}
+            >
+              ⚠️ {uploadError}
+            </div>
+          )}
+
           {typesLoading ? (
             <div style={{ padding: '64px', textAlign: 'center' }}>
               <div className="spinner" style={{ width: '36px', height: '36px', margin: '0 auto' }} />
@@ -132,8 +266,18 @@ export default function DocumentCreatePage() {
                 No Active Document Types
               </h3>
               <p style={{ fontSize: '0.9rem', marginBottom: '20px' }}>
-                Your organization administrator needs to create document types before documents can be submitted.
+                {canManageDocTypes
+                  ? "You're an admin, so you can fix this yourself — create a document type to get started."
+                  : 'Your organization administrator needs to create document types before documents can be submitted.'}
               </p>
+              {canManageDocTypes && (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => navigate('/admin/document-types')}
+                >
+                  Create a Document Type →
+                </button>
+              )}
             </div>
           ) : (
             <div
@@ -322,6 +466,28 @@ export default function DocumentCreatePage() {
                 </select>
               </div>
 
+              {/* Tags */}
+              <div style={{ gridColumn: 'span 2' }}>
+                <label
+                  style={{
+                    display: 'block',
+                    fontSize: '0.85rem',
+                    fontWeight: 600,
+                    color: 'var(--text-primary)',
+                    marginBottom: '6px',
+                  }}
+                >
+                  Tags (comma-separated)
+                </label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="e.g. urgent, legal, q3"
+                  value={tags}
+                  onChange={(e) => setTags(e.target.value)}
+                />
+              </div>
+
               {/* Department */}
               <div>
                 <label
@@ -429,7 +595,7 @@ export default function DocumentCreatePage() {
               onClick={() => handleSubmit(true)}
               style={{ padding: '10px 24px', fontSize: '0.9rem', fontWeight: 700 }}
             >
-              {createDoc.isPending ? 'Submitting...' : 'Submit Immediately →'}
+              {createDoc.isPending ? 'Creating...' : 'Continue to Submit →'}
             </button>
           </div>
         </div>

@@ -12,14 +12,18 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { AuthUser, OrgMembership } from '@/types';
+import type { AccountState, AuthUser, OrgMembership, PendingRequestInfo } from '@/types';
 import { tokenStore } from '@/lib/api/client';
 
 interface AuthState {
   user: AuthUser | null;
   orgMembership: OrgMembership | null;
+  /** Server-reported login state (NOT persisted - recomputed on every sign-in). */
+  accountState: AccountState | null;
+  pendingRequest: PendingRequestInfo | null;
 
   // Actions
+  setAccountState: (state: AccountState, pending: PendingRequestInfo | null) => void;
   setAuth: (user: AuthUser, token: string, membership: OrgMembership | null) => void;
   clearAuth: () => void;
   updateUser: (partial: Partial<AuthUser>) => void;
@@ -29,6 +33,8 @@ interface AuthState {
   hasPermission: (permission: string) => boolean;
   hasAnyPermission: (...permissions: string[]) => boolean;
   isSuperAdmin: () => boolean;
+  /** Check if the user's org role matches one of the given role names */
+  hasRole: (...roles: string[]) => boolean;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -36,6 +42,10 @@ export const useAuthStore = create<AuthState>()(
     (set, get) => ({
       user: null,
       orgMembership: null,
+      accountState: null,
+      pendingRequest: null,
+
+      setAccountState: (accountState, pendingRequest) => set({ accountState, pendingRequest }),
 
       setAuth: (user, token, membership) => {
         if (token) {
@@ -52,6 +62,8 @@ export const useAuthStore = create<AuthState>()(
         set({
           user: null,
           orgMembership: null,
+          accountState: null,
+          pendingRequest: null,
         });
       },
 
@@ -75,6 +87,14 @@ export const useAuthStore = create<AuthState>()(
       },
 
       isSuperAdmin: () => get().user?.is_superadmin ?? false,
+
+      hasRole: (...roles: string[]) => {
+        const { user, orgMembership } = get();
+        if (!user) return false;
+        if (user.is_superadmin) return true; // superadmin matches any role
+        const roleName = orgMembership?.role_name ?? '';
+        return roles.includes(roleName);
+      },
     }),
     {
       name: 'docflow-auth',

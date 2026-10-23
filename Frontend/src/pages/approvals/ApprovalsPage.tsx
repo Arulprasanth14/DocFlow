@@ -4,13 +4,18 @@ import {
   ChevronLeft, ChevronRight, Check, X, MoreHorizontal, FileText,
   TrendingUp, TrendingDown,
   Plus, Clock, Users, CheckCircle2, XCircle, Search, ChevronDown,
-  ArrowUpDown, AlignJustify
+  ArrowUpDown, AlignJustify, UserPlus, History
 } from "lucide-react";
 import { toast, Toaster } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { useMyApprovalQueue, useApprovals, useApproveStep, useRejectStep } from "@/hooks/useApprovals";
-import type { WorkflowStepInstance } from "@/types";
+import {
+  useMyApprovalQueue, useApproveStep, useRejectStep,
+  useDelegateStep, useMessageableMembers,
+} from "@/hooks/useApprovals";
+import type { ApprovalStep } from "@/lib/api/approvals";
+import { ApiClientError } from "@/lib/api/client";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import ApprovalHistoryPanel from "@/components/approvals/ApprovalHistoryPanel";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,34 +58,61 @@ const C = {
   border:      "var(--border-default)",
 };
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
+// ─── Row mapping ──────────────────────────────────────────────────────────────
 
-function mapStepToApproval(step: WorkflowStepInstance): Approval {
-  const doc = step.workflow_instance?.document;
-  const submitter = doc?.submitter_name || "Unknown";
-  const initials = submitter.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase() || "U";
-  const avatarBg = "#6366F1";
-  const title = doc?.title || `Document for Step ${step.id}`;
-  const type = doc?.doc_type_name || "Document";
-  const stage = `Stage ${step.step_order}`;
-  const stageSub = step.step_type;
-  const requestedAt = new Date(step.workflow_instance?.started_at || Date.now()).toLocaleDateString();
-  
+/** Deterministic avatar colour from the person's name — stable per user
+ *  without needing an avatar service, and never a random/placeholder value. */
+function avatarColor(seed: string): string {
+  const palette = ["#6366F1", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899"];
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 997;
+  return palette[h % palette.length];
+}
+
+/**
+ * Map a backend ApprovalStep onto the row model.
+ *
+ * This used to fabricate every visible field — the title was
+ * `Approval Step <uuid-fragment>`, the type was the literal string
+ * "Document", the stage subtitle was "Approval", the avatar colour was
+ * hardcoded, and `requester` was filled with `approver_name`, i.e. the
+ * person being asked to approve rather than the person who submitted it.
+ * The backend populates the real document context
+ * (ApprovalService.list_my_approvals batch-fetches it), so use that and
+ * fall back to something honest when a field genuinely isn't available.
+ */
+function mapStepToApproval(step: ApprovalStep): Approval {
+  const requester = step.submitter_name || "Unknown submitter";
+  const initials =
+    requester
+      .split(" ")
+      .map((w) => w[0])
+      .slice(0, 2)
+      .join("")
+      .toUpperCase() || "U";
+
+  const title = step.document_title || step.document_public_id || "Untitled document";
+  const type = step.document_public_id || "Document";
+  const stage = step.stage_name || "Approval stage";
+  const stageSub =
+    step.round_number > 1 ? `Round ${step.round_number}` : "Awaiting decision";
+  const requestedAt = new Date(step.created_at || Date.now()).toLocaleDateString();
+
   let status: Status = "pending";
-  if (step.status === "approved") status = "approved";
-  else if (step.status === "rejected") status = "rejected";
+  if (step.decision === "approved") status = "approved";
+  else if (step.decision === "rejected") status = "rejected";
 
   return {
     id: step.id,
     title,
-    requester: submitter,
+    requester,
     initials,
-    avatarBg,
+    avatarBg: avatarColor(requester),
     type,
     stage,
     stageSub,
     requestedAt,
-    status
+    status,
   };
 }
 
@@ -140,33 +172,40 @@ export default function ApprovalsPage() {
   const [search, setSearch]       = useState("");
   const [page, setPage]           = useState(1);
   const [hovered, setHovered]     = useState<string | null>(null);
-  const [exiting, setExiting]     = useState<Set<string>>(new Set());
+  // NOTE: nothing currently calls a setter for this — the row-exit animation
+  // this was meant to drive was never wired up to the approve/reject actions.
+  const [exiting] = useState<Set<string>>(new Set());
   const [actionModal, setActionModal] = useState<{ open: boolean; type: "approved"|"rejected"; id?: string; bulk?: boolean }>({ open: false, type: "approved" });
   const [note, setNote] = useState("");
+  const [signatureNeeded, setSignatureNeeded] = useState(false);
+  const [signatureName, setSignatureName] = useState("");
+
+  // §6.2/6.5/6.6 panel — holds the workflow instance whose history is open.
+  const [historyInstanceId, setHistoryInstanceId] = useState<string | null>(null);
+
+  const [delegateModal, setDelegateModal] = useState<{ open: boolean; stepId?: string }>({ open: false });
+  const [delegateUserId, setDelegateUserId] = useState("");
+  const [delegateReason, setDelegateReason] = useState("");
+  const membersQ = useMessageableMembers();
+  const delegateM = useDelegateStep();
 
   const myQueueQ = useMyApprovalQueue();
-  const allApprovalsQ = useApprovals({ page: 1, limit: 100 });
   const approveM = useApproveStep();
   const rejectM = useRejectStep();
 
   const approvals = useMemo(() => {
-    if (activeTab === "pending") {
-      return (myQueueQ.data || []).map(mapStepToApproval);
-    } else {
-      return (allApprovalsQ.data?.items || []).map(mapStepToApproval);
-    }
-  }, [activeTab, myQueueQ.data, allApprovalsQ.data]);
+    return (myQueueQ.data?.items || []).map(mapStepToApproval);
+  }, [myQueueQ.data]);
 
   const counts = useMemo(() => {
-    const pendCount = (myQueueQ.data || []).length;
-    const allCount = (allApprovalsQ.data?.items || []).length;
+    const pendCount = (myQueueQ.data?.items || []).length;
     return {
       pending:  pendCount,
-      approved: (allApprovalsQ.data?.items || []).filter(a => a.status === "approved").length,
-      rejected: (allApprovalsQ.data?.items || []).filter(a => a.status === "rejected").length,
-      all:      allCount,
+      approved: 0,
+      rejected: 0,
+      all:      pendCount,
     };
-  }, [myQueueQ.data, allApprovalsQ.data]);
+  }, [myQueueQ.data]);
 
   const filtered = useMemo(() => {
     let list = activeTab === "all" ? approvals : approvals.filter(a => a.status === activeTab);
@@ -203,6 +242,28 @@ export default function ApprovalsPage() {
   function act(id: string, next: Status) {
     setActionModal({ open: true, type: next as "approved" | "rejected", id, bulk: false });
     setNote("");
+    setSignatureNeeded(false);
+    setSignatureName("");
+  }
+
+  function openDelegate(stepId: string) {
+    setDelegateModal({ open: true, stepId });
+    setDelegateUserId("");
+    setDelegateReason("");
+  }
+
+  async function confirmDelegate() {
+    if (!delegateModal.stepId || !delegateUserId) return;
+    try {
+      await delegateM.mutateAsync({
+        stepId: delegateModal.stepId,
+        payload: { delegate_user_id: delegateUserId, reason: delegateReason || undefined },
+      });
+      toast.success("Approval delegated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delegate approval");
+    }
+    setDelegateModal({ open: false });
   }
 
   function bulkAct(next: Status) {
@@ -215,10 +276,30 @@ export default function ApprovalsPage() {
     const { type, id, bulk } = actionModal;
     const isApprove = type === "approved";
     const m = isApprove ? approveM : rejectM;
-    
+
     if (!bulk && id) {
-      await m.mutateAsync({ stepId: id, note: note || undefined });
-      toast[isApprove ? "success" : "error"](`Document ${type}`);
+      try {
+        const signature = signatureNeeded && signatureName.trim()
+          ? { signature_method: "typed" as const, signed_hash: signatureName.trim() }
+          : undefined;
+        await m.mutateAsync({ stepId: id, note: note || undefined, signature });
+        toast[isApprove ? "success" : "error"](`Document ${type}`);
+      } catch (err) {
+        // Stage requires a digital signature — switch the same modal into
+        // signature-collection mode instead of closing it, then let the user
+        // confirm again (this time with `signature` attached above).
+        if (
+          err instanceof ApiClientError &&
+          err.status === 422 &&
+          err.detail.toLowerCase().includes("signature")
+        ) {
+          setSignatureNeeded(true);
+          toast.error("This stage requires a signature — type your name below to sign.");
+          return; // keep modal open
+        }
+        toast.error(err instanceof Error ? err.message : `Failed to ${type.slice(0, -1)} document`);
+        return;
+      }
     } else if (bulk) {
       for (const selId of selected) {
          try { await m.mutateAsync({ stepId: selId, note: note || undefined }); } catch {}
@@ -227,6 +308,8 @@ export default function ApprovalsPage() {
       setSelected(new Set());
     }
     setActionModal({ open: false, type: "approved" });
+    setSignatureNeeded(false);
+    setSignatureName("");
   }
 
   const allPageSelected = paged.length > 0 && selected.size >= paged.length;
@@ -708,8 +791,46 @@ export default function ApprovalsPage() {
                               >
                                 <X size={14} />
                               </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); openDelegate(item.id); }}
+                                title="Delegate to someone else"
+                                style={{
+                                  width: 32, height: 32, borderRadius: "50%",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                  background: C.blueTint, color: C.blue,
+                                  border: "none", cursor: "pointer",
+                                  transition: "transform 0.15s",
+                                }}
+                                onMouseEnter={e => (e.currentTarget.style.transform = "scale(1.1)")}
+                                onMouseLeave={e => (e.currentTarget.style.transform = "scale(1)")}
+                              >
+                                <UserPlus size={14} />
+                              </button>
                             </>
                           )}
+                          {/* §6.6 chain of custody + §6.5 revoke + §6.2
+                              finalize, all in one panel. Shown for every row
+                              (not just pending ones) so a decided step's
+                              history stays reachable. */}
+                          <button
+                            onClick={e => {
+                              e.stopPropagation();
+                              const step = (myQueueQ.data?.items || []).find(s => s.id === item.id);
+                              if (step) setHistoryInstanceId(step.instance_id);
+                            }}
+                            title="Approval history, signatures, revoke & finalize"
+                            style={{
+                              width: 32, height: 32, borderRadius: "50%",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              background: "var(--bg-overlay)", color: "var(--text-secondary)",
+                              border: "1px solid var(--border-subtle)", cursor: "pointer",
+                              transition: "transform 0.15s",
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.transform = "scale(1.1)")}
+                            onMouseLeave={e => (e.currentTarget.style.transform = "scale(1)")}
+                          >
+                            <History size={14} />
+                          </button>
                         </div>
                       </motion.div>
                     );
@@ -791,12 +912,101 @@ export default function ApprovalsPage() {
 
       <ConfirmDialog
         open={actionModal.open}
-        title={actionModal.type === "approved" ? "Approve Request" : "Reject Request"}
-        message={actionModal.bulk ? `Are you sure you want to ${actionModal.type} ${selected.size} requests?` : `Are you sure you want to ${actionModal.type} this request?`}
-        confirmLabel={actionModal.type === "approved" ? "Approve" : "Reject"}
+        title={
+          signatureNeeded
+            ? "Digital Signature Required"
+            : actionModal.type === "approved" ? "Approve Request" : "Reject Request"
+        }
+        message={
+          signatureNeeded
+            ? "This workflow stage requires a digital signature to approve. Type your full name below to sign."
+            : actionModal.bulk
+              ? `Are you sure you want to ${actionModal.type} ${selected.size} requests?`
+              : `Are you sure you want to ${actionModal.type} this request?`
+        }
+        confirmLabel={signatureNeeded ? "Sign & Approve" : actionModal.type === "approved" ? "Approve" : "Reject"}
+        confirmDisabled={signatureNeeded && !signatureName.trim()}
         onConfirm={confirmAction}
-        onCancel={() => setActionModal({ open: false, type: "approved" })}
-      />
+        onCancel={() => {
+          setActionModal({ open: false, type: "approved" });
+          setSignatureNeeded(false);
+          setSignatureName("");
+        }}
+      >
+        {signatureNeeded ? (
+          <input
+            type="text"
+            autoFocus
+            placeholder="Type your full legal name"
+            value={signatureName}
+            onChange={(e) => setSignatureName(e.target.value)}
+            style={{
+              width: "100%", padding: "10px 12px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: C.bg, color: C.text,
+              fontSize: 14, fontFamily: "'Inter', sans-serif",
+            }}
+          />
+        ) : (
+          <textarea
+            placeholder="Add a note (optional)"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={3}
+            style={{
+              width: "100%", padding: "10px 12px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: C.bg, color: C.text,
+              fontSize: 14, fontFamily: "'Inter', sans-serif", resize: "vertical",
+            }}
+          />
+        )}
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={delegateModal.open}
+        title="Delegate Approval"
+        message="Reassign this approval step to another organization member. They'll receive a fresh pending step; this one will be marked delegated."
+        confirmLabel="Delegate"
+        confirmDisabled={!delegateUserId}
+        onConfirm={confirmDelegate}
+        onCancel={() => setDelegateModal({ open: false })}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <select
+            value={delegateUserId}
+            onChange={(e) => setDelegateUserId(e.target.value)}
+            style={{
+              width: "100%", padding: "10px 12px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: C.bg, color: C.text,
+              fontSize: 14, fontFamily: "'Inter', sans-serif",
+            }}
+          >
+            <option value="">
+              {membersQ.isLoading ? "Loading members..." : "Select a team member..."}
+            </option>
+            {(membersQ.data ?? []).map((m) => (
+              <option key={m.id} value={m.id}>{m.display_name} ({m.email})</option>
+            ))}
+          </select>
+          <textarea
+            placeholder="Reason (optional)"
+            value={delegateReason}
+            onChange={(e) => setDelegateReason(e.target.value)}
+            rows={2}
+            style={{
+              width: "100%", padding: "10px 12px", borderRadius: 8,
+              border: `1px solid ${C.border}`, background: C.bg, color: C.text,
+              fontSize: 14, fontFamily: "'Inter', sans-serif", resize: "vertical",
+            }}
+          />
+        </div>
+      </ConfirmDialog>
+
+      {historyInstanceId && (
+        <ApprovalHistoryPanel
+          instanceId={historyInstanceId}
+          onClose={() => setHistoryInstanceId(null)}
+        />
+      )}
     </div>
   );
 }

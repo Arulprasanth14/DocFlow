@@ -4,6 +4,7 @@ Exports all API routers for app registration.
 """
 from app.routers import (
     admin,
+    agent,
     approvals,
     auth,
     chat,
@@ -12,6 +13,7 @@ from app.routers import (
     health,
     notifications,
     organizations,
+    search,
     users,
     workflows,
     ws_chat,
@@ -19,6 +21,7 @@ from app.routers import (
 
 __all__ = [
     "admin",
+    "agent",
     "approvals",
     "auth",
     "chat",
@@ -27,6 +30,7 @@ __all__ = [
     "health",
     "notifications",
     "organizations",
+    "search",
     "users",
     "workflows",
     "ws_chat",

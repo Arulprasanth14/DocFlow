@@ -18,7 +18,7 @@
 
 import type { ApiError } from '@/types';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1';
+const BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -61,7 +61,7 @@ async function request<T = unknown>(
   const { params, skipAuth, _isRetry, ...fetchOptions } = options;
 
   // Build URL with query params
-  const url = new URL(`${BASE_URL}${path}`);
+  const url = new URL(`${BASE_URL}${path}`, window.location.origin);
   if (params) {
     Object.entries(params).forEach(([key, value]) => {
       if (value !== undefined && value !== null) {
@@ -70,9 +70,15 @@ async function request<T = unknown>(
     });
   }
 
-  // Build headers
+  // Build headers.
+  // FormData bodies must NOT carry an explicit Content-Type: the browser has
+  // to set it itself so it can include the multipart boundary. Forcing
+  // application/json here (as this did unconditionally) makes every file
+  // upload fail to parse server-side.
+  const isFormData =
+    typeof FormData !== 'undefined' && fetchOptions.body instanceof FormData;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(fetchOptions.headers as Record<string, string>),
   };
 
@@ -84,17 +90,24 @@ async function request<T = unknown>(
   const response = await fetch(url.toString(), {
     ...fetchOptions,
     headers,
+    // The backend sets the DocFlow refresh token as an HttpOnly cookie
+    // (POST /auth/firebase-login, /auth/login, /auth/refresh).
+    // In development, VITE_API_URL points to the Vite proxy (/api/v1) which then 
+    // proxies to the backend. This ensures the request is same-origin so the 
+    // browser will send the HttpOnly Strict cookie. credentials: 'include' is required.
+    credentials: 'include',
   });
 
-  // Handle 401 — try Firebase force-refresh once, then give up
+  // Handle 401 — try refreshing the DocFlow access token once, then give up
   if (response.status === 401 && !skipAuth && !_isRetry) {
-    const newToken = await tryFirebaseForceRefresh();
+    const newToken = await tryRefreshDocFlowToken();
     if (newToken) {
       // Retry the original request with the new token
       headers['Authorization'] = `Bearer ${newToken}`;
       const retryResponse = await fetch(url.toString(), {
         ...fetchOptions,
         headers,
+        credentials: 'include',
       });
       return parseResponse<T>(retryResponse);
     }
@@ -127,19 +140,24 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 /**
- * Force-refresh the Firebase ID token and update tokenStore.
- * Returns the new token string on success, null on failure.
+ * Refresh the DocFlow access token using the HttpOnly refresh-token cookie
+ * (POST /auth/refresh). tokenStore holds a DocFlow-issued JWT, not a raw
+ * Firebase ID token, so refreshing it means calling our own /auth/refresh —
+ * re-fetching a Firebase token would just produce another token the backend
+ * can't verify (see AuthContext.handleUserSignedIn for the initial exchange).
+ * Returns the new access token string on success, null on failure.
  */
-async function tryFirebaseForceRefresh(): Promise<string | null> {
+async function tryRefreshDocFlowToken(): Promise<string | null> {
   try {
-    // Lazily import to avoid circular deps — firebase.ts imports from here indirectly
-    const { getFirebaseAuth } = await import('@/lib/auth/firebase');
-    const auth = getFirebaseAuth();
-    const user = auth.currentUser;
-    if (!user) return null;
-    const newToken = await user.getIdToken(/* forceRefresh= */ true);
-    tokenStore.set(newToken);
-    return newToken;
+    const response = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { access_token: string };
+    tokenStore.set(data.access_token);
+    return data.access_token;
   } catch {
     return null;
   }
@@ -173,6 +191,10 @@ export const apiClient = {
       method: 'POST',
       body: body ? JSON.stringify(body) : undefined,
     }),
+
+  /** Multipart POST — pass a FormData; the browser sets the boundary. */
+  postForm: <T>(path: string, form: FormData, options?: RequestOptions) =>
+    request<T>(path, { ...options, method: 'POST', body: form }),
 
   patch: <T>(path: string, body?: unknown, options?: RequestOptions) =>
     request<T>(path, {

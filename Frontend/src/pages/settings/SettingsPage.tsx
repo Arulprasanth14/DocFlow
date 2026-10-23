@@ -8,9 +8,10 @@ import { useAuthStore } from '@/store/authStore';
 import {
   User, Bell, Palette, Shield, ChevronRight,
   Moon, Sun, Monitor, Check, Eye, EyeOff,
-  Save, AlertCircle
+  Save, AlertCircle, Building
 } from 'lucide-react';
 import { useUIStore } from '@/store/uiStore';
+import { useMyOrg, useDepartments } from '@/hooks/useOrg';
 
 const C = {
   card: 'var(--bg-elevated)', surface: 'var(--bg-surface)', overlay: 'var(--bg-overlay)',
@@ -55,6 +56,10 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 // ── Section Components ─────────────────────────────────────────────────────────
 
 function ProfileSection({ user }: { user: any }) {
+  const { data: org } = useMyOrg();
+  const { data: depts = [] } = useDepartments(true);
+  const myDept = depts.find(d => d.id === user?.department_id);
+
   const [name, setName] = useState(user?.name || '');
   const [saved, setSaved] = useState(false);
 
@@ -65,6 +70,24 @@ function ProfileSection({ user }: { user: any }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {org && (
+        <div style={{ padding: '16px 20px', background: `color-mix(in srgb, ${C.primary} 5%, transparent)`, border: `1px solid color-mix(in srgb, ${C.primary} 15%, transparent)`, borderRadius: 16, display: 'flex', alignItems: 'center', gap: 16 }}>
+          {org.logo_url ? (
+            <img src={org.logo_url} alt={org.name} style={{ width: 48, height: 48, borderRadius: 10, objectFit: 'cover' }} />
+          ) : (
+            <div style={{ width: 48, height: 48, borderRadius: 10, background: `color-mix(in srgb, ${C.primary} 15%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: C.primary }}>
+              <Building size={24} />
+            </div>
+          )}
+          <div style={{ flex: 1 }}>
+            <div style={{ color: C.heading, fontWeight: 700, fontSize: 15 }}>{org.name}</div>
+            <div style={{ color: C.muted, fontSize: 13, marginTop: 2 }}>
+              {myDept ? `Department: ${myDept.name}` : 'No department assigned'}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px', background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16 }}>
         <div style={{ width: 72, height: 72, borderRadius: '50%', background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 26, fontWeight: 800, color: 'white' }}>
           {(user?.name || 'U').charAt(0).toUpperCase()}

@@ -24,7 +24,7 @@ export function useUnreadCount() {
     queryKey: notificationKeys.unreadCount(),
     queryFn: () => notificationsApi.getUnreadCount(),
     enabled: isAuthenticated,
-    refetchInterval: 1000 * 60, // Poll every minute
+    refetchInterval: 1000 * 60 * 3, // 3 min fallback — WS is now the primary delivery path
   });
 }
 

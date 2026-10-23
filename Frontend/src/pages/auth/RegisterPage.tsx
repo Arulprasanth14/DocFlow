@@ -25,7 +25,7 @@ const registerSchema = z
       .regex(/[A-Z]/, 'Must contain at least one uppercase letter')
       .regex(/[0-9]/, 'Must contain at least one number'),
     confirmPassword: z.string(),
-    orgName: z.string().optional(),
+    orgName: z.string().min(2, 'Organization name must be at least 2 characters'),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords don't match",
@@ -157,7 +157,7 @@ export default function RegisterPage() {
   const [showEmail, setShowEmail] = useState(false);
   const [showPwd, setShowPwd] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [showOrg, setShowOrg] = useState(false);
+  const [orgMode, setOrgMode] = useState<'create' | 'join'>('create');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -203,9 +203,16 @@ export default function RegisterPage() {
         email: data.email,
         password: data.password,
         name: data.name,
-        orgName: data.orgName || undefined,
+        orgName: orgMode === 'create' ? data.orgName : undefined,
+        joinOrgName: orgMode === 'join' ? data.orgName : undefined,
       });
-      navigate('/dashboard', { replace: true });
+      if (orgMode === 'join') {
+        // Pending admin approval — not an active member yet, so don't send
+        // them to the (org-scoped, currently empty) dashboard.
+        navigate('/onboarding', { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -439,49 +446,58 @@ export default function RegisterPage() {
                   {errors.confirmPassword && <p style={{ color: 'var(--color-error-400)', fontSize: '0.8rem', marginTop: '4px' }}>{errors.confirmPassword.message}</p>}
                 </div>
 
-                {/* Optional Organization */}
+                {/* Organization: create new vs. request access — mandatory choice */}
                 <div style={{ marginBottom: '24px' }}>
-                  <button
-                    type="button"
-                    id="btn-toggle-org"
-                    onClick={() => setShowOrg(!showOrg)}
-                    style={{
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'var(--color-primary-400)', fontSize: '0.85rem',
-                      fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px',
-                      padding: 0,
-                    }}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: showOrg ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s' }}>
-                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
-                    </svg>
-                    {showOrg ? 'Skip organization setup' : 'Create an organization (optional)'}
-                  </button>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                    Organization
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                    <button
+                      type="button"
+                      id="btn-org-mode-create"
+                      onClick={() => setOrgMode('create')}
+                      style={{
+                        flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                        border: orgMode === 'create' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
+                        background: orgMode === 'create' ? 'hsla(217, 100%, 50%, 0.1)' : 'transparent',
+                        color: orgMode === 'create' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
+                        fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      Create a new organization
+                    </button>
+                    <button
+                      type="button"
+                      id="btn-org-mode-join"
+                      onClick={() => setOrgMode('join')}
+                      style={{
+                        flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                        border: orgMode === 'join' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
+                        background: orgMode === 'join' ? 'hsla(217, 100%, 50%, 0.1)' : 'transparent',
+                        color: orgMode === 'join' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
+                        fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      Request to join an existing one
+                    </button>
+                  </div>
 
-                  <AnimatePresence>
-                    {showOrg && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        style={{ overflow: 'hidden', marginTop: '14px' }}
-                      >
-                        <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                          Organization Name
-                        </label>
-                        <input
-                          id="input-org-name"
-                          type="text"
-                          className="input"
-                          placeholder="Acme Corporation"
-                          {...register('orgName')}
-                        />
-                        <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '6px' }}>
-                          You'll be set as the Admin. You can invite your team later.
-                        </p>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                    Organization Name
+                  </label>
+                  <input
+                    id="input-org-name"
+                    type="text"
+                    className="input"
+                    placeholder="Acme Corporation"
+                    {...register('orgName')}
+                  />
+                  {errors.orgName && <p style={{ color: 'var(--color-error-400)', fontSize: '0.8rem', marginTop: '4px' }}>{errors.orgName.message}</p>}
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '6px' }}>
+                    {orgMode === 'create'
+                      ? "You'll be set as the Administrator. You can invite your team later."
+                      : 'An administrator of this organization must approve your request before you can access the workspace.'}
+                  </p>
                 </div>
 
                 {/* Submit */}

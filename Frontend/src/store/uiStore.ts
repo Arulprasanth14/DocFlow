@@ -24,6 +24,7 @@ interface UIState {
   closeModal: () => void;
   setGlobalLoading: (loading: boolean) => void;
   toggleTheme: () => void;
+  setTheme: (theme: 'dark' | 'light') => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -47,6 +48,8 @@ export const useUIStore = create<UIState>()(
 
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+
+      setTheme: (theme) => set({ theme }),
     }),
     {
       name: 'docflow-ui',

@@ -10,6 +10,7 @@ export interface NotificationFilters {
   page?: number;
   limit?: number;
   unread_only?: boolean;
+  [key: string]: string | number | boolean | undefined;
 }
 
 export const notificationsApi = {

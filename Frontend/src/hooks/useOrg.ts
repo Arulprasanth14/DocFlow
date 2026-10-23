@@ -41,12 +41,15 @@ export function useMyOrg() {
   });
 }
 
-export function useOrgStats() {
+export function useOrgStats(enabled = true) {
   const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.stats,
     queryFn: orgsApi.getOrgStats,
-    enabled: isAuthenticated,
+    // Backend route requires admin:orgs — callers outside the admin area
+    // (e.g. a shared dashboard every role sees) must pass `enabled: false`
+    // for non-admins, or every non-admin page load fires a guaranteed 403.
+    enabled: isAuthenticated && enabled,
     staleTime: 1000 * 30,
   });
 }
@@ -256,5 +259,25 @@ export function useRemoveMember() {
       queryClient.invalidateQueries({ queryKey: ['org', 'members'] });
       queryClient.invalidateQueries({ queryKey: orgKeys.stats });
     },
+  });
+}
+
+// ── Join Requests ─────────────────────────────────────────────────────────────
+export function useRequestJoin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (orgName: string) => orgsApi.requestJoin(orgName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org', 'join-request', 'mine'] });
+    },
+  });
+}
+
+export function useMyJoinRequest(enabled: boolean) {
+  return useQuery({
+    queryKey: ['org', 'join-request', 'mine'],
+    queryFn: orgsApi.getMyJoinRequest,
+    enabled,
+    staleTime: 1000 * 15,
   });
 }

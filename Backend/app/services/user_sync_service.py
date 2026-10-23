@@ -1,26 +1,20 @@
 """
-DocFlow Backend — Service: User Sync
-Handles the "find-or-create user on first Firebase sign-in" flow.
-Extracted from AuthService.firebase_login() so it can be used by the
-new POST /users/me/sync endpoint without issuing DocFlow JWTs.
+DocFlow Backend — Service: User Sync (POST /users/me/sync)
 
-Flow:
-  1. Find user by firebase_uid.
-  2. If not found, try to match by email (link existing account).
-  3. If still not found, create new user.
-  4. Optionally create an organisation if org_name provided and user has none.
-  5. Update last_seen_at.
-  6. Commit and return (user, membership_data).
+Thin wrapper over AccountService. This endpoint exists for ONE purpose now:
+creating an organization for a signed-in user who has none (the onboarding
+"Create a new organization" action). Plain sign-in goes through
+/auth/firebase-login, which needs no second call.
+
+All real logic (race-safe user resolution, state calculation, ATOMIC
+organization creation, unique names) lives in AccountService so this endpoint
+and /auth/firebase-login cannot disagree.
 """
 from __future__ import annotations
 
 import structlog
-from datetime import datetime, timezone
-from uuid import UUID
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ForbiddenException
 from app.models.organization import Organization, OrganizationMember, Role
 from app.models.user import User
 from app.repositories.org_repo import OrgMemberRepository, OrganizationRepository
@@ -28,25 +22,27 @@ from app.repositories.user_repo import UserRepository
 from app.schemas.auth import (
     OrgMembershipResponse,
     OrganizationResponse,
+    PendingRequestInfo,
     UserResponse,
 )
 from app.schemas.users import SyncUserResponse
+from app.services.account_service import (
+    HAS_ORG,
+    PENDING_REQUEST,
+    AccountService,
+    AccountState,
+)
 
 logger = structlog.get_logger(__name__)
 
 
 class UserSyncService:
-    """
-    Synchronises a Firebase-authenticated identity to the DocFlow user database.
-    Does NOT issue JWT tokens — the caller (frontend) uses its Firebase ID token
-    directly for subsequent API requests.
-    """
-
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.user_repo = UserRepository(db)
         self.org_repo = OrganizationRepository(db)
         self.member_repo = OrgMemberRepository(db)
+        self.accounts = AccountService(db)
 
     async def sync(
         self,
@@ -55,96 +51,68 @@ class UserSyncService:
         name: str | None,
         avatar_url: str | None,
         org_name: str | None,
+        email_verified: bool = False,
     ) -> SyncUserResponse:
         """
-        Find or create the DocFlow user for the given Firebase identity.
-        If org_name is provided and the user has no organisation, create one.
-        Returns SyncUserResponse with user profile and org membership.
+        Find-or-create the user; if `org_name` is given and the user has no
+        organization, create one atomically with the user as ADMIN.
+
+        Idempotent: a user who already has an organization gets that
+        organization back and nothing new is created.
         """
-        # 1. Find by Firebase UID
-        user = await self.user_repo.get_by_firebase_uid(firebase_uid)
+        user = await self.accounts.resolve_user(
+            firebase_uid=firebase_uid,
+            email=email,
+            name=name,
+            avatar_url=avatar_url,
+            email_verified=email_verified,
+        )
 
-        if not user:
-            # 2. Try to match by email (user previously registered with password)
-            user = await self.user_repo.get_by_email(email)
-            if user:
-                # Link Firebase UID to existing account
-                user.firebase_uid = firebase_uid
-                if avatar_url and not user.avatar_url:
-                    user.avatar_url = avatar_url
-                if name and not user.name:
-                    user.name = name
-                await self.db.flush()
-                logger.info("firebase_uid_linked", user_id=str(user.id), email=email)
-            else:
-                # 3. Brand new user — create record
-                user = await self.user_repo.create(
-                    email=email,
-                    name=name,
-                    firebase_uid=firebase_uid,
-                    avatar_url=avatar_url,
-                )
-                logger.info("user_created_via_firebase", user_id=str(user.id), email=email)
+        if org_name:
+            account = await self.accounts.create_organization(user, org_name)
         else:
-            # Existing user — update profile fields if they changed (e.g. new Google avatar)
-            if name and user.name != name:
-                user.name = name
-            if avatar_url and user.avatar_url != avatar_url:
-                user.avatar_url = avatar_url
-            await self.db.flush()
+            account = await self.accounts.get_account_state(user)
 
-        # Guard: suspended accounts
-        if user.status == "suspended":
-            raise ForbiddenException("Your account has been suspended. Contact your administrator.")
-
-        # 4. Optionally create organisation
-        membership_data = await self._resolve_membership(user)
-
-        if org_name and membership_data is None:
-            org = await self.org_repo.create(name=org_name)
-            roles = await self.org_repo.create_default_roles(org.id)
-            admin_role = roles.get("org_admin") or roles.get("super_admin")
-            if admin_role:
-                member = await self.member_repo.add_member(
-                    org_id=org.id,
-                    user_id=user.id,
-                    role_id=admin_role.id,
-                )
-                perms = await self.member_repo.resolve_permissions(admin_role.id)
-                membership_data = (member, admin_role, perms, org)
-                logger.info(
-                    "organisation_created",
-                    user_id=str(user.id),
-                    org_id=str(org.id),
-                    org_name=org_name,
-                )
-
-        # 5. Touch last_seen_at
         await self.user_repo.update_last_seen(user.id)
         await self.db.commit()
 
+        # Confirmation email only for an organization created by THIS call
+        # (not when the user already had one), after the commit, best-effort.
+        if org_name and account.state == HAS_ORG and account.membership:
+            org = account.membership[3]
+            if await self._created_just_now(org, user):
+                await self.accounts.notify_org_created(user, org)
+
         return SyncUserResponse(
             user=UserResponse.model_validate(user),
-            org_membership=self._build_membership_response(membership_data),
+            org_membership=self._build_membership_response(account.membership),
+            state=account.state,
+            pending_request=(
+                PendingRequestInfo(
+                    org_name=account.pending_org_name,
+                    requested_at=account.pending_requested_at,
+                )
+                if account.state == PENDING_REQUEST and account.pending_org_name
+                else None
+            ),
         )
 
-    # ── Private helpers ────────────────────────────────────────────────────────
+    async def _created_just_now(self, org: Organization, user: User) -> bool:
+        """True when `org` was created in this request (its only member is the
+        user and it is seconds old) - guards the 'you created X' email against
+        firing on an idempotent re-call."""
+        from datetime import datetime, timedelta, timezone
 
-    async def _resolve_membership(
-        self, user: User
-    ) -> tuple[OrganizationMember, Role, list[str], Organization] | None:
-        """Load the user's primary org membership + role + permissions."""
-        primary = await self.member_repo.get_first_org_for_user(user.id)
-        if not primary:
-            return None
-        result = await self.member_repo.get_membership_with_details(user.id, primary.org_id)
-        if not result:
-            return None
-        member, org, role, permissions = result
-        return member, role, permissions, org
+        created = org.created_at
+        if created is None:
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - created < timedelta(seconds=30)
 
+    @staticmethod
     def _build_membership_response(
-        self, membership_data: tuple | None
+        membership_data: tuple | None,
     ) -> OrgMembershipResponse | None:
         if not membership_data:
             return None

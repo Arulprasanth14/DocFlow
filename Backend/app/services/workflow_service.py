@@ -33,13 +33,13 @@ from app.core.exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from app.core.events import EventBus
 from app.domain.enums import (
     AuditAction,
-    DocumentStatus,
     NotificationType,
     WorkflowInstanceStatus,
 )
-from app.models.document import Document, DocumentVersion
+from app.models.document import Document, DocumentVersion, DocumentStatus
 from app.models.workflow import (
     ApprovalStep,
     WorkflowInstance,
@@ -72,40 +72,33 @@ class WorkflowService:
         self.stage_repo = WorkflowStageRepository(db)
         self.notif_svc = NotificationService(db)
 
-    # ── Submit ──────────────────────────────────────────────────────────────────
+    # ── start_workflow: internal callable (called by document_service in same tx) ──
 
-    async def submit(
+    async def start_workflow(
         self,
         org_id: uuid.UUID,
         document_id: uuid.UUID,
+        template_id: uuid.UUID,
         requester_id: uuid.UUID,
-        req: SubmitDocumentRequest,
+        current_version_id: uuid.UUID,
+        doc_title: str,
     ) -> WorkflowInstanceResponse:
         """
-        Submit a document for approval.
+        Internal method — creates a WorkflowInstance for a document that has already
+        been set to status=SUBMITTED. Called by document_service.submit_document() in
+        the same DB transaction. Does NOT commit — the caller owns the transaction.
 
-        Steps (per architecture §6 data flow + §9 request traversal):
-        1. Lock the Document row and verify it's in a submittable state
-        2. Load the WorkflowTemplate and validate it
-        3. Freeze the template into template_version_snapshot (§10.3)
-        4. Create WorkflowInstance (status=pending → in_progress)
-        5. Advance document status to 'in_review'
-        6. Resolve Stage-1 approvers and create ApprovalStep rows
-        7. Write AuditLog
-        8. Notify Stage-1 approvers
+        Steps:
+        1. Load template + stages
+        2. Freeze template snapshot
+        3. Create WorkflowInstance
+        4. Set doc.status = PENDING
+        5. Resolve Stage-1 approvers + create ApprovalStep rows
+        6. Write AuditLog
+        7. Notify approvers
         """
-        # 1. Load + validate document
-        doc = await self.db.get(Document, document_id)
-        if not doc or doc.org_id != org_id:
-            raise NotFoundException("Document not found")
-        if doc.status not in (DocumentStatus.DRAFT, DocumentStatus.CHANGES_REQUESTED,
-                               DocumentStatus.REVISION_REQUESTED):
-            raise ConflictException(
-                f"Document is in status '{doc.status}' and cannot be submitted"
-            )
-
-        # 2. Load template
-        tmpl = await self.tmpl_repo.get_by_id(req.workflow_template_id, org_id)
+        # 1. Load template
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
         if not tmpl or not tmpl.is_active:
             raise NotFoundException("WorkflowTemplate not found or inactive")
 
@@ -113,10 +106,10 @@ class WorkflowService:
         if not stages:
             raise ConflictException("Workflow template has no stages defined")
 
-        # 3. Freeze snapshot
+        # 2. Freeze snapshot
         snapshot = self._freeze_template(tmpl, stages)
 
-        # 4. Create WorkflowInstance
+        # 3. Create WorkflowInstance
         first_stage = stages[0]
         instance = await self.instance_repo.create(
             org_id=org_id,
@@ -127,17 +120,13 @@ class WorkflowService:
             status=WorkflowInstanceStatus.IN_PROGRESS,
         )
 
-        # 5. Update document status
-        doc.status = DocumentStatus.IN_REVIEW
-        doc.submitted_at = datetime.now(timezone.utc)
+        # 4. Fetch doc and set PENDING
+        doc = await self.db.get(Document, document_id)
+        if doc:
+            doc.status = DocumentStatus.PENDING
         await self.db.flush()
 
-        # 6. Get current document version for ApprovalStep FK
-        current_version_id = doc.current_version_id
-        if not current_version_id:
-            raise ConflictException("Document has no version uploaded yet")
-
-        # 7. Resolve Stage-1 approvers and create ApprovalStep rows
+        # 5. Create Stage-1 ApprovalStep rows
         approver_ids = await self._resolve_approvers(first_stage, requester_id, org_id)
         due_at = None
         if first_stage.sla_hours:
@@ -153,7 +142,7 @@ class WorkflowService:
                 round_number=1,
             )
 
-        # 8. Write AuditLog
+        # 6. Write AuditLog
         await self._write_audit(
             org_id=org_id,
             actor_id=requester_id,
@@ -164,22 +153,67 @@ class WorkflowService:
             after={"status": instance.status, "template_id": str(tmpl.id)},
         )
 
-        # 9. Notify approvers
+        # 7. Notify approvers (no commit here — caller commits)
         await self.notif_svc.notify_many(
             org_id=org_id,
             user_ids=approver_ids,
             type=NotificationType.ASSIGNED,
-            title=f"Approval requested: {doc.title}",
+            title=f"Approval requested: {doc_title}",
             body=f"Stage '{first_stage.name}' requires your approval.",
-            deep_link=f"/approvals",
+            deep_link="/approvals",
             instance_id=instance.id,
         )
 
-        await self.db.commit()
-        logger.info("workflow_submitted", instance_id=str(instance.id), doc_id=str(document_id))
+        logger.info("workflow_started_internal", instance_id=str(instance.id), doc_id=str(document_id))
         return WorkflowInstanceResponse.model_validate(instance)
 
-    # ── Revise and Resume ───────────────────────────────────────────────────────
+    # ── Submit (public route — kept for legacy; delegates to start_workflow) ────
+
+    async def submit(
+        self,
+        org_id: uuid.UUID,
+        document_id: uuid.UUID,
+        requester_id: uuid.UUID,
+        req: SubmitDocumentRequest,
+    ) -> WorkflowInstanceResponse:
+        """
+        Submit a document for approval via the (now-internal) workflow router.
+        NOTE: The canonical path is POST /documents/{id}/submit in documents.py.
+        This method is kept for backward-compat but the router route has been removed.
+        """
+        doc = await self.db.get(Document, document_id)
+        if not doc or doc.org_id != org_id:
+            raise NotFoundException("Document not found")
+        if doc.status not in (
+            DocumentStatus.DRAFT, DocumentStatus.SUBMITTED,
+            DocumentStatus.SENT_BACK,
+        ):
+            raise ConflictException(
+                f"Document is in status '{doc.status}' and cannot be submitted"
+            )
+
+        current_version_id = doc.current_version_id
+        if not current_version_id:
+            raise ConflictException("Document has no version uploaded yet")
+
+        instance = await self.start_workflow(
+            org_id=org_id,
+            document_id=document_id,
+            template_id=req.workflow_template_id,
+            requester_id=requester_id,
+            current_version_id=current_version_id,
+            doc_title=doc.title,
+        )
+
+        await self.db.commit()
+        EventBus.publish("document.status_changed", {
+            "doc_id": str(document_id),
+            "org_id": str(org_id),
+            "new_status": DocumentStatus.PENDING,
+            "event": "workflow_started",
+        })
+        return instance
+
 
     async def resume(
         self,
@@ -202,9 +236,9 @@ class WorkflowService:
         doc = await self.db.get(Document, document_id)
         if not doc or doc.org_id != org_id:
             raise NotFoundException("Document not found")
-        if doc.status != DocumentStatus.CHANGES_REQUESTED and doc.status != DocumentStatus.REVISION_REQUESTED:
+        if doc.status not in (DocumentStatus.SENT_BACK, DocumentStatus.SUBMITTED):
             raise ConflictException(
-                f"Document is not in 'changes_requested' state (current: {doc.status})"
+                f"Document is not in 'sent_back' state (current: {doc.status})"
             )
 
         instance = await self.instance_repo.get_by_document(document_id)
@@ -221,13 +255,22 @@ class WorkflowService:
         if not new_version or new_version.document_id != document_id:
             raise NotFoundException("DocumentVersion not found for this document")
 
-        # Update document to point to new version
+        # Update document to point to new version and put back in PENDING
         doc.current_version_id = req.new_version_id
-        doc.status = DocumentStatus.IN_REVIEW
+        doc.status = DocumentStatus.PENDING
         await self.db.flush()
 
-        # Get current stage
-        current_stage = await self.db.get(WorkflowStage, instance.current_stage_id)
+        # Get current stage. IMPORTANT: fetch via list_for_template (which
+        # selectinload()s approver_rules) rather than a bare db.get() — a bare
+        # get() returns a WorkflowStage with approver_rules unloaded
+        # (lazy="noload" on the model), so _resolve_approvers() below would
+        # silently resolve zero approvers and no ApprovalStep would ever be
+        # created, leaving the document stuck in "pending" with nobody able
+        # to act on it. (Confirmed live: revise-and-resume returned 200 and
+        # flipped the document to "pending", but the approvals queue stayed
+        # empty and current_approval_step_id never changed.)
+        stages = await self.stage_repo.list_for_template(instance.template_id)
+        current_stage = next((s for s in stages if s.id == instance.current_stage_id), None)
         if not current_stage:
             raise NotFoundException("Current workflow stage not found")
 
@@ -241,7 +284,6 @@ class WorkflowService:
         approver_ids = await self._resolve_approvers(current_stage, requester_id, org_id)
 
         # Check reapproval_on_revision for earlier stages
-        stages = await self.stage_repo.list_for_template(instance.template_id)
         earlier_stage_approver_ids = []
         for stage in stages:
             if stage.sequence_order >= current_stage.sequence_order:
@@ -310,13 +352,28 @@ class WorkflowService:
         )
 
         await self.db.commit()
+        EventBus.publish("document.status_changed", {
+            "doc_id": str(document_id),
+            "org_id": str(org_id),
+            "new_status": DocumentStatus.PENDING,
+            "event": "workflow_resumed",
+        })
         logger.info(
             "workflow_resumed",
             instance_id=str(instance.id),
             stage_id=str(instance.current_stage_id),
             round=next_round,
         )
-        return WorkflowInstanceResponse.model_validate(instance)
+        # Re-fetch rather than reuse `instance`: the ApprovalStep rows created
+        # above were added to the DB via step_repo.create(), but SQLAlchemy
+        # doesn't retroactively refresh `instance.approval_steps` (already
+        # loaded, or not, before those inserts) just because related rows
+        # were added elsewhere in the same session — the response would show
+        # approval_steps: [] even though the new step genuinely exists and is
+        # visible via GET /approvals (confirmed live: this returned [] while
+        # the approvals queue correctly showed the new round-2 step).
+        fresh_instance = await self.instance_repo.get_by_id(instance.id, org_id)
+        return WorkflowInstanceResponse.model_validate(fresh_instance)
 
     # ── Cancel ──────────────────────────────────────────────────────────────────
 
@@ -369,7 +426,27 @@ class WorkflowService:
         instance = await self.instance_repo.get_by_id(instance_id, org_id)
         if not instance:
             raise NotFoundException("WorkflowInstance not found")
-        return WorkflowInstanceResponse.model_validate(instance)
+
+        resp = WorkflowInstanceResponse.model_validate(instance)
+        if instance.approval_steps:
+            from sqlalchemy import select
+            from app.models.user import User
+            stage_ids = {s.stage_id for s in instance.approval_steps}
+            approver_ids = {s.approver_id for s in instance.approval_steps}
+            stages_by_id = {
+                st.id: st for st in
+                (await self.db.execute(select(WorkflowStage).where(WorkflowStage.id.in_(stage_ids)))).scalars().all()
+            }
+            users_by_id = {
+                u.id: u for u in
+                (await self.db.execute(select(User).where(User.id.in_(approver_ids)))).scalars().all()
+            }
+            for step_summary, step in zip(resp.approval_steps, instance.approval_steps):
+                stage = stages_by_id.get(step.stage_id)
+                approver = users_by_id.get(step.approver_id)
+                step_summary.stage_name = stage.name if stage else None
+                step_summary.approver_name = approver.name if approver else None
+        return resp
 
     # ── SSE Stream ──────────────────────────────────────────────────────────────
 
@@ -449,6 +526,13 @@ class WorkflowService:
             if doc:
                 doc.status = DocumentStatus.APPROVED
             await self.db.flush()
+
+            EventBus.publish("document.status_changed", {
+                "doc_id": str(instance.document_id),
+                "org_id": str(org_id),
+                "new_status": DocumentStatus.APPROVED,
+                "event": "workflow_approved",
+            })
 
             await self._write_audit(
                 org_id=org_id,
@@ -533,6 +617,14 @@ class WorkflowService:
             ids = await self._apply_rule(rule, requester_id, org_id)
             approver_ids.extend(ids)
 
+        approver_ids = list(set(approver_ids))
+
+        # Hard gate: Trainees never gain approval authority, regardless of how
+        # a rule resolved them (a misconfigured specific_user rule, a role
+        # rename, etc.). Defense in depth — ApprovalService.decide() enforces
+        # this again at decision time independent of this resolution step.
+        approver_ids = await self._exclude_trainees(approver_ids, org_id)
+
         # Fallback: if no rules match, use department head
         if not approver_ids:
             logger.warning(
@@ -541,7 +633,36 @@ class WorkflowService:
                 rule_count=len(stage.approver_rules),
             )
 
-        return list(set(approver_ids))
+        return approver_ids
+
+    async def _exclude_trainees(
+        self, user_ids: list[uuid.UUID], org_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """Filter out any user whose org role is `trainee` from a resolved
+        approver-candidate list — trainees must never become a gating
+        approver (see domain/enums.py SYSTEM_ROLES docstring)."""
+        if not user_ids:
+            return user_ids
+        from sqlalchemy import select
+        from app.models.organization import OrganizationMember, Role
+
+        trainee_ids_result = await self.db.execute(
+            select(OrganizationMember.user_id)
+            .join(Role, Role.id == OrganizationMember.role_id)
+            .where(
+                OrganizationMember.org_id == org_id,
+                OrganizationMember.user_id.in_(user_ids),
+                Role.name == "trainee",
+            )
+        )
+        trainee_ids = {row[0] for row in trainee_ids_result.all()}
+        if trainee_ids:
+            logger.warning(
+                "trainee_excluded_from_approvers",
+                org_id=str(org_id),
+                trainee_ids=[str(u) for u in trainee_ids],
+            )
+        return [uid for uid in user_ids if uid not in trainee_ids]
 
     async def _apply_rule(self, rule, requester_id: uuid.UUID, org_id: uuid.UUID) -> list[uuid.UUID]:
         """Apply a single StageApproverRule and return matching user IDs."""
@@ -584,9 +705,25 @@ class WorkflowService:
             return []
 
         elif rt == "dynamic_by_amount_threshold":
-            # Not resolvable without document data here — service caller must pre-compute
-            user_id = rv.get("user_id")
-            return [uuid.UUID(user_id)] if user_id else []
+            # RESERVED — NOT IMPLEMENTED.
+            # Threshold-based approver resolution requires document field data at
+            # workflow-start time (e.g., compare doc.form_data["amount"] > threshold).
+            # This feature is deferred to a future milestone.
+            #
+            # IMPORTANT: Do NOT silently fall back to the hardcoded `user_id` here.
+            # Emit a structured warning so this broken rule surfaces in logs.
+            logger.warning(
+                "dynamic_by_amount_threshold_not_implemented",
+                rule_id=str(getattr(rule, "id", "unknown")),
+                stage_id=str(getattr(rule, "stage_id", "unknown")),
+                rule_value=rv,
+                message=(
+                    "Stage has a 'dynamic_by_amount_threshold' approver rule which is not yet "
+                    "implemented. No approver was resolved from this rule. If this is the only "
+                    "rule on the stage, the workflow will stall with no approvers."
+                ),
+            )
+            return []
 
         return []
 

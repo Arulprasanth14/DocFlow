@@ -6,7 +6,7 @@
 
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getFirebaseAuth, firebaseSignOutUser } from '@/lib/auth/firebase';
+import { firebaseSignOutUser } from '@/lib/auth/firebase';
 
 const IDLE_KEY = 'docflow_last_active';
 const IDLE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24 hours

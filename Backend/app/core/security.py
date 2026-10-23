@@ -66,10 +66,11 @@ def create_access_token(
     roles: list[str],
     permissions: list[str],
     session_id: str,
+    is_superadmin: bool = False,
 ) -> str:
     """
     Issue a short-lived access token (2 hours).
-    Claims: sub, org_id, roles, permissions, jti (session_id), exp, iat, iss
+    Claims: sub, org_id, roles, permissions, is_superadmin, jti (session_id), exp, iat, iss
     """
     now = datetime.now(timezone.utc)
     payload: dict[str, Any] = {
@@ -77,6 +78,7 @@ def create_access_token(
         "org_id": str(org_id) if org_id else None,
         "roles": roles,
         "permissions": permissions,
+        "is_superadmin": is_superadmin,
         "jti": session_id,      # used for session revocation check
         "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": now,

@@ -17,12 +17,36 @@ from pydantic import BaseModel, Field
 
 # ── Conversation ───────────────────────────────────────────────────────────────
 
-class StartDirectConversationRequest(BaseModel):
-    """POST /chat/conversations — start a direct conversation with another user."""
-    participant_user_id: uuid.UUID = Field(..., description="The other user to start a DM with")
+class StartConversationRequest(BaseModel):
+    """
+    POST /chat/conversations — start a conversation.
+
+    For kind='direct': participant_user_id is required.
+    For kind='workflow_context': approval_step_id is required (idempotent —
+      returns existing conversation if one exists for this step).
+    """
+    kind: str = Field(
+        default="direct",
+        description="'direct' | 'workflow_context'",
+    )
+    # Required for kind='direct'
+    participant_user_id: uuid.UUID | None = Field(
+        None,
+        description="The other user to DM (required for kind='direct')",
+    )
+    # Required for kind='workflow_context'
+    approval_step_id: uuid.UUID | None = Field(
+        None,
+        description="The approval step that triggered this context chat (required for kind='workflow_context')",
+    )
+    # Optional list of additional participants to add at creation time
+    participant_ids: list[uuid.UUID] = Field(default_factory=list)
     title: str | None = Field(None, max_length=500)
-    # Optional first message to send immediately
     initial_message: str | None = None
+
+
+# Backwards-compat alias for code that still imports the old name
+StartDirectConversationRequest = StartConversationRequest
 
 
 class ConversationParticipantResponse(BaseModel):

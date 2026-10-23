@@ -9,40 +9,20 @@ Updated per DocFlow-System-Architecture.md:
   - ApprovalDecision: added changes_requested, abstained; kept returned as alias
   - Added: ConversationKind, StageType, ApproverRuleType, SLAEventType, DelegationScope
   - NotificationType: aligned to architecture §4 values
+
+NOTE — DocumentStatus:
+  The canonical DocumentStatus enum lives in app.models.document.DocumentStatus
+  (it is the SQLAlchemy Enum column type and the diagram-correct definition,
+  including SENT_BACK). Re-exported here for backwards-compat imports.
 """
 from __future__ import annotations
 
 from enum import StrEnum
 
-
-# ── Document Status ────────────────────────────────────────────────────────────
-class DocumentStatus(StrEnum):
-    DRAFT = "draft"
-    SUBMITTED = "submitted"
-    IN_REVIEW = "in_review"                    # matches architecture §4
-    PENDING_APPROVAL = "pending_approval"
-    CHANGES_REQUESTED = "changes_requested"    # matches architecture §4
-    REVISION_REQUESTED = "revision_requested"  # legacy alias
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    EXECUTED = "executed"     # signed/effective after approval
-    ARCHIVED = "archived"
-    CANCELLED = "cancelled"
-    CLOSED = "closed"
-
-    @classmethod
-    def active_statuses(cls) -> list["DocumentStatus"]:
-        return [
-            cls.SUBMITTED,
-            cls.IN_REVIEW,
-            cls.PENDING_APPROVAL,
-            cls.CHANGES_REQUESTED,
-            cls.REVISION_REQUESTED,
-        ]
-
-    @classmethod
-    def terminal_statuses(cls) -> list["DocumentStatus"]:
-        return [cls.APPROVED, cls.REJECTED, cls.ARCHIVED, cls.CANCELLED, cls.CLOSED]
+# ── Document Status — canonical definition is in app.models.document ───────────
+# Re-exported here so existing `from app.domain.enums import DocumentStatus`
+# imports continue to work without modification.
+from app.models.document import DocumentStatus  # noqa: F401
 
 
 # ── Document Priority ─────────────────────────────────────────────────────────
@@ -92,6 +72,15 @@ class WorkflowInstanceStatus(StrEnum):
     REJECTED = "rejected"           # blocking rejection received
     CANCELLED = "cancelled"         # creator withdrew
     ESCALATED = "escalated"         # SLA breach escalated
+    # §6.5: an earlier approver asked to revoke after the document had
+    # already moved on. The workflow stays OPEN in this state — it must NOT
+    # be closed while the recall is outstanding — until an authorized actor
+    # approves the recall (invalidating affected approvals) or denies it.
+    RECALL_REQUESTED = "recall_requested"
+    # §6.2/6.6: explicitly finalized by the authorized final approver, only
+    # once every required step is complete. Distinct from APPROVED, which
+    # means "all approvals in, awaiting finalization".
+    FINALIZED = "finalized"
     # Legacy values (kept for backward compatibility)
     ACTIVE = "active"
     COMPLETED = "completed"
@@ -304,22 +293,82 @@ class Permission(StrEnum):
     ADMIN_AUDIT = "admin:audit"
     ADMIN_DOC_TYPES = "admin:doc_types"
     ADMIN_WORKFLOW_TEMPLATES = "admin:workflow_templates"
+    # Members — fine-grained (requirements doc §2.5/13.3: Main Admin and HR can
+    # both add Worker/Trainee members, but only the Main Administrator may add
+    # another HR user or delete a member)
+    MEMBERS_INVITE_STANDARD = "members:invite_standard"  # invite worker/trainee
+    MEMBERS_INVITE_HR = "members:invite_hr"               # invite an HR user
+    MEMBERS_DELETE = "members:delete"                     # delete/deactivate a member
+    # Agent legal-knowledge management (§12.2/13.6) — Main Administrator only
+    # under the stated baseline; HR does not receive this by default.
+    AGENT_KNOWLEDGE_MANAGE = "agent:knowledge_manage"
     # Uploads
     UPLOADS_CREATE = "uploads:create"
 
 
 # ── System Roles ───────────────────────────────────────────────────────────────
+# DocFlow's RBAC model has exactly 4 org-level roles, per the Organization
+# Dashboard & Role-Based Access Requirements report §2: Main Administrator,
+# HR, Worker, Trainee. There is no custom-role builder — every organization
+# gets these 4 roles, seeded identically, and membership picks one of them.
+# (Platform-level `AuthUser.is_superadmin` is a separate, orthogonal concept
+# — see domain/permissions.py — and always bypasses these role checks.)
 SYSTEM_ROLES = {
-    "super_admin": {
-        "description": "Full platform access",
+    "admin": {
+        "description": "Main Administrator — full organization-wide administrative "
+        "authority. Manages org settings, departments, members, roles, templates, "
+        "and the Agent's legal knowledge base. The only role that may add an HR "
+        "user or delete a member account, and may review/approve/sign documents "
+        "when assigned as an authorized approver.",
         "permissions": list(Permission),
     },
-    "org_admin": {
-        "description": "Full org access",
-        "permissions": [p for p in Permission if not p.startswith("admin:orgs")],
+    "hr": {
+        "description": "HR — supports the Main Administrator with day-to-day "
+        "organization management. Can add Workers and Trainees, manage "
+        "departments, templates, and workflow templates, but cannot add HR "
+        "users, delete members, manage roles/permissions, or manage the "
+        "Agent's legal knowledge base. May review/approve/sign documents when "
+        "assigned as an authorized approver.",
+        "permissions": [
+            # Same baseline as Worker — documents, workflows, approvals,
+            # chat, analytics — plus day-to-day admin support permissions.
+            Permission.DOCUMENTS_CREATE,
+            Permission.DOCUMENTS_READ,
+            Permission.DOCUMENTS_EDIT,
+            Permission.DOCUMENTS_SUBMIT,
+            Permission.DOCUMENTS_CANCEL,
+            Permission.DOCUMENTS_COMMENT,
+            Permission.WORKFLOWS_READ,
+            Permission.APPROVALS_DECIDE,
+            Permission.APPROVALS_DELEGATE,
+            Permission.CHAT_READ,
+            Permission.CHAT_SEND,
+            Permission.ANALYTICS_READ,
+            Permission.UPLOADS_CREATE,
+            # Admin-support permissions (§2.5 matrix — HR row), deliberately
+            # excludes MEMBERS_INVITE_HR, MEMBERS_DELETE, and
+            # AGENT_KNOWLEDGE_MANAGE — those stay Main-Administrator-only,
+            # enforced again at the router/service layer as defense in depth.
+            # ADMIN_ROLES IS included, but only ever grants read access in
+            # practice: GET /orgs/me/roles and GET /orgs/me/permissions (HR
+            # needs the role list to populate the invite/edit-member role
+            # picker) — every mutating role endpoint (create/update/
+            # set-permissions/delete) unconditionally rejects ALL callers
+            # regardless of this permission (DocFlow's 4 roles are fixed,
+            # see organizations.py), and the Main-Administrator-only "Roles
+            # & Perms" admin SCREEN is gated separately by route (App.tsx)
+            # and by admin.py's `/admin/roles/catalog` (_require_main_admin).
+            Permission.ADMIN_ROLES,
+            Permission.ADMIN_USERS,
+            Permission.ADMIN_ORGS,
+            Permission.ADMIN_DOC_TYPES,
+            Permission.ADMIN_WORKFLOW_TEMPLATES,
+            Permission.MEMBERS_INVITE_STANDARD,
+        ],
     },
-    "dept_manager": {
-        "description": "Dept-scoped document + workflow access",
+    "worker": {
+        "description": "Worker — document creator and approver. Uploads and submits "
+        "own documents, and reviews/approves/signs documents assigned to them.",
         "permissions": [
             Permission.DOCUMENTS_CREATE,
             Permission.DOCUMENTS_READ,
@@ -336,37 +385,30 @@ SYSTEM_ROLES = {
             Permission.UPLOADS_CREATE,
         ],
     },
-    "approver": {
-        "description": "Approve documents assigned to them",
+    "trainee": {
+        "description": "Trainee — document creator and workflow participant. "
+        "Uploads and submits own documents, tracks their status, and sees "
+        "permitted analytics data; never an approver or signer, and never "
+        "sees the Approvals module, approval notifications, or approval APIs.",
         "permissions": [
-            Permission.DOCUMENTS_READ,
-            Permission.DOCUMENTS_COMMENT,
-            Permission.APPROVALS_DECIDE,
-            Permission.APPROVALS_DELEGATE,
-            Permission.CHAT_READ,
-            Permission.CHAT_SEND,
-            Permission.UPLOADS_CREATE,
-        ],
-    },
-    "submitter": {
-        "description": "Create + submit own documents",
-        "permissions": [
+            # Intentionally excludes: APPROVALS_DECIDE, APPROVALS_DELEGATE,
+            # WORKFLOWS_ADMIN, and every admin:*/members:*/agent:* permission.
+            # A trainee must never gain approval/signing authority through this
+            # role's permission set — enforced again at the service layer
+            # (ApprovalService.decide) as defense in depth, not just here.
+            # ANALYTICS_READ IS granted (requirements §2.5: Trainee gets
+            # "Yes, permitted data") — scoped to the trainee's own records,
+            # same as Worker, in document_service.py::get_analytics().
             Permission.DOCUMENTS_CREATE,
             Permission.DOCUMENTS_READ,
             Permission.DOCUMENTS_EDIT,
             Permission.DOCUMENTS_SUBMIT,
-            Permission.DOCUMENTS_CANCEL,
             Permission.DOCUMENTS_COMMENT,
+            Permission.WORKFLOWS_READ,
+            Permission.ANALYTICS_READ,
             Permission.CHAT_READ,
             Permission.CHAT_SEND,
             Permission.UPLOADS_CREATE,
-        ],
-    },
-    "viewer": {
-        "description": "Read-only access to permitted documents",
-        "permissions": [
-            Permission.DOCUMENTS_READ,
-            Permission.CHAT_READ,
         ],
     },
 }

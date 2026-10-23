@@ -5,10 +5,12 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import {
   Search, FileText, GitBranch, Users, Clock,
-  X, ArrowRight, TrendingUp, Zap, Hash, Command
+  X, ArrowRight, Hash, Command, MessageSquare, AlertCircle
 } from 'lucide-react';
+import { searchApi, type SearchEntity } from '@/lib/api/search';
 
 const C = {
   card: 'var(--bg-elevated)',
@@ -28,31 +30,34 @@ const C = {
   disabled: 'var(--text-disabled)',
 };
 
-type SearchFilter = 'all' | 'documents' | 'workflows' | 'users';
+type SearchFilter = 'all' | 'documents' | 'workflows' | 'members' | 'messages';
 
+/** A display row, mapped from whichever backend entity produced it. */
 interface SearchResult {
   id: string;
-  type: 'document' | 'workflow' | 'user';
+  type: 'document' | 'workflow' | 'member' | 'message';
   title: string;
   subtitle: string;
   meta: string;
   color: string;
+  deepLink: string;
 }
 
-const MOCK_RESULTS: SearchResult[] = [
-  { id: '1', type: 'document', title: 'Q4 Financial Report 2026', subtitle: 'Finance · PDF · 2.4 MB', meta: 'Updated 2h ago', color: C.primary400 },
-  { id: '2', type: 'document', title: 'Product Roadmap H1 2027', subtitle: 'Strategy · DOCX · 890 KB', meta: 'Updated yesterday', color: C.primary400 },
-  { id: '3', type: 'document', title: 'AWS Vendor Contract', subtitle: 'Legal · PDF · 1.1 MB', meta: 'Updated 3 days ago', color: C.primary400 },
-  { id: '4', type: 'workflow', title: 'Finance Approval Chain', subtitle: 'Active · Step 3/5 — Approve', meta: '6h SLA remaining', color: C.purple },
-  { id: '5', type: 'workflow', title: 'Legal Contract Review', subtitle: 'Active · Step 2/5 — Review', meta: '3d SLA remaining', color: C.purple },
-  { id: '6', type: 'user', title: 'Sarah Mitchell', subtitle: 'Finance Manager · Finance Dept', meta: 'Last active today', color: C.success },
-  { id: '7', type: 'user', title: 'Marcus Lee', subtitle: 'Product Lead · Strategy Dept', meta: 'Last active 2h ago', color: C.success },
-  { id: '8', type: 'document', title: 'Remote Work Policy v2.1', subtitle: 'HR · PDF · 450 KB', meta: 'Updated 4 days ago', color: C.primary400 },
-];
-
-const POPULAR: string[] = ['Budget report', 'Vendor contract', 'HR policy', 'Product roadmap', 'Security audit'];
-
 const RECENT_KEY = 'docflow_recent_searches';
+
+function formatWhen(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
 
 function getRecentSearches(): string[] {
   try {
@@ -78,34 +83,65 @@ function removeRecentSearch(query: string) {
 const typeIcon: Record<string, React.ElementType> = {
   document: FileText,
   workflow: GitBranch,
-  user: Users,
+  member: Users,
+  message: MessageSquare,
 };
 
 const filterLabels: { key: SearchFilter; label: string; icon: React.ElementType; color: string }[] = [
   { key: 'all', label: 'All', icon: Hash, color: C.primary400 },
   { key: 'documents', label: 'Documents', icon: FileText, color: C.primary400 },
   { key: 'workflows', label: 'Workflows', icon: GitBranch, color: C.purple },
-  { key: 'users', label: 'Users', icon: Users, color: C.success },
+  { key: 'members', label: 'People', icon: Users, color: C.success },
+  { key: 'messages', label: 'Messages', icon: MessageSquare, color: C.warning },
 ];
+
+const GROUP_LABEL: Record<SearchResult['type'], string> = {
+  document: 'Documents',
+  workflow: 'Workflows',
+  member: 'People',
+  message: 'Messages',
+};
+
+const GROUP_COLOR: Record<SearchResult['type'], string> = {
+  document: C.primary400,
+  workflow: C.purple,
+  member: C.success,
+  message: C.warning,
+};
 
 export default function SearchPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
   const [filter, setFilter] = useState<SearchFilter>('all');
   const [recentSearches, setRecentSearches] = useState<string[]>(getRecentSearches);
-  const [isSearching, setIsSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
+  // Debounce so typing doesn't fire a request per keystroke.
   useEffect(() => {
-    if (query.trim().length < 2) { setIsSearching(false); return; }
-    setIsSearching(true);
-    const t = setTimeout(() => setIsSearching(false), 300);
+    const t = setTimeout(() => setDebounced(query.trim()), 300);
     return () => clearTimeout(t);
   }, [query]);
+
+  const hasQuery = debounced.length >= 2;
+  const entities: SearchEntity[] | undefined =
+    filter === 'all' ? undefined : [filter as SearchEntity];
+
+  const {
+    data,
+    isFetching,
+    isError,
+    error,
+  } = useQuery({
+    queryKey: ['search', debounced, filter],
+    queryFn: () => searchApi.search({ q: debounced, entities, limit: 10 }),
+    enabled: hasQuery,
+    staleTime: 15_000,
+  });
 
   const handleSearch = (q: string) => {
     if (!q.trim()) return;
@@ -119,21 +155,67 @@ export default function SearchPage() {
     setRecentSearches(getRecentSearches());
   };
 
-  const results = MOCK_RESULTS.filter(r => {
-    const matchesFilter = filter === 'all' || r.type + 's' === filter || (filter === 'documents' && r.type === 'document') || (filter === 'workflows' && r.type === 'workflow') || (filter === 'users' && r.type === 'user');
-    const matchesQuery = query.trim().length < 2 ? false : r.title.toLowerCase().includes(query.toLowerCase()) || r.subtitle.toLowerCase().includes(query.toLowerCase());
-    return matchesFilter && matchesQuery;
-  });
-
-  const hasQuery = query.trim().length >= 2;
-
-  const grouped = {
-    document: results.filter(r => r.type === 'document'),
-    workflow: results.filter(r => r.type === 'workflow'),
-    user: results.filter(r => r.type === 'user'),
+  // Map the backend's per-entity groups onto display rows. Every field
+  // shown comes from the API — nothing is synthesized client-side.
+  const groups = data?.groups;
+  const grouped: Record<SearchResult['type'], SearchResult[]> = {
+    document: (groups?.documents?.items ?? []).map(d => ({
+      id: d.id,
+      type: 'document' as const,
+      title: d.title,
+      subtitle: [d.public_id, d.document_type, d.status].filter(Boolean).join(' · '),
+      meta: d.updated_at ? `Updated ${formatWhen(d.updated_at)}` : '',
+      color: C.primary400,
+      deepLink: d.deep_link,
+    })),
+    workflow: (groups?.workflows?.items ?? []).map(w => ({
+      id: w.id,
+      type: 'workflow' as const,
+      title: w.title,
+      subtitle: [
+        w.is_active ? 'Active' : 'Disabled',
+        w.owned_by_me ? 'Mine' : w.visibility === 'private' ? 'Private' : 'Shared',
+        `v${w.version}`,
+      ].join(' · '),
+      meta: w.description ?? '',
+      color: C.purple,
+      deepLink: w.deep_link,
+    })),
+    member: (groups?.members?.items ?? []).map(m => ({
+      id: m.id,
+      type: 'member' as const,
+      title: m.title,
+      subtitle: [m.role, m.department].filter(Boolean).join(' · ') || m.email,
+      meta: m.email,
+      color: C.success,
+      deepLink: m.deep_link,
+    })),
+    message: (groups?.messages?.items ?? []).map(m => ({
+      id: m.id,
+      type: 'message' as const,
+      title: m.title ?? '',
+      subtitle: [m.sender_name, m.conversation_title].filter(Boolean).join(' · '),
+      meta: formatWhen(m.created_at),
+      color: C.warning,
+      deepLink: m.deep_link,
+    })),
   };
 
-  const groupOrder: (keyof typeof grouped)[] = filter === 'all' ? ['document', 'workflow', 'user'] : [(filter === 'documents' ? 'document' : filter === 'workflows' ? 'workflow' : 'user')];
+  const groupOrder: SearchResult['type'][] =
+    filter === 'all'
+      ? ['document', 'workflow', 'member', 'message']
+      : [
+          filter === 'documents'
+            ? 'document'
+            : filter === 'workflows'
+              ? 'workflow'
+              : filter === 'members'
+                ? 'member'
+                : 'message',
+        ];
+
+  const results = groupOrder.flatMap(t => grouped[t]);
+  const isSearching = isFetching;
 
   return (
     <div style={{ position: 'relative', minHeight: '100%' }}>
@@ -215,14 +297,29 @@ export default function SearchPage() {
           })}
         </div>
 
-        {/* Results or empty state */}
+        {/* Results, loading, error, or empty state */}
         {hasQuery ? (
-          results.length === 0 ? (
+          isError ? (
+            <div style={{ textAlign: 'center', padding: '60px 32px' }}>
+              <div style={{ width: 56, height: 56, borderRadius: 16, background: `color-mix(in srgb, ${C.danger} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${C.danger} 25%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+                <AlertCircle size={24} color={C.danger} />
+              </div>
+              <div style={{ color: C.heading, fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Search failed</div>
+              <div style={{ color: C.muted, fontSize: 14 }}>
+                {(error as Error)?.message || 'Something went wrong. Please try again.'}
+              </div>
+            </div>
+          ) : isFetching && !data ? (
+            <div style={{ textAlign: 'center', padding: '60px 32px' }}>
+              <div style={{ width: 28, height: 28, border: `3px solid ${C.border}`, borderTopColor: C.primary400, borderRadius: '50%', animation: 'spin 0.7s linear infinite', margin: '0 auto 14px' }} />
+              <div style={{ color: C.muted, fontSize: 14 }}>Searching…</div>
+            </div>
+          ) : results.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '60px 32px' }}>
               <div style={{ width: 56, height: 56, borderRadius: 16, background: `color-mix(in srgb, ${C.muted} 10%, transparent)`, border: `1px solid ${C.borderSubtle}`, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
                 <Search size={24} color={C.muted} />
               </div>
-              <div style={{ color: C.heading, fontSize: 18, fontWeight: 700, marginBottom: 8 }}>No results for "{query}"</div>
+              <div style={{ color: C.heading, fontSize: 18, fontWeight: 700, marginBottom: 8 }}>No results for "{debounced}"</div>
               <div style={{ color: C.muted, fontSize: 14 }}>Try adjusting your filters or search terms</div>
             </div>
           ) : (
@@ -231,20 +328,28 @@ export default function SearchPage() {
                 const items = grouped[type];
                 if (items.length === 0) return null;
                 const Icon = typeIcon[type];
-                const typeLabel = type === 'document' ? 'Documents' : type === 'workflow' ? 'Workflows' : 'Users';
-                const typeColor = type === 'document' ? C.primary400 : type === 'workflow' ? C.purple : C.success;
+                const typeLabel = GROUP_LABEL[type];
+                const typeColor = GROUP_COLOR[type];
+                // Total from the server, not items.length — the list is
+                // capped at the page limit, so showing the array length
+                // would under-report how many matches actually exist.
+                const groupTotal =
+                  type === 'document' ? groups?.documents?.total
+                  : type === 'workflow' ? groups?.workflows?.total
+                  : type === 'member' ? groups?.members?.total
+                  : groups?.messages?.total;
                 return (
                   <div key={type}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                       <Icon size={14} color={typeColor} />
                       <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: typeColor }}>{typeLabel}</span>
-                      <span style={{ fontSize: 11, color: C.disabled, background: C.overlay, padding: '1px 6px', borderRadius: 99, border: `1px solid ${C.borderSubtle}` }}>{items.length}</span>
+                      <span style={{ fontSize: 11, color: C.disabled, background: C.overlay, padding: '1px 6px', borderRadius: 99, border: `1px solid ${C.borderSubtle}` }}>{groupTotal ?? items.length}</span>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       {items.map(r => {
                         const RIcon = typeIcon[r.type];
                         return (
-                          <div key={r.id} className="result-row" style={{
+                          <div key={r.id} className="result-row" onClick={() => navigate(r.deepLink)} style={{
                             display: 'flex', alignItems: 'center', gap: 14, padding: '12px 16px',
                             background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
                             cursor: 'pointer', transition: 'all 0.2s',
@@ -295,30 +400,11 @@ export default function SearchPage() {
               </div>
             )}
 
-            {/* Popular Searches */}
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                <TrendingUp size={14} color={C.warning} />
-                <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: C.warning }}>Popular</span>
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {POPULAR.map(p => (
-                  <button
-                    key={p}
-                    onClick={() => setQuery(p)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
-                      background: C.card, border: `1px solid ${C.border}`, borderRadius: 99,
-                      color: C.body, fontSize: 13, cursor: 'pointer', transition: 'all 0.2s',
-                    }}
-                    className="popular-pill"
-                  >
-                    <Zap size={12} color={C.warning} />
-                    {p}
-                  </button>
-                ))}
-              </div>
-            </div>
+            {/* NOTE: the previous "Popular" chips were hardcoded fake
+                document names ("Budget report", "Vendor contract", …) which
+                read as real org content. Removed rather than faked — the
+                backend has no search-popularity tracking to source them
+                from. Recent searches above are real (per-browser). */}
 
             {/* Quick Links */}
             <div>

@@ -50,12 +50,21 @@ google-generativeai==0.8.1
 langchain==0.3.1
 langchain-google-genai==2.0.1
 
-# --- OCR ---
+# --- OCR / document text extraction ---
 pytesseract==0.3.13
 pdfplumber==0.11.4
 python-docx==1.1.2
 openpyxl==3.1.5
 Pillow==10.4.0
+# PDF text extraction for the Agent's knowledge ingestion (app/ai/ingestion.py)
+pypdf==6.20.1
+
+# --- TLS ---
+# Routes Python's certificate verification through the OS trust store so a
+# private/corporate root CA is honoured. Required on TLS-inspecting networks,
+# where the bundled certifi roots cannot verify the presented chain and every
+# outbound HTTPS call (e.g. to the Gemini API) fails. See app/core/trust.py.
+truststore==0.10.5
 
 # --- Security / Sanitisation ---
 bleach==6.1.0

@@ -17,12 +17,17 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // 127.0.0.1, not localhost: on this machine "localhost" can resolve to
+      // ::1 first, which a stale Docker Desktop / WSL port-forward (wslrelay)
+      // was squatting on without ever responding — Node's proxy would hang
+      // forever on that connection. Pinning to the literal IPv4 loopback
+      // address sidesteps the DNS ambiguity entirely.
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: 'ws://127.0.0.1:8000',
         ws: true,
         changeOrigin: true,
       },

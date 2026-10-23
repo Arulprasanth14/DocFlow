@@ -39,6 +39,18 @@ class Conversation(BaseModel):
     """
     __tablename__ = "conversations"
 
+    # Tenant scope. Previously absent: access was gated solely by
+    # participation, which works but leaves no data-layer tenant boundary —
+    # §15 requires "tenant scoping at the data-access layer, not only in
+    # frontend filters", and §10 requires that users "must not be able to
+    # message or discover members of another organization". Nullable so
+    # existing rows remain valid; the service layer sets it on every new
+    # conversation and refuses cross-org participants.
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+
     # 'workflow_context' | 'direct'
     kind: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
 

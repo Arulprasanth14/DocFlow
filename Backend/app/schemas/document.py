@@ -10,6 +10,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.models.document import DocumentStatus
 
 # ── Form Field Schema ─────────────────────────────────────────────────────────
 
@@ -159,12 +160,35 @@ class AttachmentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Document Templates ────────────────────────────────────────────────────────
+
+class DocumentTemplateCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    default_field_values: dict[str, Any] = Field(default={})
+
+    model_config = {"extra": "ignore"}
+
+
+class DocumentTemplateResponse(BaseModel):
+    id: UUID
+    org_id: UUID
+    doc_type_id: UUID
+    name: str
+    default_field_values: dict[str, Any]
+    created_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ── Documents ─────────────────────────────────────────────────────────────────
 
 class DocumentCreateRequest(BaseModel):
     doc_type_id: UUID
     title: str = Field(..., min_length=1, max_length=500)
     priority: str = Field(default="normal", description="low, normal, high, urgent")
+    tags: list[str] = Field(default=[])
     form_data: dict[str, Any] = Field(default={})
     metadata_: dict[str, Any] = Field(default={}, alias="metadata")
     dept_id: UUID | None = None
@@ -177,6 +201,7 @@ class DocumentCreateRequest(BaseModel):
 class DocumentUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
     priority: str | None = None
+    tags: list[str] | None = None
     form_data: dict[str, Any] | None = None
     metadata_: dict[str, Any] | None = Field(default=None, alias="metadata")
     dept_id: UUID | None = None
@@ -188,6 +213,13 @@ class DocumentUpdateRequest(BaseModel):
 
 class DocumentSubmitRequest(BaseModel):
     change_reason: str | None = Field(default="Submitted document", description="Version reason")
+    workflow_template_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Which WorkflowTemplate to start. If omitted, the DocumentType's default "
+            "template is used. If neither is configured, submit returns 422."
+        ),
+    )
 
 
 class DocumentResponse(BaseModel):
@@ -199,8 +231,9 @@ class DocumentResponse(BaseModel):
     dept_id: UUID | None
     public_id: str
     title: str
-    status: str
+    status: DocumentStatus
     priority: str
+    tags: list[str]
     form_data: dict[str, Any]
     metadata_: dict[str, Any] = Field(..., alias="metadata")
     submitted_by: UUID
@@ -213,6 +246,14 @@ class DocumentResponse(BaseModel):
     attachment_count: int = 0
     comment_count: int = 0
     version_count: int = 1
+    # The most recent ApprovalStep for this document's latest workflow instance,
+    # if any — lets the frontend open WorkflowChatPanel (pinned to a step id)
+    # without a separate document->instance->step lookup round-trip.
+    current_approval_step_id: UUID | None = None
+    # Lets the frontend call POST /workflow-instances/{id}/cancel without a
+    # separate lookup — useCancelWorkflow() existed and worked against the
+    # backend, but no page could call it without this.
+    current_workflow_instance_id: UUID | None = None
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 

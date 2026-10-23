@@ -8,6 +8,7 @@ Updated per architecture §4:
 """
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
 
@@ -15,6 +16,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -26,6 +28,49 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, utcnow
+
+
+class DocumentStatus(str, enum.Enum):
+    """
+    Document lifecycle states.
+
+    Requirements report §5.5 asks for: Draft, Ready for Submission, In
+    Approval, Changes Requested, Approved, Rejected, Revoked/Returned for
+    Correction, and Closed/Finalized. Mapping to this enum:
+      Draft                        → DRAFT
+      Ready for Submission         → READY
+      In Approval                  → PENDING (SUBMITTED is the transient
+                                      "handed to the workflow engine" state)
+      Changes Requested            → SENT_BACK
+      Approved                     → APPROVED
+      Rejected                     → REJECTED
+      Revoked/Returned for Corr.   → REVOKED
+      Closed/Finalized             → FINALIZED
+
+    The `status` column is VARCHAR(50) (not a native Postgres enum type —
+    see alembic/versions/..._workflow_approvals_phase2_gaps.py's own
+    docstring), so adding values here needs no migration.
+    """
+    DRAFT = "draft"
+    # §5.5 "Ready for Submission" — prepared/reviewed but not yet routed
+    READY = "ready"
+    SUBMITTED = "submitted"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SENT_BACK = "sent_back"
+    # §6.5 an approval was revoked/recalled and the document is back with its
+    # owner for correction — distinct from SENT_BACK (a normal
+    # changes-requested round) so revocation is visibly its own path.
+    REVOKED = "revoked"
+    # §6.2/6.6 explicitly finalized by the authorized final approver. Only
+    # reachable from APPROVED, and only via the explicit finalize action.
+    FINALIZED = "finalized"
+    ARCHIVED = "archived"
+    EXPIRED = "expired"
+    # Added: WorkflowService.cancel() referenced DocumentStatus.CANCELLED,
+    # which didn't exist — every workflow-cancel call raised AttributeError.
+    CANCELLED = "cancelled"
 
 
 class DocumentType(BaseModel):
@@ -52,6 +97,31 @@ class DocumentType(BaseModel):
     workflow_templates: Mapped[list["WorkflowTemplate"]] = relationship(  # type: ignore[name-defined]
         "WorkflowTemplate", back_populates="doc_type", lazy="noload"
     )
+    templates: Mapped[list["DocumentTemplate"]] = relationship(
+        "DocumentTemplate", back_populates="doc_type", lazy="noload", cascade="all, delete-orphan"
+    )
+
+class DocumentTemplate(BaseModel):
+    __tablename__ = "document_templates"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    doc_type_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_types.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    default_field_values: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+
+    doc_type: Mapped["DocumentType"] = relationship(
+        "DocumentType", back_populates="templates", lazy="noload"
+    )
+    creator: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload"
+    )
 
 
 class Document(BaseModel):
@@ -68,8 +138,13 @@ class Document(BaseModel):
     )
     public_id: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)  # DOC-2024-00001
     title: Mapped[str] = mapped_column(String(500), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
+    status: Mapped[DocumentStatus] = mapped_column(
+        Enum(DocumentStatus, name="documentstatus", native_enum=False, create_constraint=False),
+        default=DocumentStatus.DRAFT,
+        nullable=False,
+    )
     priority: Mapped[str] = mapped_column(String(20), default="normal", nullable=False)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, server_default="{}")
 
     # Architecture §4: pointer to the current active version
     # (nullable until first version is uploaded)
@@ -218,6 +293,9 @@ class FileAsset(BaseModel):
 
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
+    )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
     )
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False

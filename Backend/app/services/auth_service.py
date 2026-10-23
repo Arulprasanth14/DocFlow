@@ -25,7 +25,7 @@ from app.core.exceptions import (
     NotFoundException,
     UnauthorizedException,
 )
-from app.core.firebase import verify_firebase_token
+from app.core.firebase import FirebaseUnavailableError, verify_firebase_token
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -38,11 +38,19 @@ from app.models.organization import Organization, OrganizationMember, Role
 from app.models.user import Session, User
 from app.repositories.org_repo import OrgMemberRepository, OrganizationRepository
 from app.repositories.user_repo import SessionRepository, UserRepository
+from app.services.account_service import (
+    HAS_ORG,
+    NO_ORG,
+    PENDING_REQUEST,
+    AccountService,
+    AccountState,
+)
 from app.schemas.auth import (
     LoginResponse,
     MeResponse,
     OrgMembershipResponse,
     OrganizationResponse,
+    PendingRequestInfo,
     SessionInfo,
     TokenRefreshResponse,
     UserResponse,
@@ -73,47 +81,55 @@ class AuthService:
         ip_address: str | None,
     ) -> LoginResponse:
         """
-        Verify a Firebase ID token (Google, Microsoft, or Firebase Email/Password),
-        find or create the corresponding DocFlow user, and issue JWT tokens.
+        Verify a Firebase ID token (Google, Microsoft, or Firebase
+        Email/Password), find-or-create the DocFlow user, and issue tokens.
+
+        Idempotent and safe to call concurrently (retries, double-clicks,
+        StrictMode, several tabs): user creation is race-safe (see
+        AccountService.resolve_user) and "no organization" / "request
+        pending" are returned as `state`, never raised as errors.
         """
         # 1. Verify Firebase token
         try:
             firebase_claims = await verify_firebase_token(id_token)
         except ValueError as exc:
             raise UnauthorizedException(f"Firebase token invalid: {exc}") from exc
+        except FirebaseUnavailableError as exc:
+            from app.core.exceptions import ServiceUnavailableException
 
-        firebase_uid: str = firebase_claims["uid"]
-        email: str = firebase_claims["email"]
-        name: str | None = firebase_claims.get("name")
-        avatar_url: str | None = firebase_claims.get("picture")
+            raise ServiceUnavailableException("Sign-in") from exc
 
-        # 2. Find or create user
-        user = await self.user_repo.get_by_firebase_uid(firebase_uid)
-        if not user:
-            # Try to match by email (e.g., user previously registered with password)
-            user = await self.user_repo.get_by_email(email)
-            if user:
-                # Link the Firebase UID to existing account
-                user.firebase_uid = firebase_uid
-                if avatar_url and not user.avatar_url:
-                    user.avatar_url = avatar_url
-                await self.db.flush()
-            else:
-                # Brand new user
-                user = await self.user_repo.create(
-                    email=email,
-                    name=name,
-                    firebase_uid=firebase_uid,
-                    avatar_url=avatar_url,
-                )
+        # 2. Resolve the user (race-safe get-or-create; verified-email linking)
+        accounts = AccountService(self.db)
+        user = await accounts.resolve_user(
+            firebase_uid=firebase_claims["uid"],
+            email=firebase_claims.get("email", ""),
+            name=firebase_claims.get("name"),
+            avatar_url=firebase_claims.get("picture"),
+            email_verified=bool(firebase_claims.get("email_verified", False)),
+        )
 
-        if user.status == "suspended":
-            raise ForbiddenException("Your account has been suspended")
+        # 3. HAS_ORG / PENDING_REQUEST / NO_ORG
+        account = await accounts.get_account_state(user)
 
-        # 3. Load org membership + permissions
-        membership_data = await self._resolve_membership(user)
+        # 4. Session + tokens
+        response = await self._issue_session(user, account, device_info, ip_address)
+        logger.info(
+            "firebase_login_success",
+            user_id=str(user.id),
+            state=account.state,
+            provider=firebase_claims.get("sign_in_provider"),
+        )
+        return response
 
-        # 4. Create session
+    async def _issue_session(
+        self,
+        user: User,
+        account: "AccountState",
+        device_info: dict | None,
+        ip_address: str | None,
+    ) -> LoginResponse:
+        membership_data = account.membership
         session_id = generate_session_id()
         await self.session_repo.create(
             user_id=user.id,
@@ -121,33 +137,21 @@ class AuthService:
             device_info=device_info,
             ip_address=ip_address,
         )
-
-        # 5. Issue tokens
-        org_id = membership_data[0].org_id if membership_data else None
-        roles = [membership_data[1].name] if membership_data else []
-        permissions = membership_data[2] if membership_data else []
-
         access_token = create_access_token(
             user_id=user.id,
-            org_id=org_id,
-            roles=roles,
-            permissions=permissions,
+            org_id=membership_data[0].org_id if membership_data else None,
+            roles=[membership_data[1].name] if membership_data else [],
+            permissions=membership_data[2] if membership_data else [],
             session_id=session_id,
+            is_superadmin=user.is_superadmin,
         )
-
         await self.user_repo.update_last_seen(user.id)
         await self.db.commit()
-
-        logger.info(
-            "firebase_login_success",
-            user_id=str(user.id),
-            provider=firebase_claims.get("sign_in_provider"),
-        )
-
         return self._build_login_response(
             access_token=access_token,
             user=user,
             membership_data=membership_data,
+            account=account,
         )
 
     # ── Email / Password Login (direct bcrypt — no Firebase for this path) ────
@@ -163,7 +167,7 @@ class AuthService:
         Authenticate with email + password using bcrypt verification.
         Note: For Google/Microsoft sign-in, use firebase_login instead.
         """
-        user = await self.user_repo.get_by_email(email)
+        user = await self.user_repo.get_by_email(email.strip().lower())
 
         if not user:
             # Run bcrypt verify to prevent timing attacks
@@ -180,40 +184,11 @@ class AuthService:
         if user.status == "suspended":
             raise ForbiddenException("Your account has been suspended")
 
-        # Load org membership
-        membership_data = await self._resolve_membership(user)
-
-        # Create session
-        session_id = generate_session_id()
-        await self.session_repo.create(
-            user_id=user.id,
-            session_token=session_id,
-            device_info=device_info,
-            ip_address=ip_address,
-        )
-
-        org_id = membership_data[0].org_id if membership_data else None
-        roles = [membership_data[1].name] if membership_data else []
-        permissions = membership_data[2] if membership_data else []
-
-        access_token = create_access_token(
-            user_id=user.id,
-            org_id=org_id,
-            roles=roles,
-            permissions=permissions,
-            session_id=session_id,
-        )
-
-        await self.user_repo.update_last_seen(user.id)
-        await self.db.commit()
-
-        logger.info("email_login_success", user_id=str(user.id))
-
-        return self._build_login_response(
-            access_token=access_token,
-            user=user,
-            membership_data=membership_data,
-        )
+        accounts = AccountService(self.db)
+        account = await accounts.get_account_state(user)
+        response = await self._issue_session(user, account, device_info, ip_address)
+        logger.info("email_login_success", user_id=str(user.id), state=account.state)
+        return response
 
     # ── Register ──────────────────────────────────────────────────────────────
 
@@ -230,60 +205,29 @@ class AuthService:
         Create a new user account with email/password.
         Optionally creates an organization and assigns the user as admin.
         """
+        email = email.strip().lower()
         existing = await self.user_repo.get_by_email(email)
         if existing:
             raise ConflictException("An account with this email already exists")
 
-        pw_hash = hash_password(password)
+        accounts = AccountService(self.db)
         user = await self.user_repo.create(
             email=email,
             name=name,
-            password_hash=pw_hash,
+            password_hash=hash_password(password),
         )
 
-        membership_data = None
+        account = AccountState(NO_ORG)
         if org_name:
-            org = await self.org_repo.create(name=org_name)
-            roles = await self.org_repo.create_default_roles(org.id)
-            admin_role = roles.get("org_admin") or roles.get("super_admin")
-            if admin_role:
-                member = await self.member_repo.add_member(
-                    org_id=org.id,
-                    user_id=user.id,
-                    role_id=admin_role.id,
-                )
-                perms = await self.member_repo.resolve_permissions(admin_role.id)
-                membership_data = (member, admin_role, perms, org)
+            # Atomic: org + roles + ADMIN membership, or nothing (and the
+            # unique-name rule applies here too).
+            account = await accounts.create_organization(user, org_name)
 
-        # Create session
-        session_id = generate_session_id()
-        await self.session_repo.create(
-            user_id=user.id,
-            session_token=session_id,
-            device_info=device_info,
-            ip_address=ip_address,
-        )
-
-        org_id = membership_data[0].org_id if membership_data else None
-        roles_list = [membership_data[1].name] if membership_data else []
-        perms_list = membership_data[2] if membership_data else []
-
-        access_token = create_access_token(
-            user_id=user.id,
-            org_id=org_id,
-            roles=roles_list,
-            permissions=perms_list,
-            session_id=session_id,
-        )
-
-        await self.db.commit()
-        logger.info("register_success", user_id=str(user.id), has_org=bool(org_name))
-
-        return self._build_login_response(
-            access_token=access_token,
-            user=user,
-            membership_data=membership_data,
-        )
+        response = await self._issue_session(user, account, device_info, ip_address)
+        if org_name and account.membership:
+            await accounts.notify_org_created(user, account.membership[3])
+        logger.info("register_success", user_id=str(user.id), state=account.state)
+        return response
 
     # ── Token Refresh ─────────────────────────────────────────────────────────
 
@@ -324,6 +268,7 @@ class AuthService:
             roles=roles,
             permissions=permissions,
             session_id=session_token,
+            is_superadmin=user.is_superadmin,
         )
 
         await self.db.commit()
@@ -433,17 +378,10 @@ class AuthService:
     async def _resolve_membership(
         self, user: User
     ) -> tuple[OrganizationMember, Role, list[str], Organization] | None:
-        """Load the user's primary org membership + role + permissions."""
-        primary = await self.member_repo.get_first_org_for_user(user.id)
-        if not primary:
-            return None
-
-        result = await self.member_repo.get_membership_with_details(
-            user.id, primary.org_id
-        )
+        """The user's primary ACTIVE membership + role + permissions."""
+        result = await self.member_repo.get_primary_membership_details(user.id)
         if not result:
             return None
-
         member, org, role, permissions = result
         return member, role, permissions, org
 
@@ -452,11 +390,23 @@ class AuthService:
         access_token: str,
         user: User,
         membership_data: tuple | None,
+        account: "AccountState | None" = None,
     ) -> LoginResponse:
+        state = account.state if account else (HAS_ORG if membership_data else NO_ORG)
+        pending = (
+            PendingRequestInfo(
+                org_name=account.pending_org_name,
+                requested_at=account.pending_requested_at,
+            )
+            if account and account.state == PENDING_REQUEST and account.pending_org_name
+            else None
+        )
         return LoginResponse(
             access_token=access_token,
             user=UserResponse.model_validate(user),
             org_membership=self._build_membership_response(membership_data),
+            state=state,
+            pending_request=pending,
         )
 
     def _build_membership_response(

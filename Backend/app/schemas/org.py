@@ -12,10 +12,26 @@ from pydantic import BaseModel, EmailStr, Field
 
 # ── Organization ──────────────────────────────────────────────────────────────
 
+class NotificationDefaults(BaseModel):
+    """Org-level default notification channel preferences."""
+    email: bool = True
+    sms: bool = False
+    push: bool = True
+    in_app: bool = True
+
+    model_config = {"extra": "ignore"}
+
+
 class OrgUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     logo_url: str | None = None
     settings: dict | None = None
+    # Extended profile fields
+    industry: str | None = Field(default=None, max_length=100)
+    timezone: str | None = Field(default=None, max_length=100)
+    branding_primary_color: str | None = Field(default=None, max_length=20)
+    branding_accent_color: str | None = Field(default=None, max_length=20)
+    notification_defaults: NotificationDefaults | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -28,6 +44,12 @@ class OrgResponse(BaseModel):
     plan: str
     status: str
     settings: dict
+    # Extended profile fields
+    industry: str | None = None
+    timezone: str | None = None
+    branding_primary_color: str | None = None
+    branding_accent_color: str | None = None
+    notification_defaults: NotificationDefaults | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -159,8 +181,39 @@ class MemberInviteRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     role_id: UUID
     dept_id: UUID | None = None
+    # Required for brand-new accounts: there is no email-sending
+    # infrastructure for an "accept invite" link, so the admin assigns the
+    # employee's initial password directly here and relays it to them out of
+    # band. Ignored if the email already belongs to an existing account
+    # (that account's own credentials are never touched by an invite).
+    password: str = Field(..., min_length=8, max_length=128)
 
     model_config = {"extra": "ignore"}
+
+
+# ── Join Requests (self-service "request access to an existing org") ──────────
+
+class JoinRequestCreate(BaseModel):
+    org_name: str = Field(..., min_length=2, max_length=255)
+
+    model_config = {"extra": "ignore"}
+
+
+class JoinRequestAccept(BaseModel):
+    """Body for accepting a join request: the reviewer MUST choose the role."""
+    role_id: UUID
+
+    model_config = {"extra": "ignore"}
+
+
+class OrgNameAvailability(BaseModel):
+    available: bool
+    reason: str = ""
+
+
+class JoinRequestStatusResponse(BaseModel):
+    org_name: str | None = None
+    status: str | None = None  # "pending" | None (no request on file)
 
 
 class MemberUpdateRequest(BaseModel):

@@ -2,6 +2,13 @@
 DocFlow Backend — Core: Redis
 Async Redis connection pool. Used for: cache, pub/sub, Celery broker.
 Provides a simple interface for common cache operations.
+
+Resilience: Redis is a cache / fan-out layer, not the source of truth
+(Postgres is, for everything that matters — see chat/notification services).
+The cache_* and publish() helpers below therefore swallow connection errors
+and degrade to a no-op/miss rather than raising, so a Redis outage degrades
+real-time push and caching, but doesn't 500 unrelated requests (e.g. listing
+document types, which previously crashed outright when Redis was down).
 """
 from __future__ import annotations
 
@@ -9,8 +16,11 @@ import json
 from typing import Any
 
 import redis.asyncio as aioredis
+import structlog
 
 from app.config import settings
+
+logger = structlog.get_logger(__name__)
 
 # ── Connection Pool ────────────────────────────────────────────────────────────
 _redis_pool: aioredis.Redis | None = None
@@ -38,11 +48,18 @@ async def close_redis() -> None:
 
 
 # ── Cache Helpers ─────────────────────────────────────────────────────────────
+# All of these catch redis.RedisError (includes ConnectionError/TimeoutError)
+# and degrade to a safe no-op — callers should treat a Redis outage the same
+# as a cache miss, never as a request failure.
 
 async def cache_get(key: str) -> Any | None:
-    """Get a cached JSON value. Returns None on miss."""
-    redis = await get_redis()
-    value = await redis.get(key)
+    """Get a cached JSON value. Returns None on miss OR Redis unavailability."""
+    try:
+        redis = await get_redis()
+        value = await redis.get(key)
+    except Exception as exc:  # cache must never break a request (any failure = miss)
+        logger.warning("redis_cache_get_failed", key=key, error=str(exc))
+        return None
     if value is None:
         return None
     try:
@@ -52,33 +69,50 @@ async def cache_get(key: str) -> Any | None:
 
 
 async def cache_set(key: str, value: Any, ttl_seconds: int = 300) -> None:
-    """Set a cached JSON value with TTL."""
-    redis = await get_redis()
-    await redis.setex(key, ttl_seconds, json.dumps(value, default=str))
+    """Set a cached JSON value with TTL. No-op if Redis is unavailable."""
+    try:
+        redis = await get_redis()
+        await redis.setex(key, ttl_seconds, json.dumps(value, default=str))
+    except Exception as exc:  # cache must never break a request (any failure = miss)
+        logger.warning("redis_cache_set_failed", key=key, error=str(exc))
 
 
 async def cache_delete(key: str) -> None:
-    """Delete a cached key."""
-    redis = await get_redis()
-    await redis.delete(key)
+    """Delete a cached key. No-op if Redis is unavailable."""
+    try:
+        redis = await get_redis()
+        await redis.delete(key)
+    except Exception as exc:  # cache must never break a request (any failure = miss)
+        logger.warning("redis_cache_delete_failed", key=key, error=str(exc))
 
 
 async def cache_delete_pattern(pattern: str) -> int:
-    """Delete all keys matching a pattern (use sparingly — O(N))."""
-    redis = await get_redis()
-    keys = await redis.keys(pattern)
-    if keys:
-        return await redis.delete(*keys)
-    return 0
+    """Delete all keys matching a pattern (use sparingly — O(N)). Returns 0 if Redis is unavailable."""
+    try:
+        redis = await get_redis()
+        keys = await redis.keys(pattern)
+        if keys:
+            return await redis.delete(*keys)
+        return 0
+    except Exception as exc:  # cache must never break a request (any failure = miss)
+        logger.warning("redis_cache_delete_pattern_failed", pattern=pattern, error=str(exc))
+        return 0
 
 
 # ── Pub/Sub Helpers ───────────────────────────────────────────────────────────
 
 async def publish(channel: str, message: Any) -> None:
-    """Publish a message to a Redis channel."""
-    redis = await get_redis()
-    payload = json.dumps(message, default=str)
-    await redis.publish(channel, payload)
+    """
+    Publish a message to a Redis channel. No-op if Redis is unavailable —
+    Postgres remains the source of truth for chat/notifications; publish()
+    only drives real-time push, so losing it degrades liveness, not data.
+    """
+    try:
+        redis = await get_redis()
+        payload = json.dumps(message, default=str)
+        await redis.publish(channel, payload)
+    except Exception as exc:  # cache must never break a request (any failure = miss)
+        logger.warning("redis_publish_failed", channel=channel, error=str(exc))
 
 
 # ── Distributed Lock ──────────────────────────────────────────────────────────
