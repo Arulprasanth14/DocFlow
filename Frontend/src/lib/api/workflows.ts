@@ -96,6 +96,11 @@ export interface StageApproverRuleInput {
 export interface WorkflowStageInput {
   name: string;
   sequence_order: number;
+  /** Section 5.5 field C/D: the department the stage belongs to (drives the
+   *  Finance signing rule) and the deadline in the unit the user picked. */
+  department_id?: string | null;
+  due_within_value?: number | null;
+  due_within_unit?: 'hours' | 'days' | null;
   stage_type?: 'sequential' | 'parallel' | 'conditional';
   min_approvals_required?: number;
   sla_hours?: number | null;
@@ -107,6 +112,9 @@ export interface WorkflowStageInput {
 export interface WorkflowTemplateInput {
   name: string;
   description?: string | null;
+  /** WF-BLD-07: when ON a revised document restarts from stage 1 instead of
+   *  returning to the stage that asked for changes. Default OFF. */
+  require_full_reapproval?: boolean;
   department_id?: string | null;
   doc_type_id?: string | null;
   document_type_scope?: string | null;
@@ -240,6 +248,109 @@ export const workflowsApi = {
   /** DELETE /workflow-templates/{id} — owner or org admin only. */
   deleteWorkflow: (templateId: string) =>
     apiClient.delete<void>(`/workflow-templates/${templateId}`),
+};
+
+// ── Versioning, lifecycle and sharing (Workflow module §4.4, §5.1, §5.7) ─────
+
+/** A stage of an immutable workflow version. */
+export interface WorkflowVersionStage {
+  id: string;
+  position: number;
+  name: string;
+  approver_type: 'specific_user' | 'submitter_manager';
+  approver_user_id: string | null;
+  department_id: string | null;
+  due_within_value: number;
+  due_within_unit: 'hours' | 'days';
+  due_within_hours: number;
+  require_signing: boolean;
+}
+
+/** A row in the owner-only version history (DM-04, WF-LC-05). */
+export interface WorkflowVersionSummary {
+  id: string;
+  version_number: number;
+  name: string;
+  created_by: string | null;
+  created_at: string;
+  stage_count: number;
+  is_current: boolean;
+}
+
+/** A live USE grant, as the owner's "Shared with" panel shows it. */
+export interface WorkflowShare {
+  id: string;
+  template_id: string;
+  grantee_user_id: string;
+  permission: 'USE';
+  granted_at: string;
+  granted_by: string;
+  grantee_name: string | null;
+  grantee_email: string | null;
+  grantee_department: string | null;
+}
+
+export interface WorkflowShareResult {
+  share: WorkflowShare;
+  /** False when a live share already existed. WF-OWN-07 makes sharing
+   *  idempotent, so the UI can say "already shared" instead of implying a
+   *  second notification went out. */
+  created: boolean;
+  chat_message_sent: boolean;
+}
+
+/** WF-LIST-01 tabs. */
+export type WorkflowScope = 'all' | 'mine' | 'shared';
+
+export const workflowSharingApi = {
+  /** GET /workflow-templates?scope= — My Workflows / Shared with me. */
+  list: (scope: WorkflowScope, filters?: WorkflowTemplateFilters) =>
+    apiClient.get<WorkflowTemplateSummary[]>('/workflow-templates', {
+      params: { ...(filters ?? {}), scope },
+    }),
+
+  /** GET /workflow-templates/{id}/versions — owner only. */
+  listVersions: (templateId: string) =>
+    apiClient.get<WorkflowVersionSummary[]>(
+      `/workflow-templates/${templateId}/versions`,
+    ),
+
+  /** GET /workflow-templates/{id}/shares — owner only. */
+  listShares: (templateId: string) =>
+    apiClient.get<WorkflowShare[]>(`/workflow-templates/${templateId}/shares`),
+
+  /**
+   * POST /workflow-templates/{id}/shares — grant USE to one colleague.
+   * Idempotent: check `created` in the result before telling the user a
+   * message was sent (WF-OWN-07).
+   */
+  share: (templateId: string, userId: string) =>
+    apiClient.post<WorkflowShareResult>(
+      `/workflow-templates/${templateId}/shares`,
+      { user_id: userId },
+    ),
+
+  /** DELETE /workflow-templates/{id}/shares/{userId} — takes effect at once
+   *  for the grantee; runs they already started continue (WF-OWN-06). */
+  revokeShare: (templateId: string, userId: string) =>
+    apiClient.delete<void>(
+      `/workflow-templates/${templateId}/shares/${userId}`,
+    ),
+
+  /** POST /workflow-templates/{id}/archive — hides it from pickers; in-flight
+   *  runs continue (WF-LC-03). The way out when delete is blocked. */
+  archive: (templateId: string) =>
+    apiClient.post<WorkflowTemplateDetail>(
+      `/workflow-templates/${templateId}/archive`,
+      {},
+    ),
+
+  /** POST /workflow-templates/{id}/restore */
+  restore: (templateId: string) =>
+    apiClient.post<WorkflowTemplateDetail>(
+      `/workflow-templates/${templateId}/restore`,
+      {},
+    ),
 };
 
 export default workflowsApi;

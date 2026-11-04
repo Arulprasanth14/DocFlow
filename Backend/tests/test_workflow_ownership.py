@@ -374,26 +374,34 @@ async def test_cannot_read_a_workflow_from_another_org(client, db_session, worke
     assert resp.status_code == 404
 
 
-# ── Defect: the builder's edit mode silently discarded stage edits ──────────
+# ── Defect 2, and the versioning that resolves it ──────────────────────────
 # `WorkflowTemplateUpdate` had no `stages` field, so Pydantic dropped the stage
-# list the builder sends on every save and the server wrote none of it, with no
-# error — while the UI told the user a new version had been created. These two
-# tests pin the corrected behaviour: an unchanged list is a no-op, a CHANGED
-# list is refused with 422 rather than dropped. Replacing stages in place is
-# not an option until workflow versioning exists: `approval_steps.stage_id`
-# and `workflow_instances.current_stage_id` both reference `workflow_stages.id`
-# with no ON DELETE, so it would either violate those foreign keys or orphan
-# the audit trail of approvals already recorded against those stages.
+# list the builder sends on every save: the server wrote none of it and still
+# returned 200, while the UI told the user a new version had been created.
+#
+# The fix is versioning (DM-01): a changed stage list now writes a NEW
+# immutable version and leaves the old one alone, so nothing has to be
+# destructively rewritten and the approvals already recorded against the old
+# stages keep their definition.
 
-async def test_editing_stages_is_refused_not_silently_dropped(client, worker, admin):
+async def test_editing_stages_creates_a_new_version_and_keeps_the_old_one(
+    client, worker, admin
+):
     _w, token = worker
     approver, _ = admin
-    created = await _create(client, token, approver.id, name="Stage edit guard")
+    created = await _create(client, token, approver.id, name="Versioned")
     template_id = created.json()["id"]
-    original = created.json()["stages"]
-    assert len(original) == 1
 
-    # Ask for a genuinely different definition (an extra stage).
+    first = await client.get(
+        f"/api/v1/workflow-templates/{template_id}/versions",
+        headers=auth_headers(token),
+    )
+    assert first.status_code == 200, first.text
+    assert [v["version_number"] for v in first.json()] == [1]
+    assert first.json()[0]["stage_count"] == 1
+    assert first.json()[0]["is_current"] is True
+
+    # Genuinely different definition: a second stage.
     resp = await client.patch(
         f"/api/v1/workflow-templates/{template_id}",
         headers=auth_headers(token),
@@ -404,24 +412,36 @@ async def test_editing_stages_is_refused_not_silently_dropped(client, worker, ad
             ]
         },
     )
-    assert resp.status_code == 422, resp.text
+    assert resp.status_code == 200, resp.text
 
-    # ...and prove nothing changed on the server, which is the real point:
-    # the old behaviour returned 200 and also changed nothing.
-    after = await client.get(
+    versions = await client.get(
+        f"/api/v1/workflow-templates/{template_id}/versions",
+        headers=auth_headers(token),
+    )
+    numbers = [v["version_number"] for v in versions.json()]
+    assert numbers == [2, 1], numbers
+    by_number = {v["version_number"]: v for v in versions.json()}
+    # DM-01: version 1 is IMMUTABLE — it still describes one stage.
+    assert by_number[1]["stage_count"] == 1
+    assert by_number[1]["is_current"] is False
+    assert by_number[2]["stage_count"] == 2
+    assert by_number[2]["is_current"] is True
+
+    # ...and the live definition really did change (the old bug was that it
+    # silently did not).
+    detail = await client.get(
         f"/api/v1/workflow-templates/{template_id}",
         headers=auth_headers(token),
     )
-    assert after.status_code == 200
-    assert len(after.json()["stages"]) == 1
-    assert after.json()["stages"][0]["name"] == original[0]["name"]
+    assert len(detail.json()["stages"]) == 2
 
 
-async def test_resending_identical_stages_is_a_noop_so_rename_still_works(
+async def test_resending_identical_stages_does_not_mint_a_version(
     client, worker, admin
 ):
-    """The builder always sends `stages`, even when only the name changed.
-    An identical list must therefore stay accepted, or renaming would 422."""
+    """The builder re-sends `stages` on every save, even when only the name
+    changed. Treating that as an edit would mint a new version for a typo
+    fix, so an identical list must be recognised as a no-op."""
     _w, token = worker
     approver, _ = admin
     created = await _create(client, token, approver.id, name="Rename me")
@@ -433,7 +453,6 @@ async def test_resending_identical_stages_is_a_noop_so_rename_still_works(
         headers=auth_headers(token),
         json={
             "name": "Renamed",
-            # Same definition, re-sent the way the builder re-sends it.
             "stages": [
                 _stage(approver.id, name=stage["name"], order=stage["sequence_order"])
             ],
@@ -441,4 +460,27 @@ async def test_resending_identical_stages_is_a_noop_so_rename_still_works(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["name"] == "Renamed"
-    assert len(resp.json()["stages"]) == 1
+
+    versions = await client.get(
+        f"/api/v1/workflow-templates/{template_id}/versions",
+        headers=auth_headers(token),
+    )
+    assert [v["version_number"] for v in versions.json()] == [1]
+
+
+async def test_version_history_is_owner_only(client, worker, trainee, admin):
+    """§7.3: a grantee may read the current definition, but the history of how
+    it got there is the owner's."""
+    _w, owner_token = worker
+    _t, other_token = trainee
+    approver, _ = admin
+    created = await _create(client, owner_token, approver.id, name="Private history")
+    template_id = created.json()["id"]
+
+    resp = await client.get(
+        f"/api/v1/workflow-templates/{template_id}/versions",
+        headers=auth_headers(other_token),
+    )
+    # 404, not 403: a private workflow must not confirm its own existence
+    # (WF-OWN-10, E28).
+    assert resp.status_code == 404, resp.text

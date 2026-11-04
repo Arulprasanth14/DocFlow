@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Sequence
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,8 +18,11 @@ from app.models.workflow import (
     Delegation,
     ESignature,
     WorkflowInstance,
+    WorkflowShare,
     WorkflowStage,
     WorkflowTemplate,
+    WorkflowTemplateVersion,
+    WorkflowVersionStage,
     StageApproverRule,
 )
 
@@ -77,6 +80,9 @@ class WorkflowTemplateRepository:
         include_private_of_others: bool = False,
         owned_by: uuid.UUID | None = None,
         search: str | None = None,
+        shared_template_ids: Sequence[uuid.UUID] | None = None,
+        only_template_ids: Sequence[uuid.UUID] | None = None,
+        include_archived: bool = True,
     ) -> Sequence[WorkflowTemplate]:
         """
         List templates for an org.
@@ -102,13 +108,26 @@ class WorkflowTemplateRepository:
             q = q.where(WorkflowTemplate.created_by == owned_by)
         if search:
             q = q.where(WorkflowTemplate.name.ilike(f"%{search}%"))
+        if only_template_ids is not None:
+            # "Shared with me" tab: exactly the workflows granted to the caller.
+            if not only_template_ids:
+                return []
+            q = q.where(WorkflowTemplate.id.in_(list(only_template_ids)))
+        if not include_archived:
+            q = q.where(WorkflowTemplate.status != "archived")
         if visible_to_user_id is not None and not include_private_of_others:
-            q = q.where(
-                or_(
-                    WorkflowTemplate.visibility != "private",
-                    WorkflowTemplate.created_by == visible_to_user_id,
-                )
-            )
+            visible = [
+                WorkflowTemplate.visibility != "private",
+                WorkflowTemplate.created_by == visible_to_user_id,
+            ]
+            # A private workflow shared with the caller IS visible to them:
+            # WF-OWN-09 puts it under "Shared with me" and in the upload
+            # picker. Without this clause a share would grant nothing, which
+            # is the hole WF-OWN-02 warns about ("sending a chat message
+            # alone grants nothing" - the grant has to be readable).
+            if shared_template_ids:
+                visible.append(WorkflowTemplate.id.in_(list(shared_template_ids)))
+            q = q.where(or_(*visible))
         result = await self.db.execute(q.order_by(WorkflowTemplate.name))
         return result.scalars().all()
 
@@ -503,3 +522,227 @@ class DelegationRepository:
             )
         )
         return result.scalars().all()
+
+
+def _json_safe(stage: dict) -> dict:
+    """Make one stage dict safe for a JSONB column.
+
+    The stage dicts the service builds hold real UUID objects, which asyncpg
+    cannot serialize into JSONB ("Object of type UUID is not JSON
+    serializable"). Only the snapshot needs this: the relational columns in
+    workflow_version_stages take UUIDs directly.
+    """
+    out: dict = {}
+    for key, value in stage.items():
+        out[key] = str(value) if isinstance(value, uuid.UUID) else value
+    return out
+
+
+class WorkflowVersionRepository:
+    """Immutable workflow definition versions (DM-01..04).
+
+    There is deliberately no `update` here: a version row is written once and
+    never altered. A change to a workflow is a new row, which is what lets a
+    run pin the definition it was submitted against (BR-02, DM-02).
+    """
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def next_version_number(self, template_id: uuid.UUID) -> int:
+        """Next free version number for a template (1 if it has none yet).
+
+        Derived from MAX rather than counted, so a future hard-deleted row
+        could never hand out a number that was already used, and the unique
+        constraint on (template_id, version_number) stays satisfiable.
+        """
+        result = await self.db.execute(
+            select(func.max(WorkflowTemplateVersion.version_number)).where(
+                WorkflowTemplateVersion.template_id == template_id
+            )
+        )
+        return int(result.scalar() or 0) + 1
+
+    async def create_version(
+        self,
+        *,
+        template_id: uuid.UUID,
+        name: str,
+        description: str | None,
+        require_full_reapproval: bool,
+        created_by: uuid.UUID | None,
+        stages: Sequence[dict],
+    ) -> WorkflowTemplateVersion:
+        """Write one immutable version plus its ordered stages.
+
+        `stages` is a list of plain dicts, already validated by the service.
+        Positions are assigned here from list order and are the single source
+        of truth for execution order (WF-STG-02): the caller sends the whole
+        ordered list and never patches a position (X-INT-05).
+        """
+        version = WorkflowTemplateVersion(
+            template_id=template_id,
+            version_number=await self.next_version_number(template_id),
+            name=name,
+            description=description,
+            require_full_reapproval=require_full_reapproval,
+            created_by=created_by,
+            stages_snapshot=[_json_safe(s) for s in stages],
+        )
+        self.db.add(version)
+        await self.db.flush()
+
+        for position, stage in enumerate(stages, start=1):
+            self.db.add(
+                WorkflowVersionStage(
+                    version_id=version.id,
+                    position=position,
+                    name=stage["name"],
+                    approver_type=stage["approver_type"],
+                    approver_user_id=stage.get("approver_user_id"),
+                    department_id=stage.get("department_id"),
+                    due_within_value=stage["due_within_value"],
+                    due_within_unit=stage["due_within_unit"],
+                    due_within_hours=stage["due_within_hours"],
+                    require_signing=stage.get("require_signing", False),
+                )
+            )
+        await self.db.flush()
+        return version
+
+    async def get_with_stages(
+        self, version_id: uuid.UUID
+    ) -> WorkflowTemplateVersion | None:
+        result = await self.db.execute(
+            select(WorkflowTemplateVersion)
+            .options(selectinload(WorkflowTemplateVersion.stages))
+            .where(WorkflowTemplateVersion.id == version_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_for_template(
+        self, template_id: uuid.UUID
+    ) -> Sequence[WorkflowTemplateVersion]:
+        result = await self.db.execute(
+            select(WorkflowTemplateVersion)
+            .where(WorkflowTemplateVersion.template_id == template_id)
+            .order_by(WorkflowTemplateVersion.version_number.desc())
+        )
+        return result.scalars().all()
+
+
+class WorkflowShareRepository:
+    """Per-user USE grants on a workflow (§5.1, WF-OWN-*)."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def get_active(
+        self, template_id: uuid.UUID, grantee_user_id: uuid.UUID
+    ) -> WorkflowShare | None:
+        result = await self.db.execute(
+            select(WorkflowShare).where(
+                WorkflowShare.template_id == template_id,
+                WorkflowShare.grantee_user_id == grantee_user_id,
+                WorkflowShare.revoked_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def grant(
+        self,
+        *,
+        template_id: uuid.UUID,
+        grantee_user_id: uuid.UUID,
+        granted_by: uuid.UUID,
+    ) -> tuple[WorkflowShare, bool]:
+        """Create the share, or return the existing live one.
+
+        Returns `(share, created)`. WF-OWN-07 requires sharing to be
+        idempotent: a second share with the same user must not create a
+        duplicate row and must not send a second chat message, which is what
+        `created` tells the caller. The partial unique index
+        `uq_workflow_share_active` makes that a database guarantee rather
+        than a check-then-insert race.
+        """
+        existing = await self.get_active(template_id, grantee_user_id)
+        if existing:
+            return existing, False
+
+        share = WorkflowShare(
+            template_id=template_id,
+            grantee_user_id=grantee_user_id,
+            granted_by=granted_by,
+            permission="USE",
+        )
+        self.db.add(share)
+        await self.db.flush()
+        return share, True
+
+    async def revoke(
+        self,
+        *,
+        template_id: uuid.UUID,
+        grantee_user_id: uuid.UUID,
+        revoked_by: uuid.UUID,
+    ) -> bool:
+        """Mark the live share revoked. Rows are never deleted: the audit
+        trail keeps who granted what to whom and when it ended (E20)."""
+        share = await self.get_active(template_id, grantee_user_id)
+        if not share:
+            return False
+        share.revoked_at = datetime.now(timezone.utc)
+        share.revoked_by = revoked_by
+        await self.db.flush()
+        return True
+
+    async def list_active(self, template_id: uuid.UUID) -> Sequence[WorkflowShare]:
+        result = await self.db.execute(
+            select(WorkflowShare)
+            .where(
+                WorkflowShare.template_id == template_id,
+                WorkflowShare.revoked_at.is_(None),
+            )
+            .order_by(WorkflowShare.granted_at)
+        )
+        return result.scalars().all()
+
+    async def active_template_ids_for_user(
+        self, grantee_user_id: uuid.UUID
+    ) -> list[uuid.UUID]:
+        """Template ids shared live with this user — the "Shared with me" tab
+        and the upload picker's shared group (WF-OWN-09)."""
+        result = await self.db.execute(
+            select(WorkflowShare.template_id).where(
+                WorkflowShare.grantee_user_id == grantee_user_id,
+                WorkflowShare.revoked_at.is_(None),
+            )
+        )
+        return [row[0] for row in result.all()]
+
+    async def count_active(self, template_id: uuid.UUID) -> int:
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(WorkflowShare)
+            .where(
+                WorkflowShare.template_id == template_id,
+                WorkflowShare.revoked_at.is_(None),
+            )
+        )
+        return int(result.scalar() or 0)
+
+    async def revoke_all(
+        self, *, template_id: uuid.UUID, revoked_by: uuid.UUID
+    ) -> int:
+        """Revoke every live share on a workflow.
+
+        Used when a workflow is deleted: WF-LC-04 says deleting also revokes
+        its shares, so a grantee does not keep a dangling entry.
+        """
+        shares = await self.list_active(template_id)
+        now = datetime.now(timezone.utc)
+        for share in shares:
+            share.revoked_at = now
+            share.revoked_by = revoked_by
+        await self.db.flush()
+        return len(shares)

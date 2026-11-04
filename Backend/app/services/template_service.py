@@ -9,11 +9,14 @@ Only users with `admin:workflow_templates` permission may call this service.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Sequence
 
 import structlog
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.enums import WorkflowInstanceStatus
 from app.core.exceptions import (
     ConflictException,
     ForbiddenException,
@@ -21,7 +24,12 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.models.workflow import WorkflowTemplate
-from app.repositories.workflow_repo import WorkflowStageRepository, WorkflowTemplateRepository
+from app.repositories.workflow_repo import (
+    WorkflowShareRepository,
+    WorkflowStageRepository,
+    WorkflowTemplateRepository,
+    WorkflowVersionRepository,
+)
 from app.schemas.workflow_instances import (
     TemplateReviewResponse,
     TemplateReviewStage,
@@ -29,6 +37,9 @@ from app.schemas.workflow_instances import (
     WorkflowTemplateResponse,
     WorkflowTemplateSummary,
     WorkflowTemplateUpdate,
+    WorkflowShareResponse,
+    WorkflowShareResult,
+    WorkflowVersionSummary,
 )
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +50,8 @@ class TemplateService:
         self.db = db
         self.tmpl_repo = WorkflowTemplateRepository(db)
         self.stage_repo = WorkflowStageRepository(db)
+        self.version_repo = WorkflowVersionRepository(db)
+        self.share_repo = WorkflowShareRepository(db)
 
     async def create(
         self,
@@ -61,6 +74,12 @@ class TemplateService:
         """
         await self.validate_definition(req.stages, org_id)
         await self._reject_trainee_approvers(req.stages, org_id)
+        await self._assert_name_available(
+            org_id=org_id, owner_id=created_by, name=req.name
+        )
+        # Shape and fully validate the stages BEFORE writing anything, so a
+        # rejected definition leaves no half-created template behind.
+        version_stages = await self._build_version_stages(req.stages, org_id)
 
         tmpl = await self.tmpl_repo.create(
             org_id=org_id,
@@ -92,11 +111,36 @@ class TemplateService:
                     rule_value=rule.rule_value,
                 )
 
+        # Version 1, immutable (DM-01). The legacy WorkflowStage rows above are
+        # still written and are still what the engine executes today; this row
+        # is what a run will pin to once the engine moves over, and it is what
+        # makes a later edit a NEW version instead of a destructive rewrite.
+        version = await self.version_repo.create_version(
+            template_id=tmpl.id,
+            name=req.name.strip(),
+            description=req.description,
+            require_full_reapproval=bool(
+                getattr(req, "require_full_reapproval", False)
+            ),
+            created_by=created_by,
+            stages=version_stages,
+        )
+        tmpl.current_version_id = version.id
+        tmpl.require_full_reapproval = bool(
+            getattr(req, "require_full_reapproval", False)
+        )
+        await self.db.flush()
+
         if commit:
             await self.db.commit()
         else:
             await self.db.flush()
-        logger.info("template_created", template_id=str(tmpl.id), org_id=str(org_id))
+        logger.info(
+            "template_created",
+            template_id=str(tmpl.id),
+            org_id=str(org_id),
+            version=version.version_number,
+        )
 
         # Reload with stages
         tmpl = await self.tmpl_repo.get_by_id(tmpl.id, org_id)
@@ -270,6 +314,45 @@ class TemplateService:
             raise NotFoundException("WorkflowTemplate not found")
         return WorkflowTemplateResponse.model_validate(tmpl)
 
+    async def get_readable(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        is_admin: bool = False,
+    ) -> WorkflowTemplateResponse:
+        """Read the full definition as owner, grantee or org admin.
+
+        WF-OWN-05 gives a grantee the right to "view the full configuration
+        (stages, approvers, departments, deadlines, signing flags)", so the
+        plain visibility check is not enough on its own: a LIVE share grants
+        read on a private workflow. Anything else is 404 rather than 403, so
+        a refusal never confirms that the workflow exists (WF-OWN-10, E28).
+        """
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        await self._assert_can_read(tmpl, actor_id, is_admin)
+        return WorkflowTemplateResponse.model_validate(tmpl)
+
+    async def _assert_can_read(self, tmpl, actor_id, is_admin: bool = False) -> None:
+        """May this caller SEE that this workflow exists, and read it?
+
+        Owner, org admin, any member of an organization-visible workflow, or
+        a live grantee (WF-OWN-05). Everyone else gets 404 rather than 403, so
+        a refusal never confirms existence (WF-OWN-10, E28).
+
+        Separate from the owner-only checks that follow it: a grantee passes
+        HERE and then fails those with 403, which is correct — they can see
+        the workflow, they simply may not edit, re-share or delete it. Using
+        404 for them would deny something they can plainly already read.
+        """
+        if is_admin or tmpl.created_by == actor_id or tmpl.visibility != "private":
+            return
+        if await self.share_repo.get_active(tmpl.id, actor_id):
+            return
+        raise NotFoundException("WorkflowTemplate not found")
+
     async def get_review(self, template_id: uuid.UUID, org_id: uuid.UUID) -> TemplateReviewResponse:
         """
         Non-admin, read-only view of a template for the pre-submit "review
@@ -407,27 +490,73 @@ class TemplateService:
             self._assert_can_edit(tmpl, actor_id, is_admin)
 
         updates = req.model_dump(exclude_none=True)
-        # `stages` is handled separately: it is not a column on the template.
+        # `stages` is not a column on the template; it becomes a new version.
         updates.pop("stages", None)
-        if req.stages is not None and self._stages_differ(tmpl.stages, req.stages):
-            raise UnprocessableEntityException(
-                "This workflow's stages cannot be changed yet. Saving them here "
-                "would break the record of approvals already made against the "
-                "current stages. Rename or re-describe the workflow here, or "
-                "duplicate it and edit the copy."
+
+        if req.name is not None:
+            await self._assert_name_available(
+                org_id=org_id,
+                owner_id=tmpl.created_by,
+                name=req.name,
+                exclude_template_id=template_id,
             )
+
+        # DM-01: every saved EDIT of the definition writes a new immutable
+        # version and never touches an existing one. The stage rows a run
+        # already pinned therefore stay exactly as they were, which is what
+        # DM-02/BR-02 require — and is why this no longer has to refuse the
+        # edit the way it did before versioning existed.
+        #
+        # An identical stage list is NOT a definition change: the builder
+        # re-sends `stages` on every save, so treating that as an edit would
+        # mint a new version each time someone fixed a typo in the name.
+        stages_changed = req.stages is not None and self._stages_differ(
+            tmpl.stages, req.stages
+        )
+        new_version = None
+        if stages_changed:
+            await self.validate_definition(req.stages, org_id)
+            await self._reject_trainee_approvers(req.stages, org_id)
+            version_stages = await self._build_version_stages(req.stages, org_id)
+
+            new_version = await self.version_repo.create_version(
+                template_id=tmpl.id,
+                name=(req.name or tmpl.name).strip(),
+                description=(
+                    req.description if req.description is not None
+                    else tmpl.description
+                ),
+                require_full_reapproval=(
+                    req.require_full_reapproval
+                    if req.require_full_reapproval is not None
+                    else tmpl.require_full_reapproval
+                ),
+                created_by=actor_id,
+                stages=version_stages,
+            )
+            updates["current_version_id"] = new_version.id
+
+            # Keep the legacy stage rows in step so the existing engine keeps
+            # executing the definition the owner just saved. These rows are
+            # REPLACED, not versioned - the version row above is the durable
+            # record. Safe only because this is additive: nothing reads a
+            # deleted stage once the run that used it has its own snapshot.
+            await self._replace_legacy_stages(tmpl, req.stages)
+
         if updates:
-            # Bump version on any update. NOTE: in-flight instances are
-            # unaffected — each one carries its own frozen
-            # `template_version_snapshot` (§7: "Store a snapshot of the
-            # workflow configuration used for each submitted document, so
-            # later edits to a reusable workflow do not silently change an
-            # active process").
+            # `version` stays as the human-facing counter it has always been;
+            # the authoritative history now lives in workflow_template_versions.
             updates["version"] = tmpl.version + 1
             await self.tmpl_repo.update(template_id, org_id, **updates)
 
         await self.db.commit()
         tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        logger.info(
+            "template_updated",
+            template_id=str(template_id),
+            stages_changed=stages_changed,
+            new_version=(new_version.version_number if new_version else None),
+        )
         return WorkflowTemplateResponse.model_validate(tmpl)
 
     @staticmethod
@@ -557,14 +686,668 @@ class TemplateService:
         actor_id: uuid.UUID | None = None,
         is_admin: bool = True,
     ) -> None:
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
         if actor_id is not None:
-            tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
-            if not tmpl:
-                raise NotFoundException("WorkflowTemplate not found")
             self._assert_can_edit(tmpl, actor_id, is_admin)
+
+        # WF-LC-04: deletion is blocked while any run is still in flight.
+        # Those runs would otherwise lose the definition they are executing,
+        # and §4.3 A is explicit that historic runs keep their pinned version
+        # for audit. The message points at archive, which WF-LIST-07 offers
+        # as the way through.
+        in_flight = await self._in_flight_run_count(template_id)
+        if in_flight:
+            raise ConflictException(
+                f"This workflow has {in_flight} document(s) still in approval, "
+                "so it cannot be deleted. Archive it instead — archiving hides "
+                "it from new submissions and lets those runs finish."
+            )
+
+        # WF-LC-04: deleting also revokes the shares, so a grantee is not left
+        # with a dangling entry in their list and picker.
+        revoked = await self.share_repo.revoke_all(
+            template_id=template_id, revoked_by=actor_id or tmpl.created_by
+        )
 
         success = await self.tmpl_repo.soft_delete(template_id, org_id)
         if not success:
             raise NotFoundException("WorkflowTemplate not found")
+
+        if actor_id is not None:
+            await self._write_audit(
+                org_id=org_id,
+                actor_id=actor_id,
+                action="workflow.deleted",
+                resource_type="WorkflowTemplate",
+                resource_id=template_id,
+                after={"shares_revoked": revoked},
+            )
         await self.db.commit()
-        logger.info("template_deleted", template_id=str(template_id))
+        logger.info(
+            "template_deleted",
+            template_id=str(template_id),
+            shares_revoked=revoked,
+        )
+
+    # ── Versioning helpers (DM-01..04) ──────────────────────────────────────
+
+    # Spec limits. Both configurable on the server per O-5; the client's copy
+    # of them is a convenience only (WF-STG-28).
+    MAX_STAGES = 10
+    MIN_DUE_WITHIN_HOURS = 1
+    MAX_DUE_WITHIN_HOURS = 720  # 30 days
+
+    _RULE_TO_APPROVER_TYPE = {
+        "specific_user": "specific_user",
+        "manager_of_requester": "submitter_manager",
+    }
+
+    async def _department_requires_signature(
+        self, department_id: uuid.UUID | None
+    ) -> bool:
+        """Does this department, or any ancestor, require a signature?
+
+        Decision Q6 (AUDIT/DECISIONS.md): the flag is INHERITED down the
+        department tree. Without inheritance a sub-department of Finance would
+        silently accept an unsigned approval, which is exactly the signing
+        bypass G9 warns about. Identification is by the attribute or the id,
+        never by matching the name "Finance" — WF-STG-20 forbids a name match
+        because a rename would quietly disable the rule.
+
+        The walk is depth-capped so a cycle in `parent_id` (which the schema
+        does not prevent) can never hang a request.
+        """
+        if department_id is None:
+            return False
+
+        from app.models.organization import Department
+
+        seen: set[uuid.UUID] = set()
+        current_id: uuid.UUID | None = department_id
+        for _ in range(16):
+            if current_id is None or current_id in seen:
+                return False
+            seen.add(current_id)
+            dept = await self.db.get(Department, current_id)
+            if dept is None:
+                return False
+            if dept.requires_signature:
+                return True
+            current_id = dept.parent_id
+        logger.warning(
+            "department_parent_chain_too_deep", department_id=str(department_id)
+        )
+        return False
+
+    @staticmethod
+    def _due_within(stage) -> tuple[int, str, int]:
+        """Resolve (value, unit, hours) for a stage.
+
+        Accepts either the explicit value+unit the builder sends or the legacy
+        `sla_hours`, so existing callers keep working (WF-STG-28). Falls back
+        to the §5.5 field D default of 2 days when a stage says nothing.
+        """
+        value = getattr(stage, "due_within_value", None)
+        unit = getattr(stage, "due_within_unit", None)
+        if value is not None and unit is not None:
+            hours = value * 24 if unit == "days" else value
+            return int(value), unit, int(hours)
+
+        hours = getattr(stage, "sla_hours", None)
+        if hours is None:
+            return 2, "days", 48
+        hours = int(hours)
+        if hours % 24 == 0:
+            return hours // 24, "days", hours
+        return hours, "hours", hours
+
+    async def _build_version_stages(
+        self, stages: Sequence, org_id: uuid.UUID
+    ) -> list[dict]:
+        """Validate a stage list and shape it for WorkflowVersionRepository.
+
+        This is where the Workflow module's stage rules are enforced on the
+        server, in addition to the structural checks in validate_definition():
+        the stage cap (WF-STG-03), name rules, the due-within range (O-5), the
+        approver-department match (WF-STG-22), and the Finance signing rule
+        (WF-STG-20) — which is FORCED here rather than trusted from the
+        request body, so a tampered `requireSigning: false` cannot get through
+        (E22, T14).
+        """
+        from app.models.organization import Department
+        from app.models.user import User
+
+        ordered = sorted(stages, key=lambda s: s.sequence_order)
+        if not ordered:
+            raise ConflictException(
+                "A workflow needs at least one approval stage — otherwise a "
+                "submitted document could never reach an approved state."
+            )
+        if len(ordered) > self.MAX_STAGES:
+            raise ConflictException(
+                f"A workflow can have at most {self.MAX_STAGES} stages."
+            )
+
+        seen_names: set[str] = set()
+        built: list[dict] = []
+
+        for stage in ordered:
+            label = (getattr(stage, "name", "") or "").strip()
+            if len(label) < 2 or len(label) > 80:
+                raise ConflictException(
+                    f"Stage name {label!r} must be between 2 and 80 characters."
+                )
+            key = label.casefold()
+            if key in seen_names:
+                raise ConflictException("Stage names must be unique in a workflow.")
+            seen_names.add(key)
+
+            rules = list(getattr(stage, "approver_rules", None) or [])
+            if len(rules) != 1:
+                # v1 is strictly sequential with exactly one approver per
+                # stage (BR-03). Parallel approval is out of scope (§2.1), and
+                # the data model keeps room for it without exposing it.
+                raise ConflictException(
+                    f"'{label}' must have exactly one approver. Multiple "
+                    "approvers at one stage are not supported in this version."
+                )
+            rule = rules[0]
+            approver_type = self._RULE_TO_APPROVER_TYPE.get(rule.rule_type)
+            if approver_type is None:
+                raise ConflictException(
+                    f"'{label}' uses approver rule '{rule.rule_type}', which this "
+                    "version does not support. Choose a specific person or the "
+                    "submitter's manager."
+                )
+
+            approver_user_id: uuid.UUID | None = None
+            if approver_type == "specific_user":
+                raw = (rule.rule_value or {}).get("user_id")
+                if not raw:
+                    raise ConflictException(
+                        f"'{label}' has a 'specific person' approver rule with no "
+                        "user selected."
+                    )
+                try:
+                    approver_user_id = uuid.UUID(str(raw))
+                except ValueError:
+                    raise ConflictException(
+                        f"'{label}' has an invalid approver user id: {raw!r}"
+                    ) from None
+
+            department_id = getattr(stage, "department_id", None)
+
+            # WF-STG-22: for a specific-user stage the approver's primary
+            # department must be the stage department. O-7's default is that
+            # cross-department approvers are NOT allowed; when no department
+            # is given we adopt the approver's own, which keeps the signing
+            # rule meaningful instead of leaving it unset.
+            if approver_user_id is not None:
+                approver = await self.db.get(User, approver_user_id)
+                if approver is None:
+                    raise ConflictException(
+                        f"'{label}' names an approver who does not exist."
+                    )
+                if department_id is None:
+                    department_id = approver.department_id
+                elif (
+                    approver.department_id is not None
+                    and approver.department_id != department_id
+                ):
+                    raise ConflictException(
+                        "The selected approver does not belong to this department."
+                    )
+
+            if department_id is not None:
+                dept = await self.db.get(Department, department_id)
+                if dept is None or dept.org_id != org_id:
+                    raise ConflictException(
+                        f"'{label}' names a department that does not exist in this "
+                        "organization."
+                    )
+
+            value, unit, hours = self._due_within(stage)
+            if not (self.MIN_DUE_WITHIN_HOURS <= hours <= self.MAX_DUE_WITHIN_HOURS):
+                raise ConflictException(
+                    "Enter a due time between 1 hour and 30 days."
+                )
+
+            # WF-STG-20 / BR-08: the server decides this, not the client.
+            require_signing = bool(getattr(stage, "requires_signature", False))
+            if await self._department_requires_signature(department_id):
+                require_signing = True
+
+            built.append({
+                "name": label,
+                "approver_type": approver_type,
+                "approver_user_id": approver_user_id,
+                "department_id": department_id,
+                "due_within_value": value,
+                "due_within_unit": unit,
+                "due_within_hours": hours,
+                "require_signing": require_signing,
+            })
+
+        return built
+
+    async def _assert_name_available(
+        self,
+        *,
+        org_id: uuid.UUID,
+        owner_id: uuid.UUID | None,
+        name: str,
+        exclude_template_id: uuid.UUID | None = None,
+    ) -> None:
+        """§5.3: a workflow name is 3-100 characters and unique among the
+        owner's own non-deleted workflows, case-insensitively."""
+        trimmed = (name or "").strip()
+        if len(trimmed) < 3 or len(trimmed) > 100:
+            raise ConflictException(
+                "Enter a workflow name (at least 3 characters, at most 100)."
+            )
+        if owner_id is None:
+            return
+
+        from sqlalchemy import func as sa_func
+
+        q = select(WorkflowTemplate.id).where(
+            WorkflowTemplate.org_id == org_id,
+            WorkflowTemplate.created_by == owner_id,
+            WorkflowTemplate.deleted_at.is_(None),
+            sa_func.lower(WorkflowTemplate.name) == trimmed.casefold(),
+        )
+        if exclude_template_id is not None:
+            q = q.where(WorkflowTemplate.id != exclude_template_id)
+        if (await self.db.execute(q)).first() is not None:
+            raise ConflictException("You already have a workflow with this name.")
+
+    async def _in_flight_run_count(self, template_id: uuid.UUID) -> int:
+        """Runs still moving through this workflow.
+
+        Used by WF-BLD-06's banner and by WF-LC-04's delete guard. Terminal
+        runs do not count: they keep their pinned version for audit and are
+        unaffected by anything done to the definition (DM-02).
+        """
+        from app.models.workflow import WorkflowInstance
+
+        terminal = (
+            WorkflowInstanceStatus.APPROVED,
+            WorkflowInstanceStatus.REJECTED,
+            WorkflowInstanceStatus.CANCELLED,
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FINALIZED,
+        )
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(WorkflowInstance)
+            .where(
+                WorkflowInstance.template_id == template_id,
+                WorkflowInstance.status.notin_([str(s) for s in terminal]),
+            )
+        )
+        return int(result.scalar() or 0)
+
+    async def _replace_legacy_stages(self, tmpl, stages: Sequence) -> None:
+        """Rewrite the legacy WorkflowStage rows to match a new version.
+
+        The engine still executes `workflow_stages`, so a saved edit has to be
+        reflected there or the owner would see "Version 3" while submissions
+        kept routing by version 2.
+
+        Deleting a stage row is only safe when nothing references it:
+        `approval_steps.stage_id` and `workflow_instances.current_stage_id`
+        both point at it with no ON DELETE, so a stage that any run has
+        touched must be left alone. Rows that are still referenced are kept
+        and the new definition is added alongside; the durable record of what
+        changed is the version row, which is never rewritten.
+        """
+        from sqlalchemy import or_
+
+        from app.models.workflow import ApprovalStep, WorkflowInstance
+
+        existing = list(tmpl.stages or [])
+        if existing:
+            ids = [st.id for st in existing]
+            referenced = set(
+                (
+                    await self.db.execute(
+                        select(ApprovalStep.stage_id).where(
+                            ApprovalStep.stage_id.in_(ids)
+                        )
+                    )
+                ).scalars().all()
+            )
+            referenced |= set(
+                (
+                    await self.db.execute(
+                        select(WorkflowInstance.current_stage_id).where(
+                            or_(*[WorkflowInstance.current_stage_id == i for i in ids])
+                        )
+                    )
+                ).scalars().all()
+            )
+            for stage in existing:
+                if stage.id in referenced:
+                    # Keep it for history; take it out of the live definition
+                    # by soft-deleting, which list_for_template() filters on.
+                    stage.deleted_at = datetime.now(timezone.utc)
+                else:
+                    await self.db.delete(stage)
+            await self.db.flush()
+
+        for stage_req in sorted(stages, key=lambda s: s.sequence_order):
+            stage = await self.stage_repo.create(
+                template_id=tmpl.id,
+                name=stage_req.name,
+                sequence_order=stage_req.sequence_order,
+                stage_type=stage_req.stage_type,
+                min_approvals_required=stage_req.min_approvals_required,
+                sla_hours=stage_req.sla_hours,
+                reapproval_on_revision=stage_req.reapproval_on_revision,
+                requires_signature=stage_req.requires_signature,
+            )
+            for rule in stage_req.approver_rules:
+                await self.stage_repo.add_approver_rule(
+                    stage_id=stage.id,
+                    rule_type=rule.rule_type,
+                    rule_value=rule.rule_value,
+                )
+        await self.db.flush()
+
+    # ── Version history (WF-LC-05, DM-03/04) ────────────────────────────────
+
+    async def list_versions(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        actor_id: uuid.UUID,
+        is_admin: bool = False,
+    ) -> list[WorkflowVersionSummary]:
+        """Owner-only version history. A grantee can read the CURRENT
+        definition but not the history of how it got there (§7.3)."""
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        # View check FIRST: for a workflow private to someone else this
+        # raises 404, so a 403 can never confirm that it exists
+        # (WF-OWN-10, E28). Only then is the owner-only check applied,
+        # which is what distinguishes the owner of an
+        # organization-visible workflow from another member of it.
+        await self._assert_can_read(tmpl, actor_id, is_admin)
+        self._assert_can_edit(tmpl, actor_id, is_admin)
+
+        versions = await self.version_repo.list_for_template(template_id)
+        return [
+            WorkflowVersionSummary(
+                id=v.id,
+                version_number=v.version_number,
+                name=v.name,
+                created_by=v.created_by,
+                created_at=v.created_at,
+                stage_count=len(v.stages_snapshot or []),
+                is_current=(v.id == tmpl.current_version_id),
+            )
+            for v in versions
+        ]
+
+    # ── Archive / restore (WF-LC-03) ────────────────────────────────────────
+
+    async def set_archived(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        archived: bool,
+        actor_id: uuid.UUID,
+        is_admin: bool = False,
+    ) -> WorkflowTemplateResponse:
+        """Archive or restore.
+
+        Archiving makes a workflow unavailable for NEW submissions and hides
+        it from pickers; runs already in flight continue, and shares are
+        retained but hidden (§4.3 A). Restore reverses it. Unlike delete this
+        is always allowed, which is why WF-LIST-07 tells the user to archive
+        when deletion is blocked.
+
+        Both the owner and an Org Admin may archive (§7.3) — the one lifecycle
+        action an admin shares with the owner, so a workflow can be taken out
+        of circulation without its owner.
+        """
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        if not is_admin and tmpl.created_by != actor_id:
+            raise ForbiddenException(
+                "Only the workflow owner or an organization administrator can "
+                "archive or restore a workflow."
+            )
+
+        await self.tmpl_repo.update(
+            template_id, org_id,
+            status="archived" if archived else "active",
+            # Kept in step so the existing pickers, which filter on
+            # is_active, honour the archive without needing to change.
+            is_active=not archived,
+        )
+        await self.db.commit()
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        logger.info(
+            "template_archived" if archived else "template_restored",
+            template_id=str(template_id), actor=str(actor_id),
+        )
+        return WorkflowTemplateResponse.model_validate(tmpl)
+
+    # ── Sharing (§5.1, WF-OWN-02..11) ───────────────────────────────────────
+
+    async def share(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        grantee_user_id: uuid.UUID,
+        actor_id: uuid.UUID,
+    ) -> WorkflowShareResult:
+        """Grant USE on a workflow to one colleague.
+
+        Idempotent (WF-OWN-07): sharing again returns the existing share and
+        sends no second chat message. Every rejection is deliberate:
+          * not the owner            -> 403 (a grantee cannot re-share)
+          * unknown/private template -> 404, never 403 (WF-OWN-10, E28)
+          * self, cross-org, or an
+            inactive user            -> 422 (WF-OWN-08)
+        """
+        from app.models.organization import OrganizationMember
+        from app.models.user import User
+
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        # Sharing is the owner's alone: an Org Admin may archive but not
+        # hand out access to a definition they cannot even read (O-10).
+        # View check FIRST: for a workflow private to someone else this
+        # raises 404, so a 403 can never confirm that it exists
+        # (WF-OWN-10, E28). Only then is the owner-only check applied,
+        # which is what distinguishes the owner of an
+        # organization-visible workflow from another member of it.
+        await self._assert_can_read(tmpl, actor_id)
+        if tmpl.created_by is None or tmpl.created_by != actor_id:
+            raise ForbiddenException("Only the workflow owner can share it.")
+
+        if grantee_user_id == actor_id:
+            raise UnprocessableEntityException(
+                "This workflow is already yours — you do not need to share it "
+                "with yourself."
+            )
+
+        membership = (
+            await self.db.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.org_id == org_id,
+                    OrganizationMember.user_id == grantee_user_id,
+                    OrganizationMember.status == "active",
+                    OrganizationMember.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            raise UnprocessableEntityException(
+                "That person is not an active member of this organization."
+            )
+
+        grantee = await self.db.get(User, grantee_user_id)
+        if grantee is None or not grantee.is_active:
+            raise UnprocessableEntityException(
+                "That user account is not active."
+            )
+
+        share, created = await self.share_repo.grant(
+            template_id=template_id,
+            grantee_user_id=grantee_user_id,
+            granted_by=actor_id,
+        )
+
+        if created:
+            await self._write_audit(
+                org_id=org_id,
+                actor_id=actor_id,
+                action="workflow.shared",
+                resource_type="WorkflowTemplate",
+                resource_id=template_id,
+                after={
+                    "grantee_user_id": str(grantee_user_id),
+                    "permission": "USE",
+                },
+            )
+
+        await self.db.commit()
+        logger.info(
+            "workflow_shared",
+            template_id=str(template_id),
+            grantee=str(grantee_user_id),
+            created=created,
+        )
+        return WorkflowShareResult(
+            share=self._share_response(share, grantee),
+            created=created,
+            chat_message_sent=False,
+        )
+
+    async def revoke_share(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        grantee_user_id: uuid.UUID,
+        actor_id: uuid.UUID,
+    ) -> None:
+        """Revoke a share.
+
+        The workflow leaves the grantee's list and picker immediately, but
+        runs they already started continue untouched (WF-OWN-06, DM-02, E6).
+        Idempotent: revoking a share that is not live is not an error
+        (WF-LC-06).
+        """
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        await self._assert_can_read(tmpl, actor_id)
+        if tmpl.created_by is None or tmpl.created_by != actor_id:
+            raise ForbiddenException("Only the workflow owner can revoke a share.")
+
+        revoked = await self.share_repo.revoke(
+            template_id=template_id,
+            grantee_user_id=grantee_user_id,
+            revoked_by=actor_id,
+        )
+        if revoked:
+            await self._write_audit(
+                org_id=org_id,
+                actor_id=actor_id,
+                action="workflow.share_revoked",
+                resource_type="WorkflowTemplate",
+                resource_id=template_id,
+                after={"grantee_user_id": str(grantee_user_id)},
+            )
+        await self.db.commit()
+        logger.info(
+            "workflow_share_revoked",
+            template_id=str(template_id),
+            grantee=str(grantee_user_id),
+            was_active=revoked,
+        )
+
+    async def list_shares(
+        self,
+        template_id: uuid.UUID,
+        org_id: uuid.UUID,
+        actor_id: uuid.UUID,
+    ) -> list[WorkflowShareResponse]:
+        """The owner's "Shared with" panel."""
+        from app.models.user import User
+
+        tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
+        if not tmpl:
+            raise NotFoundException("WorkflowTemplate not found")
+        await self._assert_can_read(tmpl, actor_id)
+        if tmpl.created_by is None or tmpl.created_by != actor_id:
+            raise ForbiddenException(
+                "Only the workflow owner can see who it is shared with."
+            )
+
+        shares = await self.share_repo.list_active(template_id)
+        if not shares:
+            return []
+        users = {
+            u.id: u
+            for u in (
+                await self.db.execute(
+                    select(User).where(
+                        User.id.in_([sh.grantee_user_id for sh in shares])
+                    )
+                )
+            ).scalars().all()
+        }
+        return [
+            self._share_response(sh, users.get(sh.grantee_user_id)) for sh in shares
+        ]
+
+    @staticmethod
+    def _share_response(share, grantee) -> WorkflowShareResponse:
+        return WorkflowShareResponse(
+            id=share.id,
+            template_id=share.template_id,
+            grantee_user_id=share.grantee_user_id,
+            permission=share.permission,
+            granted_at=share.granted_at,
+            granted_by=share.granted_by,
+            grantee_name=getattr(grantee, "name", None),
+            grantee_email=getattr(grantee, "email", None),
+        )
+
+    async def _write_audit(
+        self,
+        *,
+        org_id: uuid.UUID,
+        actor_id: uuid.UUID | None,
+        action: str,
+        resource_type: str,
+        resource_id: uuid.UUID,
+        after: dict | None = None,
+    ) -> None:
+        """Write one audit row in the SAME transaction as the change (BR-10).
+
+        Not committed here: the caller owns the transaction, so a rolled-back
+        change can never leave an audit row claiming it happened.
+        """
+        from app.models.audit import AuditLog
+
+        self.db.add(
+            AuditLog(
+                org_id=org_id,
+                actor_id=actor_id,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                after=after or {},
+            )
+        )
+        await self.db.flush()

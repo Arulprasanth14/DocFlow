@@ -25,10 +25,14 @@ from app.dependencies import CurrentUser
 from app.core.exceptions import ForbiddenException
 from app.schemas.workflow_instances import (
     TemplateReviewResponse,
+    WorkflowShareCreate,
+    WorkflowShareResponse,
+    WorkflowShareResult,
     WorkflowTemplateCreate,
     WorkflowTemplateResponse,
     WorkflowTemplateSummary,
     WorkflowTemplateUpdate,
+    WorkflowVersionSummary,
 )
 from app.services.template_service import TemplateService
 
@@ -54,6 +58,14 @@ async def list_workflow_templates_public(
     doc_type_id: Annotated[Optional[uuid.UUID], Query()] = None,
     search: Annotated[Optional[str], Query(description="Case-insensitive name search")] = None,
     mine_only: Annotated[bool, Query(description="Only workflows I created")] = False,
+    scope: Annotated[
+        str,
+        Query(
+            pattern="^(all|mine|shared)$",
+            description="WF-LIST-01 tabs: 'mine' = My Workflows, "
+            "'shared' = Shared with me, 'all' = both (default).",
+        ),
+    ] = "all",
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkflowTemplateSummary]:
     """
@@ -71,14 +83,19 @@ async def list_workflow_templates_public(
     if not current_user.org_id:
         return []
     svc = TemplateService(db)
+    # Live USE grants decide what the "Shared with me" tab holds, and also
+    # make a private-but-shared workflow visible at all (WF-OWN-09).
+    shared_ids = await svc.share_repo.active_template_ids_for_user(current_user.id)
     templates = await svc.tmpl_repo.list_for_org(
         org_id=current_user.org_id,
         active_only=active_only,
         department_id=department_id,
         visible_to_user_id=current_user.id,
         include_private_of_others=_is_org_admin(current_user),
-        owned_by=current_user.id if mine_only else None,
+        owned_by=current_user.id if (mine_only or scope == "mine") else None,
         search=search,
+        shared_template_ids=shared_ids,
+        only_template_ids=shared_ids if scope == "shared" else None,
     )
     # Client-side filter by doc_type_id if provided (no DB join needed)
     if doc_type_id is not None:
@@ -143,13 +160,13 @@ async def get_my_workflow(
     if not current_user.org_id:
         raise ForbiddenException("No organization context")
     svc = TemplateService(db)
-    tmpl = await svc.tmpl_repo.get_by_id(template_id, current_user.org_id)
-    if not tmpl:
-        from app.core.exceptions import NotFoundException
-
-        raise NotFoundException("WorkflowTemplate not found")
-    svc._assert_can_view(tmpl, current_user.id, _is_org_admin(current_user))
-    return WorkflowTemplateResponse.model_validate(tmpl)
+    # Share-aware: a grantee may read the full configuration (WF-OWN-05).
+    return await svc.get_readable(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        actor_id=current_user.id,
+        is_admin=_is_org_admin(current_user),
+    )
 
 
 @router.patch(
@@ -268,3 +285,171 @@ async def get_workflow_template_review(
         raise ForbiddenException("No organization context")
     svc = TemplateService(db)
     return await svc.get_review(template_id=template_id, org_id=current_user.org_id)
+
+
+# ── Versioning, lifecycle and sharing (Workflow module §4.4, §5.1, §5.7) ─────
+
+@router.get(
+    "/workflow-templates/{template_id}/versions",
+    response_model=list[WorkflowVersionSummary],
+    status_code=200,
+    summary="Version history of a workflow I own",
+)
+async def list_my_workflow_versions(
+    template_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkflowVersionSummary]:
+    """
+    DM-01/DM-04: every saved edit of a workflow creates a new immutable
+    version, and this is the history of them. Owner-only (§7.3): a grantee may
+    read the CURRENT definition but not the history of how it got there.
+    """
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    return await svc.list_versions(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        actor_id=current_user.id,
+        is_admin=_is_org_admin(current_user),
+    )
+
+
+@router.post(
+    "/workflow-templates/{template_id}/archive",
+    response_model=WorkflowTemplateResponse,
+    status_code=200,
+    summary="Archive a workflow (owner or org admin)",
+)
+async def archive_my_workflow(
+    template_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowTemplateResponse:
+    """
+    WF-LC-03: archiving makes the workflow unavailable for new submissions and
+    hides it from pickers. Runs already in flight continue, and shares are kept
+    but hidden. This is the way out when deletion is blocked (WF-LIST-07).
+    """
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    return await svc.set_archived(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        archived=True,
+        actor_id=current_user.id,
+        is_admin=_is_org_admin(current_user),
+    )
+
+
+@router.post(
+    "/workflow-templates/{template_id}/restore",
+    response_model=WorkflowTemplateResponse,
+    status_code=200,
+    summary="Restore an archived workflow (owner or org admin)",
+)
+async def restore_my_workflow(
+    template_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowTemplateResponse:
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    return await svc.set_archived(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        archived=False,
+        actor_id=current_user.id,
+        is_admin=_is_org_admin(current_user),
+    )
+
+
+@router.get(
+    "/workflow-templates/{template_id}/shares",
+    response_model=list[WorkflowShareResponse],
+    status_code=200,
+    summary="Who this workflow is shared with (owner only)",
+)
+async def list_my_workflow_shares(
+    template_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkflowShareResponse]:
+    """The owner's "Shared with" panel (WF-OWN-06)."""
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    return await svc.list_shares(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        actor_id=current_user.id,
+    )
+
+
+@router.post(
+    "/workflow-templates/{template_id}/shares",
+    response_model=WorkflowShareResult,
+    status_code=201,
+    summary="Share a workflow with one colleague (owner only)",
+)
+async def share_my_workflow(
+    template_id: uuid.UUID,
+    req: WorkflowShareCreate,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowShareResult:
+    """
+    WF-OWN-02/05: grants USE only. The recipient may view the configuration,
+    select the workflow on upload and duplicate it into their own copy; they
+    cannot edit, archive, delete or re-share the original.
+
+    Idempotent (WF-OWN-07): sharing again with the same person returns the
+    existing share, creates no duplicate row and sends no second message —
+    `created` in the response says which happened.
+
+    Rejected by the server, not just hidden in the UI (WF-OWN-08/10): sharing
+    with yourself, someone outside the organization or a deactivated user is
+    422; a workflow you do not own is 403; one that does not exist, or is
+    private to someone else, is 404 rather than 403 so its existence is not
+    revealed.
+    """
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    return await svc.share(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        grantee_user_id=req.user_id,
+        actor_id=current_user.id,
+    )
+
+
+@router.delete(
+    "/workflow-templates/{template_id}/shares/{user_id}",
+    status_code=204,
+    response_model=None,
+    summary="Revoke a share (owner only)",
+)
+async def revoke_my_workflow_share(
+    template_id: uuid.UUID,
+    user_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """
+    WF-OWN-06: revocation removes the workflow from the recipient's list and
+    upload picker immediately. Runs they already started continue unaffected
+    (DM-02, E6). The share row is kept, marked revoked, for the audit trail.
+    """
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    svc = TemplateService(db)
+    await svc.revoke_share(
+        template_id=template_id,
+        org_id=current_user.org_id,
+        grantee_user_id=user_id,
+        actor_id=current_user.id,
+    )

@@ -57,6 +57,16 @@ class WorkflowStageCreate(BaseModel):
     stage_type: str = Field(default="sequential", description="'sequential' | 'parallel' | 'conditional'")
     min_approvals_required: int = Field(default=1, ge=1)
     sla_hours: int | None = Field(default=None, ge=1)
+    # Section 5.5 field D: the builder shows a number plus a unit ("2 days"),
+    # while the engine computes in hours. Both are accepted so the UI can
+    # round-trip the wording the user chose instead of being handed "48 hours"
+    # back. Omit them and they are derived from sla_hours, which keeps every
+    # existing caller working unchanged.
+    due_within_value: int | None = Field(default=None, ge=1)
+    due_within_unit: str | None = Field(default=None, pattern="^(hours|days)$")
+    # Section 5.5 field C. Drives the Finance signing rule (WF-STG-20) and is
+    # shown in the preview; optional for a submitter-manager stage.
+    department_id: uuid.UUID | None = None
     reapproval_on_revision: bool = False
     requires_signature: bool = Field(
         default=False,
@@ -86,6 +96,10 @@ class WorkflowStageResponse(BaseModel):
 class WorkflowTemplateCreate(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = None
+    # WF-BLD-07 / BR-06: when ON, a revised document restarts from stage 1
+    # instead of returning to the stage that requested the changes. Default
+    # OFF - the spec is explicit that this must never happen implicitly.
+    require_full_reapproval: bool = False
     department_id: uuid.UUID | None = None
     doc_type_id: uuid.UUID | None = None
     document_type_scope: str | None = Field(None, max_length=100)
@@ -99,6 +113,7 @@ class WorkflowTemplateUpdate(BaseModel):
     department_id: uuid.UUID | None = None
     document_type_scope: str | None = None
     is_active: bool | None = None
+    require_full_reapproval: bool | None = None
     # Declared so the field is no longer silently discarded. Until workflow
     # versioning lands, TemplateService.update() REFUSES a changed stage list
     # with 422 instead of dropping it: `approval_steps.stage_id` and
@@ -347,3 +362,81 @@ class WorkflowSSEEvent(BaseModel):
     current_stage_id: str | None
     updated_at: str  # ISO datetime
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Workflow definition versions (DM-01..04) ──────────────────────────────────
+
+class WorkflowVersionStageResponse(BaseModel):
+    """One stage of an immutable version, as the builder and preview read it."""
+    id: uuid.UUID
+    position: int
+    name: str
+    approver_type: str
+    approver_user_id: uuid.UUID | None = None
+    department_id: uuid.UUID | None = None
+    due_within_value: int
+    due_within_unit: str
+    due_within_hours: int
+    require_signing: bool
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowVersionResponse(BaseModel):
+    id: uuid.UUID
+    template_id: uuid.UUID
+    version_number: int
+    name: str
+    description: str | None = None
+    require_full_reapproval: bool
+    created_by: uuid.UUID | None = None
+    created_at: datetime
+    stages: list[WorkflowVersionStageResponse] = []
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowVersionSummary(BaseModel):
+    """A row in the owner-only version history list (WF-LC-05, DM-04)."""
+    id: uuid.UUID
+    version_number: int
+    name: str
+    created_by: uuid.UUID | None = None
+    created_at: datetime
+    stage_count: int = 0
+    is_current: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+# ── Workflow sharing (§5.1, WF-OWN-*) ─────────────────────────────────────────
+
+class WorkflowShareCreate(BaseModel):
+    """Body of POST /workflow-templates/{id}/shares."""
+    user_id: uuid.UUID = Field(..., description="The colleague to grant USE to")
+
+
+class WorkflowShareResponse(BaseModel):
+    """A row in the owner's "Shared with" panel (WF-OWN-06)."""
+    id: uuid.UUID
+    template_id: uuid.UUID
+    grantee_user_id: uuid.UUID
+    permission: str
+    granted_at: datetime
+    granted_by: uuid.UUID
+    # Resolved for display so the panel does not need a second round trip
+    # (and so a grantee's name is shown without needing admin:users).
+    grantee_name: str | None = None
+    grantee_email: str | None = None
+    grantee_department: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class WorkflowShareResult(BaseModel):
+    """Share outcome. `created` is False when an active share already existed:
+    WF-OWN-07 makes sharing idempotent, so the caller can tell "granted now"
+    from "already had it" and skip sending a second chat message."""
+    share: WorkflowShareResponse
+    created: bool
+    chat_message_sent: bool = False

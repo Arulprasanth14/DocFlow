@@ -2,6 +2,82 @@
 > Purpose: per-module status based on code inspection (routes exist, UI wired, tests exist). Not a runtime verification.
 > Read: when asked "what's done / what's next", before starting a feature, and update after every change.
 
+**2026-11-06 — Workflow Module Phase 1: backend complete, frontend UI outstanding.**
+
+*Versioning (P1-3, DM-01..04) — this is what resolves defect 2.* Saving a changed stage list now
+writes a new immutable `workflow_template_versions` row with its `workflow_version_stages`, points
+`workflow_templates.current_version_id` at it, and leaves every earlier version untouched. An
+**identical** list is recognised as a no-op, because the builder re-sends `stages` on every save
+and a typo fix must not mint a version. The legacy `workflow_stages` rows are kept in step so the
+existing engine executes what the owner just saved; rows still referenced by an `approval_step` or
+by `workflow_instances.current_stage_id` are soft-deleted rather than removed, so no approval loses
+the definition it was recorded against. `GET /workflow-templates/{id}/versions` returns the
+history, owner-only.
+
+*Stage validation on the server (P1-4).* `_build_version_stages()` enforces the stage cap of 10
+(WF-STG-03), stage names 2–80 unique case-insensitively, exactly one approver per stage (BR-03 —
+parallel is out of scope per §2.1), the approver–department match (WF-STG-22), the due-within range
+of 1 hour to 30 days with the value/unit the user chose preserved alongside the computed hours
+(§5.5 field D), and the **Finance signing rule**: `require_signing` is FORCED by the server from
+the department flag, so a tampered `requireSigning: false` cannot get through (WF-STG-20, E22).
+Workflow names are 3–100 characters and unique per owner (§5.3).
+
+*Signing-department inheritance (decision Q6).* `_department_requires_signature()` walks
+`Department.parent_id` upward with a depth cap, so a sub-department of Finance cannot accept an
+unsigned approval. Identification is by the boolean or the id — never a name match, which WF-STG-20
+forbids.
+
+*Sharing (P1-5, WF-OWN-02..11).* `workflow_shares` plus `WorkflowShareRepository` and five
+endpoints: list / grant / revoke, and archive / restore. Granting is idempotent (WF-OWN-07) and
+the response says `created` so the caller can tell "granted now" from "already had it"; the
+partial unique index `uq_workflow_share_active` makes that a database guarantee rather than a
+check-then-insert race. Revoking sets `revoked_at` and never deletes, so a revoked row keeps the
+audit trail and does not block a later re-share. Sharing with yourself, a non-member or an
+inactive user is 422; a workflow you do not own is 403; one private to someone else is **404, not
+403**, so a refusal never confirms it exists. Audit events `workflow.shared` /
+`workflow.share_revoked` / `workflow.deleted` are written in the same transaction as the change
+(BR-10).
+**Not yet done in Phase 1:** the chat message and the N14 notification that should accompany a
+share. The grant itself is complete and authoritative — WF-OWN-02 is explicit that "sending a chat
+message alone grants nothing" — so the announcement is additive and lands with the notification
+work. `chat_message_sent` is returned as `false` today rather than implied.
+
+*Read access is share-aware.* `_assert_can_read()` admits the owner, an org admin, any member of an
+organization-visible workflow, and a **live grantee** (WF-OWN-05 gives a grantee the right to view
+the full configuration). Everyone else gets 404. The owner-only checks run after it, so a grantee
+who tries to edit, re-share or delete gets 403 — correct, because they can plainly already read it,
+and answering 404 there would deny something visible to them.
+
+*Lifecycle (P1-6).* Archive/restore is distinct from the older enable/disable and moves both
+`status` and `is_active` together, so existing pickers honour it unchanged. **Delete is now guarded**
+(WF-LC-04): it refuses with 409 while any non-terminal run exists, naming the count and pointing at
+archive, and it revokes the workflow's shares on the way out.
+
+*Lists (WF-LIST-01).* `GET /workflow-templates?scope=mine|shared|all` backs the two tabs, and a
+private-but-shared workflow is now visible to its grantee — without that clause a share would grant
+nothing.
+
+*Tests.* 14 new across `test_workflow_shares.py` (11) and `test_workflow_ownership.py` (3):
+versioning keeps v1 immutable, an identical list mints nothing, history is owner-only, share makes
+a private workflow usable, sharing is idempotent, self/non-member/non-owner/unknown are rejected,
+a grantee cannot re-share or edit or delete or see the panel, revoke is immediate and idempotent,
+re-share after revoke works, archive/restore round-trips, and deleting revokes shares.
+**Full suite: 186 passed** (172 baseline + 14). `ruff` clean on every touched file.
+
+*Two notes for the owner.* The test suite revealed that `_is_org_admin` counts **`hr` as well as
+`admin`**, so an HR user can already read any private workflow's full definition — the O-10
+deviation recorded in `AUDIT/DECISIONS.md`. It is pre-existing and was left alone; the share tests
+use a plain Worker as grantee so they test the real grantee path. Separately, `npm run build`
+currently fails on one error that is not from this work: `src/components/ui/Skeleton.tsx` was
+renamed to `skeleton.tsx` during the session by something outside these edits, while all four
+importers still say `Skeleton`, giving TS1261. `npx tsc -b` reports that as the **only** error, so
+the Phase 1 frontend additions typecheck; the canonical casing should be restored from git rather
+than guessed at here.
+
+*Outstanding in Phase 1:* the frontend UI — full-page builder with real drag reorder and the
+preview step (P1-8/P1-9), the My/Shared tabs on `/workflows` (P1-10), and the share dialog (P1-11).
+The API client for all of it is in place (`workflowSharingApi`).
+
 **2026-11-06 — Workflow Module: P0-4 regression baseline, defect 2, Phase 1 migration.**
 Plan: [`docs/DocFlow_Workflow_Implementation_Plan.md`](../../docs/DocFlow_Workflow_Implementation_Plan.md).
 Decisions: [`AUDIT/DECISIONS.md`](../DECISIONS.md).
