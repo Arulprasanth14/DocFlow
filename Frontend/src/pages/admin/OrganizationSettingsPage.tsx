@@ -11,6 +11,15 @@ import { useMyOrg, useOrgStats, useUpdateMyOrg } from '@/hooks/useOrg';
 interface OrgFormData {
   name: string;
   logo_url: string;
+  industry: string;
+  timezone: string;
+  branding_primary_color: string;
+  branding_accent_color: string;
+  notify_email: boolean;
+  notify_sms: boolean;
+  notify_push: boolean;
+  notify_in_app: boolean;
+  allow_self_approval: boolean;
 }
 
 export default function OrganizationSettingsPage() {
@@ -28,6 +37,15 @@ export default function OrganizationSettingsPage() {
     defaultValues: {
       name: '',
       logo_url: '',
+      industry: '',
+      timezone: 'UTC',
+      branding_primary_color: '',
+      branding_accent_color: '',
+      notify_email: true,
+      notify_sms: false,
+      notify_push: true,
+      notify_in_app: true,
+      allow_self_approval: false,
     },
   });
 
@@ -36,6 +54,15 @@ export default function OrganizationSettingsPage() {
       reset({
         name: org.name || '',
         logo_url: org.logo_url || '',
+        industry: org.industry || '',
+        timezone: org.timezone || 'UTC',
+        branding_primary_color: org.branding_primary_color || '',
+        branding_accent_color: org.branding_accent_color || '',
+        notify_email: org.notification_defaults?.email ?? true,
+        notify_sms: org.notification_defaults?.sms ?? false,
+        notify_push: org.notification_defaults?.push ?? true,
+        notify_in_app: org.notification_defaults?.in_app ?? true,
+        allow_self_approval: Boolean(org.settings?.allow_self_approval) ?? false,
       });
     }
   }, [org, reset]);
@@ -46,6 +73,19 @@ export default function OrganizationSettingsPage() {
       await updateOrg.mutateAsync({
         name: data.name,
         logo_url: data.logo_url || undefined,
+        industry: data.industry || undefined,
+        timezone: data.timezone || undefined,
+        branding_primary_color: data.branding_primary_color || undefined,
+        branding_accent_color: data.branding_accent_color || undefined,
+        notification_defaults: {
+          email: data.notify_email,
+          sms: data.notify_sms,
+          push: data.notify_push,
+          in_app: data.notify_in_app,
+        },
+        settings: {
+          allow_self_approval: data.allow_self_approval,
+        },
       });
       setSuccessMsg('Organization settings saved successfully.');
       setTimeout(() => setSuccessMsg(null), 4000);
@@ -82,10 +122,10 @@ export default function OrganizationSettingsPage() {
               color: 'var(--color-primary-300)',
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
-              background: 'hsla(217, 100%, 50%, 0.1)',
+              background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
               padding: '4px 10px',
               borderRadius: 'var(--radius-full)',
-              border: '1px solid hsla(217, 100%, 50%, 0.25)',
+              border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
             }}
           >
             Admin Workspace
@@ -97,20 +137,23 @@ export default function OrganizationSettingsPage() {
               color: 'var(--color-success-400)',
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
-              background: 'hsla(145, 70%, 50%, 0.1)',
+              background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
               padding: '4px 10px',
               borderRadius: 'var(--radius-full)',
-              border: '1px solid hsla(145, 70%, 50%, 0.25)',
+              border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
             }}
           >
             Plan: {org.plan.toUpperCase()}
           </span>
         </div>
         <h1
+          data-page-title
+          className="font-display"
           style={{
-            fontSize: '2rem',
-            fontWeight: 800,
-            color: 'var(--text-primary)',
+            fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)',
+            fontWeight: 400,
+            lineHeight: 1.1,
+            color: 'var(--foreground)',
             marginBottom: '6px',
           }}
         >
@@ -268,6 +311,134 @@ export default function OrganizationSettingsPage() {
             />
           </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '0.8125rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  marginBottom: '8px',
+                }}
+              >
+                Industry
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder="e.g. Healthcare, Finance"
+                {...register('industry')}
+              />
+            </div>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '0.8125rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  marginBottom: '8px',
+                }}
+              >
+                Timezone
+              </label>
+              <select className="input" {...register('timezone')}>
+                <option value="UTC">UTC</option>
+                <option value="America/New_York">Eastern Time (US & Canada)</option>
+                <option value="America/Chicago">Central Time (US & Canada)</option>
+                <option value="America/Denver">Mountain Time (US & Canada)</option>
+                <option value="America/Los_Angeles">Pacific Time (US & Canada)</option>
+                <option value="Europe/London">London</option>
+                <option value="Asia/Kolkata">India Standard Time (IST)</option>
+                <option value="Asia/Tokyo">Tokyo</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '24px' }}>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '0.8125rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  marginBottom: '8px',
+                }}
+              >
+                Primary Brand Color (Hex)
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder="#0F172A"
+                {...register('branding_primary_color')}
+              />
+            </div>
+            <div>
+              <label
+                style={{
+                  display: 'block',
+                  fontSize: '0.8125rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  marginBottom: '8px',
+                }}
+              >
+                Accent Brand Color (Hex)
+              </label>
+              <input
+                type="text"
+                className="input"
+                placeholder="#3B82F6"
+                {...register('branding_accent_color')}
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '28px', borderTop: '1px solid var(--border-subtle)', paddingTop: '20px' }}>
+            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>
+              Approval Policy
+            </h3>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              By default, nobody can approve their own document — even if a workflow
+              happens to assign them as their own approver. Turn this on only if your
+              organization intentionally wants self-approval to be allowed.
+            </p>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+              <input type="checkbox" {...register('allow_self_approval')} />
+              Allow self-approval
+            </label>
+          </div>
+
+          <div style={{ marginBottom: '28px', borderTop: '1px solid var(--border-subtle)', paddingTop: '20px' }}>
+            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '12px' }}>
+              Default Notification Channels
+            </h3>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              These channels will be enabled by default for new users.
+            </p>
+            <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" {...register('notify_email')} />
+                Email
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" {...register('notify_sms')} />
+                SMS
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" {...register('notify_push')} />
+                Push (Mobile)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input type="checkbox" {...register('notify_in_app')} />
+                In-App
+              </label>
+            </div>
+          </div>
+
           <AnimatePresence>
             {successMsg && (
               <motion.div
@@ -278,8 +449,8 @@ export default function OrganizationSettingsPage() {
                   marginBottom: '20px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(145, 70%, 45%, 0.1)',
-                  border: '1px solid hsla(145, 70%, 45%, 0.25)',
+                  background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
                   color: 'var(--color-success-400)',
                   fontSize: '0.875rem',
                 }}
@@ -309,8 +480,8 @@ export default function OrganizationSettingsPage() {
         className="glass-card"
         style={{
           padding: '24px 28px',
-          borderColor: 'hsla(0, 82%, 55%, 0.3)',
-          background: 'hsla(0, 82%, 55%, 0.03)',
+          borderColor: 'color-mix(in srgb, var(--destructive) 30%, transparent)',
+          background: 'color-mix(in srgb, var(--destructive) 4%, transparent)',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
@@ -328,9 +499,9 @@ export default function OrganizationSettingsPage() {
             disabled
             title="Please contact Enterprise support to suspend your workspace"
             style={{
-              background: 'hsla(0, 82%, 55%, 0.15)',
+              background: 'color-mix(in srgb, var(--destructive) 15%, transparent)',
               color: 'var(--color-error-400)',
-              border: '1px solid hsla(0, 82%, 55%, 0.3)',
+              border: '1px solid color-mix(in srgb, var(--destructive) 30%, transparent)',
               cursor: 'not-allowed',
             }}
           >

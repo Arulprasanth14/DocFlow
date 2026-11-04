@@ -5,6 +5,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: docflow-postgres
+    profiles: ["local-db"]
     restart: unless-stopped
     environment:
       POSTGRES_DB: docflow
@@ -27,6 +28,7 @@ services:
   pgbouncer:
     image: edoburu/pgbouncer:latest
     container_name: docflow-pgbouncer
+    profiles: ["local-db"]
     restart: unless-stopped
     environment:
       DB_USER: docflow
@@ -72,6 +74,8 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+      # Read from Backend/.env (gitignored). See that file for the format.
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -121,6 +125,7 @@ services:
   adminer:
     image: adminer:latest
     container_name: docflow-adminer
+    profiles: ["local-db"]
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -142,7 +147,6 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://docflow:docflow@pgbouncer:5432/docflow
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -158,8 +162,6 @@ services:
       - ./alembic:/app/alembic
       - ./.env:/app/.env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -175,18 +177,18 @@ services:
     container_name: docflow-celery-worker
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://docflow:docflow@pgbouncer:5432/docflow
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       MINIO_ENDPOINT: http://minio:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
     volumes:
       - ./app:/app/app
       - ./.env:/app/.env
     depends_on:
-      - postgres
       - redis
     command: celery -A app.core.celery_app worker --loglevel=info --concurrency=4 -Q default,ai,email
 
@@ -201,7 +203,6 @@ services:
     container_name: docflow-celery-beat
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://docflow:docflow@pgbouncer:5432/docflow
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -210,7 +211,12 @@ services:
       - ./.env:/app/.env
     depends_on:
       - redis
-    command: celery -A app.core.celery_app beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    # Celery's own PersistentScheduler. The previous command named
+    # django_celery_beat.schedulers:DatabaseScheduler — a Django package that
+    # is not (and should not be) installed in this FastAPI project, so the
+    # container crash-looped on import and NOTHING on beat_schedule ever ran:
+    # no SLA checks, no embedding refresh, no retention purge.
+    command: celery -A app.core.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
 
   # ============================================================
   # Flower — Celery monitoring UI

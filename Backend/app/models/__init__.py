@@ -9,6 +9,7 @@ from app.database import Base  # noqa: F401
 from app.models.base import BaseModel  # noqa: F401
 
 # ── Identity & Access ──────────────────────────────────────────────────────────
+from app.models.import_job import ImportJob
 from app.models.user import User, Session  # noqa: F401
 
 # ── Organizational Structure ───────────────────────────────────────────────────
@@ -26,11 +27,22 @@ from app.models.organization import (  # noqa: F401
 from app.models.document import (  # noqa: F401
     DocumentType,
     Document,
+    DocumentContent,
     DocumentVersion,
     FileAsset,
     DocumentAttachment,
+    DocumentWatcher,
     Comment,
     Mention,
+)
+
+# ── Template Studio (Documents module, Phase 2) ────────────────────────────────
+from app.models.template import (  # noqa: F401
+    Template,
+    TemplateVersion,
+    TemplateField,
+    PlaceholderOccurrence,
+    TemplateFavourite,
 )
 
 # ── Workflow Engine (Template + Execution + Approvals) ─────────────────────────
@@ -67,7 +79,16 @@ from app.models.notification import Notification  # noqa: F401
 from app.models.audit import AuditLog  # noqa: F401
 
 # ── AI / ML Extensions ────────────────────────────────────────────────────────
-from app.models.ai import DocumentEmbedding, AIChatSession, AIProcessingLog  # noqa: F401
+from app.models.ai import DocumentEmbedding, AIChatSession, AIProcessingLog, AIInteraction  # noqa: F401
+
+# ── AI Agent / RAG knowledge base (§12) ───────────────────────────────────────
+from app.models.agent import (  # noqa: F401
+    AgentChunk,
+    AgentConversation,
+    AgentKnowledgeSource,
+    AgentMessage,
+    IngestionStatus,
+)
 
 
 __all__ = [
@@ -88,11 +109,19 @@ __all__ = [
     # Documents
     "DocumentType",
     "Document",
+    "DocumentContent",
     "DocumentVersion",
     "FileAsset",
     "DocumentAttachment",
+    "DocumentWatcher",
+    "ImportJob",
     "Comment",
     "Mention",
+    # Template Studio
+    "Template",
+    "TemplateVersion",
+    "TemplateField",
+    "PlaceholderOccurrence",
     # Workflow templates
     "WorkflowTemplate",
     "WorkflowStage",
@@ -119,4 +148,10 @@ __all__ = [
     "DocumentEmbedding",
     "AIChatSession",
     "AIProcessingLog",
+    # AI Agent / RAG
+    "AgentKnowledgeSource",
+    "AgentChunk",
+    "AgentConversation",
+    "AgentMessage",
+    "IngestionStatus",
 ]

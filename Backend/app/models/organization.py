@@ -1,11 +1,15 @@
 """DocFlow — Organization, Department, Team, Role, Permission ORM Models"""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+if TYPE_CHECKING:
+    from app.models.user import User
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB, JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, utcnow
@@ -13,6 +17,17 @@ from app.models.base import BaseModel, utcnow
 
 class Organization(BaseModel):
     __tablename__ = "organizations"
+    __table_args__ = (
+        # Organization names are unique case-insensitively among live orgs.
+        # Enforced in the DATABASE: an application-level "check then insert"
+        # is racy, so two simultaneous creates could both pass the check.
+        Index(
+            "uq_organizations_name_lower",
+            func.lower(text("name")),
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
@@ -20,6 +35,12 @@ class Organization(BaseModel):
     settings: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     plan: Mapped[str] = mapped_column(String(50), nullable=False, default="trial")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
+    # ── Extended org profile fields (Gap 1) ──────────────────────────────────
+    industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(String(100), nullable=True, default="UTC", server_default="UTC")
+    branding_primary_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    branding_accent_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    notification_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Relationships
     departments: Mapped[list["Department"]] = relationship(
@@ -47,6 +68,20 @@ class Department(BaseModel):
     code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     head_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", use_alter=True, name="fk_department_head"), nullable=True
+    )
+
+    # ── Signing rule (Workflow module WF-STG-20/21, BR-08) ─────────────────
+    # When true, any approval stage whose department is this one MUST capture a
+    # signature, and the server forces the flag on regardless of what the
+    # client sends. Identification is by this attribute or the department id —
+    # never by matching the name "Finance", which WF-STG-20 explicitly forbids
+    # because a rename would silently disable the rule.
+    #
+    # INHERITED down the tree (decision Q6 in AUDIT/DECISIONS.md): a department
+    # requires signing if it or ANY ancestor via parent_id has this set, so a
+    # sub-department of Finance cannot quietly accept an unsigned approval.
+    requires_signature: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
     )
 
     organization: Mapped["Organization"] = relationship(
@@ -138,9 +173,17 @@ class OrganizationMember(BaseModel):
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
+    # Join-request review audit: who accepted/rejected a PENDING membership
+    # and when. Also what makes "first decision wins" provable.
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     organization: Mapped["Organization"] = relationship(
         "Organization", back_populates="members", lazy="noload"
     )
     role: Mapped["Role"] = relationship("Role", back_populates="members", lazy="noload")
-    user: Mapped["User"] = relationship("User", back_populates="memberships", lazy="noload")
+    user: Mapped["User"] = relationship(
+        "User", back_populates="memberships", lazy="noload", foreign_keys=[user_id]
+    )

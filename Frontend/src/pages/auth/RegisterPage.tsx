@@ -13,6 +13,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 import { useRegister, useGoogleLogin, useMicrosoftLogin } from '@/hooks/useAuth';
 import { useAuth } from '@/contexts/AuthContext';
+import { LivingBackground } from '@/components/ui/LivingBackground';
+import { AuthBrandPanel } from '@/components/auth/AuthBrandPanel';
 
 // ── Zod Schema ─────────────────────────────────────────────────────────────────
 const registerSchema = z
@@ -25,7 +27,7 @@ const registerSchema = z
       .regex(/[A-Z]/, 'Must contain at least one uppercase letter')
       .regex(/[0-9]/, 'Must contain at least one number'),
     confirmPassword: z.string(),
-    orgName: z.string().optional(),
+    orgName: z.string().min(2, 'Organization name must be at least 2 characters'),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords don't match",
@@ -76,34 +78,6 @@ const EyeIcon = ({ open }: { open: boolean }) => (
   </svg>
 );
 
-// ── Floating Particle ──────────────────────────────────────────────────────────
-function FloatingParticle({ delay, x, size }: { delay: number; x: number; size: number }) {
-  return (
-    <motion.div
-      style={{
-        position: 'absolute',
-        left: `${x}%`,
-        bottom: '-10px',
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: `hsla(${217 + Math.random() * 40}, 90%, 65%, ${0.15 + Math.random() * 0.2})`,
-        pointerEvents: 'none',
-      }}
-      animate={{
-        y: [0, -600],
-        opacity: [0, 0.8, 0],
-        scale: [0.5, 1, 0.5],
-      }}
-      transition={{
-        duration: 8 + Math.random() * 4,
-        delay,
-        repeat: Infinity,
-        ease: 'easeInOut',
-      }}
-    />
-  );
-}
 
 // ── Password Strength ──────────────────────────────────────────────────────────
 function PasswordStrength({ password }: { password: string }) {
@@ -113,7 +87,7 @@ function PasswordStrength({ password }: { password: string }) {
     { label: 'Number', ok: /[0-9]/.test(password) },
   ];
   const score = checks.filter((c) => c.ok).length;
-  const colors = ['#ef4444', '#f59e0b', '#22c55e'];
+  const colors = ['var(--destructive)', 'var(--status-pending)', 'var(--status-approved)'];
 
   if (!password) return null;
 
@@ -157,7 +131,7 @@ export default function RegisterPage() {
   const [showEmail, setShowEmail] = useState(false);
   const [showPwd, setShowPwd] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [showOrg, setShowOrg] = useState(false);
+  const [orgMode, setOrgMode] = useState<'create' | 'join'>('create');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -203,9 +177,16 @@ export default function RegisterPage() {
         email: data.email,
         password: data.password,
         name: data.name,
-        orgName: data.orgName || undefined,
+        orgName: orgMode === 'create' ? data.orgName : undefined,
+        joinOrgName: orgMode === 'join' ? data.orgName : undefined,
       });
-      navigate('/dashboard', { replace: true });
+      if (orgMode === 'join') {
+        // Pending admin approval — not an active member yet, so don't send
+        // them to the (org-scoped, currently empty) dashboard.
+        navigate('/onboarding', { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
     } catch (e: unknown) {
       setError((e as Error).message);
     }
@@ -214,37 +195,15 @@ export default function RegisterPage() {
   const isLoading =
     googleLogin.isPending || microsoftLogin.isPending || registerMutation.isPending || isSubmitting;
 
-  const particles = Array.from({ length: 18 }, (_, i) => ({
-    delay: i * 0.5,
-    x: (i * 17 + 5) % 100,
-    size: 4 + (i % 4) * 3,
-  }));
-
   return (
-    <div
-      className="auth-container"
-      style={{
-        background: 'radial-gradient(ellipse at 40% 0%, hsla(217, 100%, 18%, 0.4) 0%, transparent 60%), radial-gradient(ellipse at 100% 100%, hsla(258, 90%, 18%, 0.35) 0%, transparent 60%), var(--bg-base)',
-      }}
-    >
-      {/* Fixed background layer (prevents absolute glow orbs from causing any scrollbar) */}
-      <div style={{ position: 'fixed', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 0 }}>
-        {/* Floating particles */}
-        {particles.map((p, i) => <FloatingParticle key={i} {...p} />)}
+    <div className="auth-split">
+      <LivingBackground variant="auth" />
+      <AuthBrandPanel
+        eyebrow="Create your workspace"
+        headline={<>Start running approvals in <em style={{ fontStyle: 'italic' }}>minutes</em>, not weeks.</>}
+      />
 
-        {/* Glow orbs */}
-        <div style={{
-          position: 'absolute', top: '-10%', left: '-5%',
-          width: '500px', height: '500px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(217, 100%, 50%, 0.08) 0%, transparent 70%)',
-        }} />
-        <div style={{
-          position: 'absolute', bottom: '-10%', right: '-5%',
-          width: '600px', height: '600px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(258, 90%, 50%, 0.07) 0%, transparent 70%)',
-        }} />
-      </div>
-
+      <div className="auth-form-col">
       {/* Registration card */}
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.97 }}
@@ -264,9 +223,9 @@ export default function RegisterPage() {
             <Link to="/login" style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', textDecoration: 'none', marginBottom: '16px' }}>
               <div style={{
                 width: '42px', height: '42px', borderRadius: '12px',
-                background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))',
+                background: 'var(--gradient-brand)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 4px 16px hsla(217, 100%, 50%, 0.3)',
+                boxShadow: 'var(--shadow-glow)',
               }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -439,49 +398,58 @@ export default function RegisterPage() {
                   {errors.confirmPassword && <p style={{ color: 'var(--color-error-400)', fontSize: '0.8rem', marginTop: '4px' }}>{errors.confirmPassword.message}</p>}
                 </div>
 
-                {/* Optional Organization */}
+                {/* Organization: create new vs. request access — mandatory choice */}
                 <div style={{ marginBottom: '24px' }}>
-                  <button
-                    type="button"
-                    id="btn-toggle-org"
-                    onClick={() => setShowOrg(!showOrg)}
-                    style={{
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      color: 'var(--color-primary-400)', fontSize: '0.85rem',
-                      fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px',
-                      padding: 0,
-                    }}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: showOrg ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s' }}>
-                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
-                    </svg>
-                    {showOrg ? 'Skip organization setup' : 'Create an organization (optional)'}
-                  </button>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                    Organization
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                    <button
+                      type="button"
+                      id="btn-org-mode-create"
+                      onClick={() => setOrgMode('create')}
+                      style={{
+                        flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                        border: orgMode === 'create' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
+                        background: orgMode === 'create' ? 'color-mix(in srgb, var(--primary) 10%, transparent)' : 'transparent',
+                        color: orgMode === 'create' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
+                        fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      Create a new organization
+                    </button>
+                    <button
+                      type="button"
+                      id="btn-org-mode-join"
+                      onClick={() => setOrgMode('join')}
+                      style={{
+                        flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
+                        border: orgMode === 'join' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
+                        background: orgMode === 'join' ? 'color-mix(in srgb, var(--primary) 10%, transparent)' : 'transparent',
+                        color: orgMode === 'join' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
+                        fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                    >
+                      Request to join an existing one
+                    </button>
+                  </div>
 
-                  <AnimatePresence>
-                    {showOrg && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: 'auto' }}
-                        exit={{ opacity: 0, height: 0 }}
-                        style={{ overflow: 'hidden', marginTop: '14px' }}
-                      >
-                        <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                          Organization Name
-                        </label>
-                        <input
-                          id="input-org-name"
-                          type="text"
-                          className="input"
-                          placeholder="Acme Corporation"
-                          {...register('orgName')}
-                        />
-                        <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '6px' }}>
-                          You'll be set as the Admin. You can invite your team later.
-                        </p>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                    Organization Name
+                  </label>
+                  <input
+                    id="input-org-name"
+                    type="text"
+                    className="input"
+                    placeholder="Acme Corporation"
+                    {...register('orgName')}
+                  />
+                  {errors.orgName && <p style={{ color: 'var(--color-error-400)', fontSize: '0.8rem', marginTop: '4px' }}>{errors.orgName.message}</p>}
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '6px' }}>
+                    {orgMode === 'create'
+                      ? "You'll be set as the Administrator. You can invite your team later."
+                      : 'An administrator of this organization must approve your request before you can access the workspace.'}
+                  </p>
                 </div>
 
                 {/* Submit */}
@@ -514,8 +482,8 @@ export default function RegisterPage() {
                   marginTop: '16px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(0, 82%, 55%, 0.1)',
-                  border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                  background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                   color: 'var(--color-error-400)',
                   fontSize: '0.875rem',
                   display: 'flex',
@@ -545,6 +513,7 @@ export default function RegisterPage() {
           Enterprise Document Workflow & Approval Platform
         </p>
       </motion.div>
+      </div>
     </div>
   );
 }

@@ -119,8 +119,8 @@ function DeptTreeNode({
                     style={{
                       fontSize: '0.75rem',
                       color: 'var(--color-primary-300)',
-                      background: 'hsla(217, 100%, 50%, 0.1)',
-                      border: '1px solid hsla(217, 100%, 50%, 0.2)',
+                      background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
+                      border: '1px solid color-mix(in srgb, var(--primary) 20%, transparent)',
                       padding: '2px 8px',
                       borderRadius: 'var(--radius-full)',
                     }}
@@ -332,7 +332,7 @@ export default function DepartmentsPage() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+          <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
             Departments & Teams
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -440,7 +440,7 @@ export default function DepartmentsPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -478,8 +478,8 @@ export default function DepartmentsPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',
@@ -595,7 +595,7 @@ export default function DepartmentsPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -629,8 +629,8 @@ export default function DepartmentsPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',

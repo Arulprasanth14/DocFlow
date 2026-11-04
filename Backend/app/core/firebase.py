@@ -64,15 +64,101 @@ def initialize_firebase() -> bool:
         return False
 
 
+class FirebaseUnavailableError(Exception):
+    """Firebase could not be reached / its public keys could not be fetched.
+
+    Distinct from ValueError ("this token is bad"): the caller must answer
+    503 (retry), NOT 401 — returning 401 would make the frontend sign the
+    user out, and returning an unhandled error 500s, which the frontend
+    interprets as "no account" and routes a returning user into the
+    create-an-organization screen.
+    """
+
+
+def _verify_sync(id_token: str) -> dict:
+    """Blocking verification. Runs in a worker thread (see caller)."""
+    from firebase_admin import auth as firebase_auth
+    from firebase_admin import exceptions as fb_exc
+
+    from app.config import settings
+
+    try:
+        # Signature/expiry/audience check — needs Google's public certs
+        # (cached by the SDK after the first fetch), no per-login round trip.
+        decoded = firebase_auth.verify_id_token(
+            id_token, check_revoked=False, clock_skew_seconds=60
+        )
+    except firebase_auth.ExpiredIdTokenError:
+        raise ValueError("Firebase token has expired — please sign in again")
+    except firebase_auth.RevokedIdTokenError:
+        raise ValueError("Firebase token has been revoked")
+    except firebase_auth.UserDisabledError:
+        raise ValueError("Firebase user account is disabled")
+    except firebase_auth.InvalidIdTokenError as exc:
+        raise ValueError(f"Invalid Firebase token: {exc}")
+    except firebase_auth.CertificateFetchError as exc:
+        raise FirebaseUnavailableError(f"could not fetch Firebase public keys: {exc}")
+    except ValueError:
+        raise
+    except Exception as exc:  # network / TLS / SDK errors — never a bare 500
+        raise FirebaseUnavailableError(f"{type(exc).__name__}: {exc}")
+
+    # Revocation check needs a live call to Google. The token is already
+    # cryptographically verified above, so if only THIS step is unreachable
+    # we log and proceed rather than lock every user out during a blip —
+    # unless the deployment opts into strict mode.
+    if getattr(settings, "FIREBASE_CHECK_REVOKED", True):
+        try:
+            firebase_auth.verify_id_token(
+                id_token, check_revoked=True, clock_skew_seconds=60
+            )
+        except (firebase_auth.RevokedIdTokenError, firebase_auth.UserDisabledError):
+            raise ValueError("Firebase session has been revoked or the account is disabled")
+        except Exception as exc:
+            if getattr(settings, "FIREBASE_REVOCATION_FAIL_CLOSED", False):
+                raise FirebaseUnavailableError(f"revocation check failed: {exc}")
+            logger.warning("firebase_revocation_check_skipped: %s: %s", type(exc).__name__, exc)
+
+    return {
+        "uid": decoded["uid"],
+        "email": decoded.get("email", ""),
+        "email_verified": decoded.get("email_verified", False),
+        "name": decoded.get("name"),
+        "picture": decoded.get("picture"),
+        "sign_in_provider": decoded.get("firebase", {}).get("sign_in_provider"),
+    }
+
+
 async def verify_firebase_token(id_token: str) -> dict:
     """
     Verify a Firebase ID token and return the decoded claims.
 
-    Returns:
-        dict with: uid, email, email_verified, name, picture, ...
-
     Raises:
-        ValueError: If token is invalid or Firebase is not initialized.
+        ValueError: the token is invalid/expired/revoked (-> 401).
+        FirebaseUnavailableError: Firebase unreachable (-> 503, retryable).
+
+    The SDK's verification does blocking network I/O, so it runs in a thread:
+    calling it inline froze the whole event loop for every request.
+    """
+    import asyncio
+
+    if not _firebase_app:
+        raise FirebaseUnavailableError("Firebase is not configured on this server")
+    return await asyncio.to_thread(_verify_sync, id_token)
+
+
+def create_firebase_user(email: str, password: str, name: str | None = None) -> str:
+    """
+    Create a Firebase account server-side with an admin-assigned password.
+
+    Used when an org admin invites a brand-new employee: since there is no
+    email-sending infrastructure for an "accept invite" link, the admin sets
+    the employee's initial password directly and relays it to them out of
+    band. This creates the underlying Firebase identity so the employee can
+    then sign in through the normal email/password login flow unchanged.
+
+    Returns the new Firebase UID. Raises ValueError on failure (duplicate
+    email, Firebase not configured, weak password per Firebase's own rules).
     """
     if not _firebase_app:
         raise ValueError("Firebase is not configured on this server")
@@ -80,18 +166,13 @@ async def verify_firebase_token(id_token: str) -> dict:
     from firebase_admin import auth as firebase_auth
 
     try:
-        decoded = firebase_auth.verify_id_token(id_token, check_revoked=True)
-        return {
-            "uid": decoded["uid"],
-            "email": decoded.get("email", ""),
-            "email_verified": decoded.get("email_verified", False),
-            "name": decoded.get("name"),
-            "picture": decoded.get("picture"),
-            "sign_in_provider": decoded.get("firebase", {}).get("sign_in_provider"),
-        }
-    except firebase_auth.RevokedIdTokenError:
-        raise ValueError("Firebase token has been revoked")
-    except firebase_auth.UserDisabledError:
-        raise ValueError("Firebase user account is disabled")
-    except firebase_auth.InvalidIdTokenError as exc:
-        raise ValueError(f"Invalid Firebase token: {exc}")
+        user_record = firebase_auth.create_user(
+            email=email,
+            password=password,
+            display_name=name or None,
+        )
+        return user_record.uid
+    except firebase_auth.EmailAlreadyExistsError as exc:
+        raise ValueError("A Firebase account with this email already exists") from exc
+    except Exception as exc:
+        raise ValueError(f"Failed to create account: {exc}") from exc

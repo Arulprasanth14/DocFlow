@@ -5,6 +5,8 @@ Import and raise these throughout the codebase — never use raw HTTPException.
 """
 from __future__ import annotations
 
+from typing import NamedTuple, Sequence
+
 from fastapi import HTTPException, status
 
 
@@ -58,6 +60,41 @@ class ValidationException(DocFlowException):
 
 
 UnprocessableEntityException = ValidationException
+
+
+class FieldError(NamedTuple):
+    """
+    One blocked field, in the shape the UI needs to point at it.
+
+    `field` is the form control's name (the client maps it to an element id so
+    a "Fix this" link can focus it), `code` is stable and machine-readable so
+    the wording can change without breaking the client, and `message` is what
+    the person reads.
+    """
+    field: str
+    code: str
+    message: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"field": self.field, "code": self.code, "message": self.message}
+
+
+class FieldValidationException(ValidationException):
+    """
+    422 with a per-field breakdown.
+
+    The plain `detail` string stays populated so every existing caller that
+    only reads `error` still shows something sensible; `fields` is additive.
+    """
+
+    def __init__(self, fields: Sequence[FieldError], detail: str | None = None):
+        self.fields = list(fields)
+        if detail is None:
+            detail = (
+                self.fields[0].message if len(self.fields) == 1
+                else f"{len(self.fields)} things need fixing before you can continue."
+            )
+        super().__init__(detail=detail)
 
 
 class RateLimitException(DocFlowException):

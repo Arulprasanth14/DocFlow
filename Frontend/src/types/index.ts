@@ -13,26 +13,40 @@ export interface PaginatedResponse<T> {
   pages: number;
 }
 
+/**
+ * One blocked field, as the server names it.
+ *
+ * `field` is the form control ("title", "expires_at", "answer:salary"), not
+ * a message key; the UI maps it to an element id so a "Fix this" link can
+ * focus it. `code` is stable, so wording can change without breaking the UI.
+ */
+export interface FieldProblem {
+  field: string;
+  code: string;
+  message: string;
+}
+
 export interface ApiError {
   error: string;
   status_code: number;
   request_id?: string;
+  /** Present on a 422 the server could attribute to specific fields. */
+  fields?: FieldProblem[];
 }
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
+// Must match Backend/app/models/document.py::DocumentStatus exactly.
 export type DocumentStatus =
   | 'draft'
   | 'submitted'
-  | 'under_review'
-  | 'pending_approval'
-  | 'revision_requested'
+  | 'pending'
   | 'approved'
   | 'rejected'
-  | 'executed'
+  | 'sent_back'
   | 'archived'
-  | 'cancelled'
-  | 'closed';
+  | 'expired'
+  | 'cancelled';
 
 export type DocumentPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -51,16 +65,26 @@ export type WorkflowStepStatus =
   | 'skipped'
   | 'cancelled';
 
+// Must match Backend/app/domain/enums.py::NotificationType exactly. The
+// values actually fired by NotificationService.notify()/notify_many() calls
+// throughout the backend are the plain-word ones (assigned/approved/
+// rejected/...); the dotted document.* values are declared on the backend
+// enum but not currently fired by any call site — kept here so this type
+// doesn't drift out of sync again if that changes.
 export type NotificationType =
-  | 'approval.requested'
-  | 'approval.approved'
-  | 'approval.rejected'
-  | 'approval.returned'
+  | 'assigned'
+  | 'approved'
+  | 'rejected'
+  | 'changes_requested'
+  | 'sla_breach_warning'
+  | 'escalated'
+  | 'new_message'
+  | 'delegated'
   | 'document.submitted'
   | 'document.approved'
   | 'document.rejected'
-  | 'sla.warning'
-  | 'sla.breach'
+  | 'document.cancelled'
+  | 'document.comment'
   | 'mention'
   | 'system';
 
@@ -80,11 +104,27 @@ export interface AuthUser {
   status: string;
 }
 
+/**
+ * The only thing the UI routes on after sign-in. These are normal outcomes
+ * returned with HTTP 200 - not errors.
+ *   HAS_ORG         -> dashboard
+ *   PENDING_REQUEST -> "waiting for approval" screen
+ *   NO_ORG          -> create / join organization
+ */
+export type AccountState = 'HAS_ORG' | 'PENDING_REQUEST' | 'NO_ORG';
+
+export interface PendingRequestInfo {
+  org_name: string;
+  requested_at: string | null;
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: 'bearer';
   user: AuthUser;
   org_membership: OrgMembership | null;
+  state: AccountState;
+  pending_request: PendingRequestInfo | null;
 }
 
 // ── Organization ──────────────────────────────────────────────────────────────
@@ -97,6 +137,16 @@ export interface Organization {
   plan: string;
   status: string;
   settings?: Record<string, unknown>;
+  industry?: string | null;
+  timezone?: string | null;
+  branding_primary_color?: string | null;
+  branding_accent_color?: string | null;
+  notification_defaults?: {
+    email: boolean;
+    sms: boolean;
+    push: boolean;
+    in_app: boolean;
+  } | null;
   created_at: string;
 }
 
@@ -237,6 +287,7 @@ export interface Document {
   title: string;
   status: DocumentStatus;
   priority: DocumentPriority;
+  tags: string[];
   form_data: Record<string, unknown>;
   metadata: Record<string, unknown>;
   submitted_by: string;
@@ -246,9 +297,32 @@ export interface Document {
   due_at: string | null;
   created_at: string;
   updated_at: string;
+  /** How the doc was started: template | blank | upload (spec §9). */
+  source?: 'template' | 'blank' | 'upload';
+  /** public | internal | confidential (FR-13.4). */
+  confidentiality?: string | null;
+  /** Wizard/editor step a draft should resume at (FR-14.5). */
+  current_step?: string | null;
+  /** Optimistic-locking counter for autosave (If-Match / 409). */
+  version?: number;
+  /** Optional free-text grouping label (FR-13.4). */
+  category?: string | null;
+  /** When the document takes effect, and when it stops applying (FR-13.4). */
+  effective_from?: string | null;
+  expires_at?: string | null;
+  /** Days before expiry to remind owner + watchers. null = no reminder. */
+  reminder_days_before?: number | null;
+  /** Stamped by the server once the expiry reminder has gone out. */
+  reminder_sent_at?: string | null;
+  /** How many people are CC'd (FR-13.4). */
+  watcher_count?: number;
   attachment_count?: number;
   comment_count?: number;
   version_count?: number;
+  /** Latest ApprovalStep for this document's workflow instance, if any — used to open WorkflowChatPanel. */
+  current_approval_step_id?: string | null;
+  /** This document's active WorkflowInstance id, if any — used to call cancelWorkflow. */
+  current_workflow_instance_id?: string | null;
 
   // Expanded relations (when fetched with ?expand=true)
   doc_type?: DocumentType;
@@ -262,20 +336,41 @@ export interface Document {
 
 export interface PaginatedDocumentsResponse {
   items: Document[];
+  /**
+   * Count of the whole filtered set, or -1 on a cursor request, where the
+   * server deliberately skips the count (FR-1.4 - counting on every page is
+   * the cost keyset pagination exists to avoid). Read it only when >= 0.
+   */
   total: number;
   page: number;
   limit: number;
   pages: number;
+  /** Keyset cursor for the next page; null at the end (FR-1.4). */
+  next_cursor?: string | null;
 }
 
 export interface DocumentFilterParams {
   page?: number;
   limit?: number;
+  /**
+   * Keyset cursor taken from a previous response's next_cursor. Takes
+   * precedence over `page` server-side, and must be sent with the same
+   * `sort` it was issued under - the server rejects a mismatch rather than
+   * silently skipping or repeating rows.
+   */
+  cursor?: string;
   status?: string;
   doc_type_id?: string;
   dept_id?: string;
   submitted_by?: string;
   search?: string;
+  sort?: string;
+  tags?: string[];
+  priority?: string;
+  date_from?: string;
+  date_to?: string;
+  /** Only documents routed through this workflow template (FR-1.2). */
+  workflow_template_id?: string;
 }
 
 export interface DocumentVersion {
@@ -381,9 +476,9 @@ export interface WorkflowStepInstance {
   step_order: number;
   step_definition: WorkflowStepDefinition;
 
-  // Expanded
   assigned_user?: AuthUser;
   decided_by_user?: AuthUser;
+  workflow_instance?: WorkflowInstance;
 }
 
 export interface WorkflowInstance {
@@ -395,6 +490,7 @@ export interface WorkflowInstance {
   started_at: string;
   completed_at: string | null;
   steps: WorkflowStepInstance[];
+  document?: Document;
 }
 
 // ── Comments ──────────────────────────────────────────────────────────────────

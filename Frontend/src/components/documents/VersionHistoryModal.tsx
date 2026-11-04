@@ -6,7 +6,8 @@
 
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { useDocumentVersions } from '@/hooks/useDocuments';
+import { useDocumentVersions, useRestoreDocumentVersion } from '@/hooks/useDocuments';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 export interface VersionHistoryModalProps {
   isOpen: boolean;
@@ -24,7 +25,9 @@ export function VersionHistoryModal({
   currentVersionNum,
 }: VersionHistoryModalProps) {
   const { data: versions = [], isLoading } = useDocumentVersions(docId);
+  const restoreVer = useRestoreDocumentVersion();
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const selectedVersion =
     versions.find((v) => v.id === selectedVersionId) || versions[0] || null;
@@ -42,7 +45,7 @@ export function VersionHistoryModal({
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'hsla(220, 50%, 5%, 0.75)',
+              background: 'var(--overlay-scrim)',
               backdropFilter: 'blur(6px)',
               zIndex: 300,
             }}
@@ -67,7 +70,7 @@ export function VersionHistoryModal({
               flexDirection: 'column',
               borderRadius: 'var(--radius-xl)',
               overflow: 'hidden',
-              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.5)',
+              boxShadow: 'var(--shadow-lg)',
             }}
             className="glass-card"
           >
@@ -142,16 +145,27 @@ export function VersionHistoryModal({
                     return (
                       <div
                         key={ver.id}
+                        // Selecting a version was mouse-only: a keyboard user
+                        // could see the list and reach nothing in it.
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={selectedVersionId === ver.id}
                         onClick={() => setSelectedVersionId(ver.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setSelectedVersionId(ver.id);
+                          }
+                        }}
                         style={{
                           padding: '14px',
                           borderRadius: 'var(--radius-lg)',
                           cursor: 'pointer',
                           background: isSelected
-                            ? 'hsla(217, 100%, 50%, 0.12)'
+                            ? 'color-mix(in srgb, var(--primary) 12%, transparent)'
                             : 'var(--bg-overlay)',
                           border: isSelected
-                            ? '1px solid var(--color-primary-500)'
+                            ? '1px solid var(--primary)'
                             : '1px solid var(--border-subtle)',
                           transition: 'all var(--transition-fast)',
                         }}
@@ -273,6 +287,17 @@ export function VersionHistoryModal({
                       >
                         Version {selectedVersion.version_num}
                       </span>
+                      
+                      {selectedVersion.version_num !== currentVersionNum && (
+                        <button
+                          onClick={() => setConfirmOpen(true)}
+                          disabled={restoreVer.isPending}
+                          className="btn btn-secondary btn-sm"
+                          style={{ marginLeft: '12px' }}
+                        >
+                          {restoreVer.isPending && selectedVersionId === selectedVersion.id ? 'Restoring...' : 'Restore Version'}
+                        </button>
+                      )}
                     </div>
 
                     {/* Snapshot Form Data Table */}
@@ -389,6 +414,21 @@ export function VersionHistoryModal({
               </button>
             </div>
           </motion.div>
+          
+          <ConfirmDialog
+            open={confirmOpen}
+            title="Restore Version"
+            message={`Are you sure you want to restore Version ${selectedVersion?.version_num}? This will create a new current version with these values.`}
+            confirmLabel="Restore"
+            onConfirm={async () => {
+              if (selectedVersion) {
+                setConfirmOpen(false);
+                await restoreVer.mutateAsync({ docId, versionId: selectedVersion.id });
+                onClose();
+              }
+            }}
+            onCancel={() => setConfirmOpen(false)}
+          />
         </>
       )}
     </AnimatePresence>

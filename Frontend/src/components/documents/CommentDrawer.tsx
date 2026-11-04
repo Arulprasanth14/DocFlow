@@ -49,10 +49,10 @@ function CommentItem({
         background: isResolved
           ? 'var(--bg-overlay)'
           : comment.is_internal
-          ? 'hsla(38, 92%, 50%, 0.07)'
+          ? 'color-mix(in srgb, var(--status-pending) 9%, transparent)'
           : 'var(--bg-card)',
         border: comment.is_internal
-          ? '1px solid hsla(38, 92%, 50%, 0.25)'
+          ? '1px solid color-mix(in srgb, var(--status-pending) 25%, transparent)'
           : '1px solid var(--border-subtle)',
         borderRadius: 'var(--radius-lg)',
         marginBottom: '10px',
@@ -76,8 +76,8 @@ function CommentItem({
               width: '28px',
               height: '28px',
               borderRadius: '50%',
-              background: 'linear-gradient(135deg, var(--color-primary-600), var(--color-primary-400))',
-              color: '#fff',
+              background: 'linear-gradient(135deg, var(--primary), var(--chart-2))',
+              color: 'var(--primary-foreground)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -97,8 +97,8 @@ function CommentItem({
                   style={{
                     fontSize: '0.7rem',
                     fontWeight: 700,
-                    color: 'var(--color-warning-400)',
-                    background: 'hsla(38, 92%, 50%, 0.15)',
+                    color: 'var(--status-pending)',
+                    background: 'color-mix(in srgb, var(--status-pending) 18%, transparent)',
                     padding: '2px 6px',
                     borderRadius: 'var(--radius-sm)',
                     display: 'flex',
@@ -114,8 +114,8 @@ function CommentItem({
                   style={{
                     fontSize: '0.7rem',
                     fontWeight: 700,
-                    color: 'var(--color-success-400)',
-                    background: 'hsla(150, 80%, 40%, 0.12)',
+                    color: 'var(--status-approved)',
+                    background: 'color-mix(in srgb, var(--status-approved) 15%, transparent)',
                     padding: '2px 6px',
                     borderRadius: 'var(--radius-sm)',
                   }}
@@ -255,7 +255,7 @@ export function CommentDrawer({ isOpen, onClose, docId, docTitle }: CommentDrawe
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'hsla(220, 50%, 5%, 0.65)',
+              background: 'var(--overlay-scrim)',
               backdropFilter: 'blur(4px)',
               zIndex: 300,
             }}
@@ -279,7 +279,7 @@ export function CommentDrawer({ isOpen, onClose, docId, docTitle }: CommentDrawe
               zIndex: 301,
               display: 'flex',
               flexDirection: 'column',
-              boxShadow: '-8px 0 32px rgba(0, 0, 0, 0.4)',
+              boxShadow: 'var(--shadow-lg)',
             }}
           >
             {/* Header */}

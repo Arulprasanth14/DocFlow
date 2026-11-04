@@ -21,9 +21,22 @@ from pydantic import BaseModel, Field, field_validator
 class StageApproverRuleCreate(BaseModel):
     rule_type: str = Field(
         ...,
-        description="'specific_user' | 'role_in_department' | 'manager_of_requester' | 'dynamic_by_amount_threshold'"
+        description="'specific_user' | 'role_in_department' | 'manager_of_requester'"
     )
     rule_value: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("rule_type")
+    @classmethod
+    def validate_rule_type(cls, v: str) -> str:
+        allowed = {"specific_user", "role_in_department", "manager_of_requester"}
+        if v not in allowed:
+            if v == "dynamic_by_amount_threshold":
+                raise ValueError(
+                    "'dynamic_by_amount_threshold' is reserved and not yet implemented. "
+                    "Use one of: specific_user, role_in_department, manager_of_requester."
+                )
+            raise ValueError(f"rule_type must be one of {sorted(allowed)}")
+        return v
 
 
 class StageApproverRuleResponse(BaseModel):
@@ -45,6 +58,10 @@ class WorkflowStageCreate(BaseModel):
     min_approvals_required: int = Field(default=1, ge=1)
     sla_hours: int | None = Field(default=None, ge=1)
     reapproval_on_revision: bool = False
+    requires_signature: bool = Field(
+        default=False,
+        description="If True, the Approve decision on this stage requires a digital e-signature.",
+    )
     approver_rules: list[StageApproverRuleCreate] = Field(default_factory=list)
 
 
@@ -57,6 +74,7 @@ class WorkflowStageResponse(BaseModel):
     min_approvals_required: int
     sla_hours: int | None
     reapproval_on_revision: bool
+    requires_signature: bool
     approver_rules: list[StageApproverRuleResponse] = []
     created_at: datetime
 
@@ -81,6 +99,15 @@ class WorkflowTemplateUpdate(BaseModel):
     department_id: uuid.UUID | None = None
     document_type_scope: str | None = None
     is_active: bool | None = None
+    # Declared so the field is no longer silently discarded. Until workflow
+    # versioning lands, TemplateService.update() REFUSES a changed stage list
+    # with 422 instead of dropping it: `approval_steps.stage_id` and
+    # `workflow_instances.current_stage_id` both reference `workflow_stages.id`
+    # with no ON DELETE, so replacing stages in place would either violate
+    # those foreign keys or orphan the audit trail of runs that already used
+    # them. An IDENTICAL list is accepted as a no-op so that editing only the
+    # name or description keeps working.
+    stages: list[WorkflowStageCreate] | None = None
 
 
 class WorkflowTemplateResponse(BaseModel):
@@ -96,6 +123,9 @@ class WorkflowTemplateResponse(BaseModel):
     stages: list[WorkflowStageResponse] = []
     created_at: datetime
     updated_at: datetime | None = None
+    # §7 ownership/sharing
+    created_by: uuid.UUID | None = None
+    visibility: str = "organization"
 
     model_config = {"from_attributes": True}
 
@@ -104,12 +134,40 @@ class WorkflowTemplateSummary(BaseModel):
     """Lightweight response — no stages included."""
     id: uuid.UUID
     name: str
+    description: str | None = None
     department_id: uuid.UUID | None
+    doc_type_id: uuid.UUID | None = None
     is_active: bool
     version: int
     created_at: datetime
+    # §7 ownership/sharing — lets the UI show "mine" vs shared workflows and
+    # decide whether to offer edit controls.
+    created_by: uuid.UUID | None = None
+    visibility: str = "organization"
 
     model_config = {"from_attributes": True}
+
+
+# ── Template Review (non-admin, pre-submit workflow review) ────────────────────
+# A deliberately narrower view than WorkflowTemplateResponse: human-readable
+# approver descriptions instead of raw rule_type/rule_value, so a normal
+# submitter (who lacks admin:users permission and can't call /orgs/me/members
+# to resolve a specific_user's name themselves) can still see who will review
+# their document, in what order, before submitting.
+
+class TemplateReviewStage(BaseModel):
+    name: str
+    sequence_order: int
+    approver_summary: str
+    sla_hours: int | None
+    requires_signature: bool
+
+
+class TemplateReviewResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None
+    stages: list[TemplateReviewStage]
 
 
 # ── Workflow Instance ─────────────────────────────────────────────────────────
@@ -175,6 +233,30 @@ class CancelWorkflowRequest(BaseModel):
 
 # ── Approval Step ─────────────────────────────────────────────────────────────
 
+class RevokeRequest(BaseModel):
+    """
+    Request body for POST /approvals/{step_id}/revoke (§6.5).
+
+    A reason is REQUIRED — the revocation is preserved as a permanent audit
+    event, and "add a correction comment" is part of the specified flow, so
+    there is no such thing as an unexplained revocation.
+    """
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class ResolveRecallRequest(BaseModel):
+    """Request body for POST /approvals/recalls/{revocation_id}/resolve (§6.5)."""
+    approve: bool = Field(
+        ...,
+        description=(
+            "True applies the recall (invalidating the recalled decision and "
+            "affected downstream approvals, returning the document for "
+            "correction); False denies it and the workflow continues."
+        ),
+    )
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class DecisionRequest(BaseModel):
     """
     Request body for POST /approvals/{step_id}/decision
@@ -231,6 +313,21 @@ class ApprovalStepResponse(BaseModel):
     stage_name: str | None = None
     approver_name: str | None = None
     approver_email: str | None = None
+    # Document context — who/what this step is actually about. Added because
+    # the approvals queue UI had nothing to display per row except raw UUIDs
+    # (these, like the three above, were declared in this schema but never
+    # actually populated by any code path before now).
+    document_id: uuid.UUID | None = None
+    document_title: str | None = None
+    document_public_id: str | None = None
+    submitted_by: uuid.UUID | None = None
+    submitter_name: str | None = None
+    # §6.5 revocation state — a decision that has been revoked or superseded
+    # by a newer document version is preserved but no longer counts toward
+    # the stage gate, and the UI must be able to show that distinction.
+    revoked_at: datetime | None = None
+    revocation_reason: str | None = None
+    superseded_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 

@@ -8,13 +8,16 @@ Updated per architecture §4:
 """
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -26,6 +29,55 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel, utcnow
+
+# Type-only imports: relationships are resolved by SQLAlchemy from the string
+# class names at runtime, so these must not be imported eagerly (circular).
+if TYPE_CHECKING:
+    from app.models.user import User  # noqa: F401
+    from app.models.workflow import WorkflowInstance, WorkflowTemplate  # noqa: F401
+
+
+class DocumentStatus(str, enum.Enum):
+    """
+    Document lifecycle states.
+
+    Requirements report §5.5 asks for: Draft, Ready for Submission, In
+    Approval, Changes Requested, Approved, Rejected, Revoked/Returned for
+    Correction, and Closed/Finalized. Mapping to this enum:
+      Draft                        → DRAFT
+      Ready for Submission         → READY
+      In Approval                  → PENDING (SUBMITTED is the transient
+                                      "handed to the workflow engine" state)
+      Changes Requested            → SENT_BACK
+      Approved                     → APPROVED
+      Rejected                     → REJECTED
+      Revoked/Returned for Corr.   → REVOKED
+      Closed/Finalized             → FINALIZED
+
+    The `status` column is VARCHAR(50) (not a native Postgres enum type —
+    see alembic/versions/..._workflow_approvals_phase2_gaps.py's own
+    docstring), so adding values here needs no migration.
+    """
+    DRAFT = "draft"
+    # §5.5 "Ready for Submission" — prepared/reviewed but not yet routed
+    READY = "ready"
+    SUBMITTED = "submitted"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SENT_BACK = "sent_back"
+    # §6.5 an approval was revoked/recalled and the document is back with its
+    # owner for correction — distinct from SENT_BACK (a normal
+    # changes-requested round) so revocation is visibly its own path.
+    REVOKED = "revoked"
+    # §6.2/6.6 explicitly finalized by the authorized final approver. Only
+    # reachable from APPROVED, and only via the explicit finalize action.
+    FINALIZED = "finalized"
+    ARCHIVED = "archived"
+    EXPIRED = "expired"
+    # Added: WorkflowService.cancel() referenced DocumentStatus.CANCELLED,
+    # which didn't exist — every workflow-cancel call raised AttributeError.
+    CANCELLED = "cancelled"
 
 
 class DocumentType(BaseModel):
@@ -52,6 +104,31 @@ class DocumentType(BaseModel):
     workflow_templates: Mapped[list["WorkflowTemplate"]] = relationship(  # type: ignore[name-defined]
         "WorkflowTemplate", back_populates="doc_type", lazy="noload"
     )
+    templates: Mapped[list["DocumentTemplate"]] = relationship(
+        "DocumentTemplate", back_populates="doc_type", lazy="noload", cascade="all, delete-orphan"
+    )
+
+class DocumentTemplate(BaseModel):
+    __tablename__ = "document_templates"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    doc_type_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_types.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    default_field_values: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+
+    doc_type: Mapped["DocumentType"] = relationship(
+        "DocumentType", back_populates="templates", lazy="noload"
+    )
+    creator: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload"
+    )
 
 
 class Document(BaseModel):
@@ -68,8 +145,41 @@ class Document(BaseModel):
     )
     public_id: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)  # DOC-2024-00001
     title: Mapped[str] = mapped_column(String(500), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
+    status: Mapped[DocumentStatus] = mapped_column(
+        Enum(DocumentStatus, name="documentstatus", native_enum=False, create_constraint=False),
+        default=DocumentStatus.DRAFT,
+        nullable=False,
+    )
     priority: Mapped[str] = mapped_column(String(20), default="normal", nullable=False)
+    tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, server_default="{}")
+
+    # ── Documents module (spec §9 / FR-13.9 / §24.4) ──────────────────────────
+    # How the document was started: TEMPLATE | BLANK | UPLOAD. Lets the
+    # submission wizard skip the Form-Fill step for blank/uploaded docs.
+    source: Mapped[str] = mapped_column(
+        String(20), default="template", server_default="template", nullable=False
+    )
+    # Public | Internal | Confidential (FR-13.4). Nullable = not yet chosen.
+    confidentiality: Mapped[str | None] = mapped_column(String(20))
+    # Resume the wizard/editor at the exact step for a draft (FR-1.9 / FR-14.5).
+    current_step: Mapped[str | None] = mapped_column(String(30))
+    # Pins the document to the exact TemplateVersion it was built from, so a
+    # later edit or deletion of the template cannot change or break it
+    # (spec C9 / FR-11.5). SET NULL on delete: losing the template must not
+    # cascade into the document — the answers and snapshot stay valid.
+    # Column added by migration b1c2d3e4f5a6 (applied).
+    template_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("template_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Optimistic-locking counter for autosave: the client sends the version it
+    # last saw in `If-Match`; a stale value is rejected with 409
+    # VERSION_CONFLICT (spec §24.1/§24.4, FR-14.6). Plain counter — not wired to
+    # SQLAlchemy's mapper-level version_id_col, so ordinary writes are unaffected.
+    version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
 
     # Architecture §4: pointer to the current active version
     # (nullable until first version is uploaded)
@@ -100,6 +210,28 @@ class Document(BaseModel):
     # Snapshot (frozen at submit time)
     submitter_snapshot: Mapped[dict | None] = mapped_column(JSONB)
 
+    # ── Submission details (spec FR-13.4) ─────────────────────────────────────
+    # Columns added by migration c7d8e9f0a1b2 (applied). All nullable: an
+    # existing document reads as "no category, no dates, no reminder", which
+    # is exactly its behaviour before the migration.
+    #
+    # Free text, not a foreign key: the spec treats category as a label, and a
+    # lookup table would need an admin screen nobody asked for. The UI offers
+    # the org's existing values as suggestions without restricting the input.
+    category: Mapped[str | None] = mapped_column(String(100))
+    # When the document takes effect, which may be well after approval, and
+    # when it stops applying. Independent of due_at (an SLA for the approvers)
+    # and of submitted_at.
+    effective_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Remind the owner and watchers this many days before `expires_at`.
+    # NULL = no reminder wanted.
+    reminder_days_before: Mapped[int | None] = mapped_column(Integer)
+    # Stamped when that reminder goes out, so the daily sweep cannot send the
+    # same reminder twice. Cleared whenever the expiry date or the reminder
+    # preference changes, otherwise a rescheduled expiry would never remind.
+    reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Relationships
     doc_type: Mapped["DocumentType"] = relationship(
         "DocumentType", back_populates="documents", lazy="noload"
@@ -123,6 +255,9 @@ class Document(BaseModel):
     attachments: Mapped[list["DocumentAttachment"]] = relationship(
         "DocumentAttachment", back_populates="document", lazy="noload", cascade="all, delete-orphan"
     )
+    watchers: Mapped[list["DocumentWatcher"]] = relationship(
+        "DocumentWatcher", back_populates="document", lazy="noload", cascade="all, delete-orphan"
+    )
     comments: Mapped[list["Comment"]] = relationship(
         "Comment", back_populates="document", lazy="noload"
     )
@@ -135,16 +270,48 @@ class Document(BaseModel):
               postgresql_where="deleted_at IS NULL"),
         Index("idx_documents_submitted_by", "submitted_by",
               postgresql_where="deleted_at IS NULL"),
+        # Documents-module list access paths (FR-1.5): owner + status + recency,
+        # and owner + due date.
+        Index("idx_documents_owner_status_updated", "submitted_by", "status", "updated_at",
+              postgresql_where="deleted_at IS NULL"),
+        Index("idx_documents_owner_due", "submitted_by", "due_at",
+              postgresql_where="deleted_at IS NULL"),
         Index("idx_documents_fts", "search_vector", postgresql_using="gin"),
         Index("idx_documents_title_trgm", "title",
               postgresql_using="gin",
               postgresql_ops={"title": "gin_trgm_ops"}),
+        # The expiry sweep only ever asks for rows that HAVE an expiry date,
+        # which is a small minority — hence partial (migration c7d8e9f0a1b2).
+        Index("idx_document_expiry_due", "expires_at",
+              postgresql_where="expires_at IS NOT NULL AND deleted_at IS NULL"),
     )
 
     @property
     def owner_id(self) -> uuid.UUID:
         """Architecture alias: owner_id == submitted_by."""
         return self.submitted_by
+
+
+class DocumentContent(BaseModel):
+    """
+    The editable body of a document (spec §9 DocumentContent).
+
+    One row per document. `content` holds the rich-text editor JSON used by
+    freeform (BLANK) documents; `answers` holds template answers keyed by field
+    key. `rendered_snapshot_url` / `pdf_url` are the immutable artefacts written
+    at submit time (FR-13.8 — renderer not built yet, so they stay NULL).
+    """
+    __tablename__ = "document_contents"
+    __table_args__ = (UniqueConstraint("document_id", name="uq_document_content_doc"),)
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    content: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    answers: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    rendered_snapshot_url: Mapped[str | None] = mapped_column(Text)
+    pdf_url: Mapped[str | None] = mapped_column(Text)
 
 
 class DocumentVersion(BaseModel):
@@ -219,6 +386,9 @@ class FileAsset(BaseModel):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False
     )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
@@ -254,6 +424,43 @@ class DocumentAttachment(BaseModel):
         "Document", back_populates="attachments", lazy="noload"
     )
     file_asset: Mapped["FileAsset"] = relationship("FileAsset", lazy="noload")
+
+
+class DocumentWatcher(BaseModel):
+    """
+    Someone CC'd on a document (spec FR-13.4 "Watchers/CC").
+
+    A watcher receives the document's notifications but has NO approval step
+    and cannot act on it. That distinction matters: a watcher must never be
+    mistaken for an approver by the workflow engine, so watchers live in their
+    own table and are never read by it.
+
+    A join table rather than an array column on `documents` because each row
+    records who added the watcher and when, which the audit trail needs.
+
+    Table added by migration c7d8e9f0a1b2 (applied).
+    """
+    __tablename__ = "document_watchers"
+    __table_args__ = (UniqueConstraint("document_id", "user_id", name="uq_document_watcher"),)
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    added_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+
+    document: Mapped["Document"] = relationship(
+        "Document", back_populates="watchers", lazy="noload"
+    )
+    user: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload", foreign_keys=[user_id]
+    )
 
 
 class Comment(BaseModel):

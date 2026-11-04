@@ -19,6 +19,8 @@ import {
 } from '@/hooks/useAuth';
 import { useAuthStore } from '@/store/authStore';
 import type { SessionInfo } from '@/lib/api/auth';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { GlassCard } from '@/components/ui/GlassCard';
 
 // ── Schemas ────────────────────────────────────────────────────────────────────
 const profileSchema = z.object({
@@ -47,9 +49,10 @@ function UserAvatar({ name, avatarUrl, size = 72 }: { name: string | null; avata
   return (
     <div style={{
       width: size, height: size, borderRadius: '50%',
-      background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))',
+      background: 'var(--gradient-brand)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.35, fontWeight: 700, color: 'white',
+      border: '3px solid var(--card-solid)', boxShadow: 'var(--shadow-md)',
     }}>
       {initials}
     </div>
@@ -66,8 +69,8 @@ function SessionCard({ session, onRevoke }: { session: SessionInfo; onRevoke: (i
     <div style={{
       padding: '16px',
       borderRadius: 'var(--radius-md)',
-      border: `1px solid ${session.is_current ? 'hsla(217, 100%, 50%, 0.3)' : 'var(--border-subtle)'}`,
-      background: session.is_current ? 'hsla(217, 100%, 50%, 0.05)' : 'var(--bg-elevated)',
+      border: `1px solid ${session.is_current ? 'color-mix(in srgb, var(--primary) 30%, transparent)' : 'var(--border-subtle)'}`,
+      background: session.is_current ? 'color-mix(in srgb, var(--primary) 6%, transparent)' : 'var(--bg-elevated)',
       display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -83,7 +86,7 @@ function SessionCard({ session, onRevoke }: { session: SessionInfo; onRevoke: (i
           <p style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
             {deviceLabel}
             {session.is_current && (
-              <span style={{ fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: 'var(--radius-full)', background: 'hsla(217, 100%, 50%, 0.15)', color: 'var(--color-primary-300)' }}>
+              <span style={{ fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px', borderRadius: 'var(--radius-full)', background: 'color-mix(in srgb, var(--primary) 15%, transparent)', color: 'var(--color-primary-300)' }}>
                 This device
               </span>
             )}
@@ -171,31 +174,32 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="page-content" style={{ maxWidth: '720px', paddingTop: '32px' }}>
-      <div className="page-header" style={{ padding: '0 0 24px 0' }}>
-        <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)' }}>
-          Account Settings
-        </h1>
-        <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>
-          Manage your profile, security, and active sessions
-        </p>
-      </div>
+    <div className="page-content" style={{ maxWidth: '760px', paddingTop: '24px' }}>
+      <PageHeader
+        breadcrumbs={[{ label: 'Account' }, { label: 'Profile' }]}
+        title="Account Settings"
+        description="Manage your profile, security, and active sessions"
+      />
 
-      {/* Profile Section */}
-      <Section title="Profile">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px', marginBottom: '24px' }}>
-          <UserAvatar name={user.name} avatarUrl={user.avatar_url} size={72} />
-          <div>
-            <p style={{ fontWeight: 700, fontSize: '1.1rem', color: 'var(--text-primary)' }}>{user.name ?? 'No name set'}</p>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>{user.email}</p>
+      {/* Cover + identity banner */}
+      <GlassCard style={{ overflow: 'hidden', margin: '24px 0 20px', padding: 0 }}>
+        <div style={{ height: 96, background: 'var(--gradient-brand)', opacity: 0.9 }} />
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 18, padding: '0 24px 20px', marginTop: -36 }}>
+          <UserAvatar name={user.name} avatarUrl={user.avatar_url} size={80} />
+          <div style={{ paddingBottom: 4 }}>
+            <p style={{ fontFamily: 'var(--font-heading)', fontWeight: 800, fontSize: '1.2rem', color: 'var(--foreground)' }}>{user.name ?? 'No name set'}</p>
+            <p style={{ color: 'var(--muted-foreground)', fontSize: '0.875rem' }}>{user.email}</p>
             {orgMembership && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', marginTop: '6px', padding: '3px 10px', borderRadius: 'var(--radius-full)', background: 'hsla(217, 100%, 50%, 0.1)', border: '1px solid hsla(217, 100%, 50%, 0.2)', fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-primary-300)' }}>
+              <span className="status-badge status-review" style={{ marginTop: 6 }}>
                 {orgMembership.role_name} · {orgMembership.organization.name}
               </span>
             )}
           </div>
         </div>
+      </GlassCard>
 
+      {/* Profile Section */}
+      <Section title="Profile">
         <form onSubmit={profileForm.handleSubmit(handleProfileSave)}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
             <div>

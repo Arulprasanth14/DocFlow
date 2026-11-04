@@ -32,7 +32,7 @@ export const orgKeys = {
 
 // ── Organization Queries & Mutations ──────────────────────────────────────────
 export function useMyOrg() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.me,
     queryFn: orgsApi.getMyOrg,
@@ -41,12 +41,15 @@ export function useMyOrg() {
   });
 }
 
-export function useOrgStats() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+export function useOrgStats(enabled = true) {
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.stats,
     queryFn: orgsApi.getOrgStats,
-    enabled: isAuthenticated,
+    // Backend route requires admin:orgs — callers outside the admin area
+    // (e.g. a shared dashboard every role sees) must pass `enabled: false`
+    // for non-admins, or every non-admin page load fires a guaranteed 403.
+    enabled: isAuthenticated && enabled,
     staleTime: 1000 * 30,
   });
 }
@@ -64,7 +67,7 @@ export function useUpdateMyOrg() {
 
 // ── Departments ───────────────────────────────────────────────────────────────
 export function useDepartments(flat = false) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.departments(flat),
     queryFn: () => orgsApi.listDepartments(flat),
@@ -108,7 +111,7 @@ export function useDeleteDepartment() {
 
 // ── Teams ─────────────────────────────────────────────────────────────────────
 export function useTeams() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.teams,
     queryFn: orgsApi.listTeams,
@@ -152,7 +155,7 @@ export function useDeleteTeam() {
 
 // ── Roles & Permissions ───────────────────────────────────────────────────────
 export function useRoles() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.roles,
     queryFn: orgsApi.listRoles,
@@ -206,7 +209,7 @@ export function useDeleteRole() {
 }
 
 export function usePermissions() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.permissions,
     queryFn: orgsApi.getPermissionCatalog,
@@ -217,7 +220,7 @@ export function usePermissions() {
 
 // ── Members ───────────────────────────────────────────────────────────────────
 export function useMembers(params?: ListMembersParams) {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isAuthenticated = useAuthStore((s) => !!s.user);
   return useQuery({
     queryKey: orgKeys.members(params),
     queryFn: () => orgsApi.listMembers(params),
@@ -256,5 +259,25 @@ export function useRemoveMember() {
       queryClient.invalidateQueries({ queryKey: ['org', 'members'] });
       queryClient.invalidateQueries({ queryKey: orgKeys.stats });
     },
+  });
+}
+
+// ── Join Requests ─────────────────────────────────────────────────────────────
+export function useRequestJoin() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (orgName: string) => orgsApi.requestJoin(orgName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org', 'join-request', 'mine'] });
+    },
+  });
+}
+
+export function useMyJoinRequest(enabled: boolean) {
+  return useQuery({
+    queryKey: ['org', 'join-request', 'mine'],
+    queryFn: orgsApi.getMyJoinRequest,
+    enabled,
+    staleTime: 1000 * 15,
   });
 }

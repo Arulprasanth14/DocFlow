@@ -22,9 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ForbiddenException, NotFoundException
 from app.dependencies import CurrentUser
 from app.database import get_db
-from app.domain.enums import UserRole
+from app.domain.enums import SYSTEM_ROLES
 from app.models.audit import AuditLog
 from app.models.user import User
+from app.repositories.org_repo import OrgMemberRepository
 from app.schemas.workflow_instances import (
     WorkflowTemplateCreate,
     WorkflowTemplateResponse,
@@ -36,9 +37,73 @@ from app.services.template_service import TemplateService
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
-def _require_admin(user: CurrentUser) -> None:
-    if user.role != UserRole.SUPER_ADMIN and not user.is_superadmin:
-        raise ForbiddenException("Only super administrators can perform this action")
+def _require_main_admin(user: CurrentUser) -> None:
+    """
+    Strictly the Main Administrator org role (or platform superadmin).
+    Per the requirements report §2.1/13.3, only the Main Administrator may
+    add an HR user, delete/deactivate a member, or manage roles/permissions
+    — HR support staff must NOT pass this gate even though they pass
+    `_require_admin_or_hr` for day-to-day admin screens.
+    """
+    if user.is_superadmin:
+        return
+    if "admin" not in user.roles:
+        raise ForbiddenException("Only the Main Administrator can perform this action")
+
+
+def _require_admin_or_hr(user: CurrentUser) -> None:
+    """
+    Org-level day-to-day admin access: Main Administrator OR HR (§2.2 — HR
+    "supports the Main Administrator with day-to-day organization
+    management"). NOT the platform-wide `is_superadmin` flag, which is a
+    separate, orthogonal concept (see domain/permissions.py). Covers
+    workflow-template management and audit-log visibility, which the
+    requirements report grants to HR; actions reserved exclusively for the
+    Main Administrator use `_require_main_admin` instead.
+    """
+    if user.is_superadmin:
+        return
+    if not ({"admin", "hr"} & set(user.roles)):
+        raise ForbiddenException("Only organization administrators can perform this action")
+
+
+# ── Roles Catalog ──────────────────────────────────────────────────────────────
+
+class RoleCatalogEntry(BaseModel):
+    name: str
+    description: str
+    permissions: list[str]
+
+
+@router.get(
+    "/roles/catalog",
+    response_model=list[RoleCatalogEntry],
+    status_code=200,
+    summary="Get the canonical role → permission mapping for all DocFlow roles",
+)
+async def get_roles_catalog(
+    current_user: CurrentUser,
+) -> list[RoleCatalogEntry]:
+    """
+    Returns the full catalog of system roles and their associated permissions.
+    Used by the frontend to render permission badges and role pickers without
+    hardcoding permission lists client-side.
+
+    Main Administrator-only endpoint (roles/permissions management is
+    reserved per §13.4 unless explicitly granted to HR — not implemented
+    as a grantable toggle in this baseline).
+    """
+    _require_main_admin(current_user)
+    return [
+        RoleCatalogEntry(
+            name=role_name,
+            description=role_def["description"],
+            permissions=[str(p) for p in role_def["permissions"]],
+        )
+        for role_name, role_def in SYSTEM_ROLES.items()
+    ]
+
+
 
 
 # ── Workflow Templates ─────────────────────────────────────────────────────────
@@ -54,9 +119,17 @@ async def create_workflow_template(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> WorkflowTemplateResponse:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     service = TemplateService(db)
-    return await service.create(org_id=current_user.org_id, req=req)
+    # Admin-authored templates are organization-wide by definition (every
+    # member should be able to pick them at submit time); member-authored
+    # ones default to private — see routers/workflow_templates_public.py.
+    return await service.create(
+        org_id=current_user.org_id,
+        req=req,
+        created_by=current_user.id,
+        visibility="organization",
+    )
 
 
 @router.get(
@@ -71,12 +144,16 @@ async def list_workflow_templates(
     department_id: Annotated[Optional[uuid.UUID], Query()] = None,
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkflowTemplateSummary]:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     service = TemplateService(db)
+    # Administrators manage every workflow in the org, including members'
+    # private ones (§7's sharing rule exempts administration permissions).
     return await service.list(
         org_id=current_user.org_id,
         active_only=active_only,
         department_id=department_id,
+        visible_to_user_id=current_user.id,
+        include_private_of_others=True,
     )
 
 
@@ -91,7 +168,7 @@ async def get_workflow_template(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> WorkflowTemplateResponse:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     service = TemplateService(db)
     return await service.get(template_id=template_id, org_id=current_user.org_id)
 
@@ -108,7 +185,7 @@ async def update_workflow_template(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> WorkflowTemplateResponse:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     service = TemplateService(db)
     return await service.update(
         template_id=template_id,
@@ -128,7 +205,7 @@ async def delete_workflow_template(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     service = TemplateService(db)
     await service.delete(template_id=template_id, org_id=current_user.org_id)
 
@@ -145,10 +222,21 @@ async def deactivate_user(
     current_user: CurrentUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _require_admin(current_user)
+    # §2.1/13.3: deleting/deactivating a user account is reserved exclusively
+    # for the Main Administrator — HR support staff must not pass this gate.
+    _require_main_admin(current_user)
     target_user = await db.get(User, user_id)
     if not target_user:
         raise NotFoundException("User not found")
+
+    # Tenant isolation: an org admin may only deactivate users who are
+    # members of their own organization (superadmins, which have no
+    # org_id, are exempt from this check by definition).
+    if not current_user.is_superadmin:
+        member_repo = OrgMemberRepository(db)
+        membership = await member_repo.get_membership(user_id, current_user.org_id)
+        if not membership:
+            raise NotFoundException("User not found")
 
     target_user.is_active = False
     target_user.status = "inactive"
@@ -203,7 +291,7 @@ async def list_audit_logs(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     db: AsyncSession = Depends(get_db),
 ) -> AuditLogListResponse:
-    _require_admin(current_user)
+    _require_admin_or_hr(current_user)
     from sqlalchemy import func
 
     q = select(AuditLog).where(AuditLog.org_id == current_user.org_id)

@@ -111,6 +111,7 @@ class FirebaseAuthUser:
     email: str
     name: str | None
     avatar_url: str | None
+    email_verified: bool = False
 
 
 async def get_current_firebase_user(
@@ -130,19 +131,28 @@ async def get_current_firebase_user(
 
     Raises UnauthorizedException (401) on invalid / expired tokens.
     """
-    from app.core.firebase import verify_firebase_token
+    from app.core.exceptions import ServiceUnavailableException
+    from app.core.firebase import FirebaseUnavailableError, verify_firebase_token
 
     token = await _get_token_from_request(request)
     try:
         claims = await verify_firebase_token(token)
     except ValueError as exc:
         raise UnauthorizedException(f"Invalid Firebase token: {exc}") from exc
+    except FirebaseUnavailableError as exc:
+        # 503, not 500/401: the credential isn't bad, the auth provider just
+        # couldn't be reached. The client should retry, not sign out or
+        # treat the user as new.
+        raise ServiceUnavailableException(
+            "Sign-in"
+        ) from exc
 
     return FirebaseAuthUser(
         firebase_uid=claims["uid"],
         email=claims.get("email", ""),
         name=claims.get("name"),
         avatar_url=claims.get("picture"),
+        email_verified=bool(claims.get("email_verified", False)),
     )
 
 
@@ -191,6 +201,35 @@ def require_superadmin():
             raise ForbiddenException("Superadmin access required")
         return user
     return Depends(check)
+
+
+def require_role(*allowed_roles: str):
+    """
+    FastAPI dependency factory: require the caller to have one of the given org roles.
+
+    Usage:
+        @router.get("/admin/dashboard")
+        async def admin_dashboard(
+            user: AuthUser = require_role("admin"),
+        ):
+            ...
+
+    Rules:
+    - Superadmin (is_superadmin=True) always passes — bypasses role check.
+    - Role names are matched against user.roles (list of role name strings
+      from the JWT claim, populated from OrganizationMember.role.name).
+    - Raises 403 ForbiddenException if none of the user's roles are in allowed_roles.
+    """
+    async def check(user: CurrentUser) -> AuthUser:
+        if user.is_superadmin:
+            return user  # superadmin bypasses all role checks
+        if not any(r in allowed_roles for r in user.roles):
+            raise ForbiddenException(
+                f"This action requires one of these roles: {list(allowed_roles)}"
+            )
+        return user
+    return Depends(check)
+
 
 
 # ── Pagination ────────────────────────────────────────────────────────────────

@@ -19,6 +19,16 @@ export interface UpdateOrgPayload {
   name?: string;
   logo_url?: string;
   settings?: Record<string, unknown>;
+  industry?: string;
+  timezone?: string;
+  branding_primary_color?: string;
+  branding_accent_color?: string;
+  notification_defaults?: {
+    email: boolean;
+    sms: boolean;
+    push: boolean;
+    in_app: boolean;
+  };
 }
 
 export interface CreateDepartmentPayload {
@@ -61,6 +71,14 @@ export interface InviteMemberPayload {
   name?: string;
   role_id: string;
   dept_id?: string | null;
+  /** Required for brand-new accounts — there's no email invite flow, so the
+   * admin assigns the initial password directly and relays it out of band. */
+  password: string;
+}
+
+export interface JoinRequestStatus {
+  org_name: string | null;
+  status: string | null;
 }
 
 export interface UpdateMemberPayload {
@@ -147,6 +165,45 @@ export const orgsApi = {
 
   removeMember: (id: string) =>
     apiClient.delete<{ message: string }>(`/orgs/me/members/${id}`),
+
+  // ── Join Requests ───────────────────────────────────────────────────────────
+  requestJoin: (orgName: string) =>
+    apiClient.post<{ message: string }>('/orgs/join-requests', { org_name: orgName }),
+
+  getMyJoinRequest: () =>
+    apiClient.get<JoinRequestStatus>('/orgs/join-requests/mine'),
+
+  /** Case-insensitive availability check for a NEW organization name. */
+  checkOrgName: (name: string) =>
+    apiClient.get<{ available: boolean; reason: string }>('/orgs/availability', {
+      params: { name },
+    }),
+
+  /** Organization names matching `q` (max 5) for the join picker. */
+  searchOrgs: (q: string) => apiClient.get<string[]>('/orgs/search', { params: { q } }),
+
+  // ── Reviewing join requests (admin / HR) ──────────────────────────────────
+  listJoinRequests: () =>
+    apiClient.get<PendingJoinRequest[]>('/orgs/me/join-requests'),
+
+  /** Accept a request, choosing the role. First decision wins (409 otherwise). */
+  acceptJoinRequest: (requestId: string, roleId: string) =>
+    apiClient.post<{ status: string; role: string }>(
+      `/orgs/me/join-requests/${requestId}/accept`,
+      { role_id: roleId },
+    ),
+
+  rejectJoinRequest: (requestId: string) =>
+    apiClient.post<{ status: string }>(`/orgs/me/join-requests/${requestId}/reject`, {}),
 };
+
+export interface PendingJoinRequest {
+  id: string;
+  user_id: string;
+  name: string | null;
+  email: string;
+  avatar_url: string | null;
+  requested_at: string | null;
+}
 
 export default orgsApi;

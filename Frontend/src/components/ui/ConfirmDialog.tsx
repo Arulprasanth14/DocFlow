@@ -3,7 +3,7 @@
  * Styled animated modal for destructive actions.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 interface ConfirmDialogProps {
@@ -14,6 +14,10 @@ interface ConfirmDialogProps {
   cancelLabel?: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Optional extra content rendered between the message and the action buttons (e.g. a note field, a picker). */
+  children?: ReactNode;
+  /** Disables the confirm button (e.g. while a required field is empty, or a mutation is pending). */
+  confirmDisabled?: boolean;
 }
 
 export default function ConfirmDialog({
@@ -24,6 +28,8 @@ export default function ConfirmDialog({
   cancelLabel = 'Cancel',
   onConfirm,
   onCancel,
+  children,
+  confirmDisabled = false,
 }: ConfirmDialogProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
@@ -95,7 +101,7 @@ export default function ConfirmDialog({
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
               <div style={{
                 width: '40px', height: '40px', borderRadius: '12px',
-                background: 'hsla(0, 82%, 55%, 0.1)', flexShrink: 0,
+                background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', flexShrink: 0,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 color: 'var(--color-error-400)',
               }}>
@@ -115,6 +121,8 @@ export default function ConfirmDialog({
               </div>
             </div>
 
+            {children && <div>{children}</div>}
+
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '8px' }}>
               <button className="btn btn-secondary" onClick={onCancel}>
                 {cancelLabel}
@@ -123,9 +131,12 @@ export default function ConfirmDialog({
                 ref={confirmBtnRef}
                 className="btn btn-primary"
                 onClick={onConfirm}
+                disabled={confirmDisabled}
                 style={{
-                  background: 'var(--color-error-500)',
-                  boxShadow: '0 4px 12px hsla(0, 82%, 55%, 0.25)',
+                  background: 'var(--destructive)',
+                  boxShadow: '0 4px 12px color-mix(in srgb, var(--destructive) 25%, transparent)',
+                  opacity: confirmDisabled ? 0.5 : 1,
+                  cursor: confirmDisabled ? 'not-allowed' : 'pointer',
                 }}
               >
                 {confirmLabel}

@@ -40,15 +40,15 @@ export default function AppLoadingScreen({ message }: AppLoadingScreenProps) {
           width: 52,
           height: 52,
           borderRadius: 14,
-          background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))',
+          background: 'linear-gradient(135deg, var(--primary), var(--chart-2))',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           marginBottom: 20,
-          boxShadow: '0 8px 32px hsla(217, 100%, 50%, 0.3)',
+          boxShadow: '0 8px 32px color-mix(in srgb, var(--primary) 30%, transparent)',
         }}
       >
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--primary-foreground)" strokeWidth="2.5">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
           <polyline points="14 2 14 8 20 8" />
           <line x1="16" y1="13" x2="8" y2="13" />

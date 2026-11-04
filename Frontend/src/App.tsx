@@ -7,19 +7,18 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 
 import { AuthProvider } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { useAuthStore } from '@/store/authStore';
 import { useUIStore } from '@/store/uiStore';
-import { wsManager } from '@/lib/ws';
 import { useIdleTimeout } from '@/hooks/useIdleTimeout';
 
 // ── Page Imports ──────────────────────────────────────────────────────────────
 import LoginPage from '@/pages/auth/LoginPage';
 import RegisterPage from '@/pages/auth/RegisterPage';
 import ProfilePage from '@/pages/auth/ProfilePage';
+import OnboardingPage from '@/pages/onboarding/OnboardingPage';
 
 // ── Admin Page Imports (Milestone 3) ──────────────────────────────────────────
 import OrganizationSettingsPage from '@/pages/admin/OrganizationSettingsPage';
@@ -27,15 +26,49 @@ import DepartmentsPage from '@/pages/admin/DepartmentsPage';
 import RolesPage from '@/pages/admin/RolesPage';
 import MembersPage from '@/pages/admin/MembersPage';
 import DocumentTypesAdminPage from '@/pages/admin/DocumentTypesAdminPage';
+import WorkflowTemplatesAdminPage from '@/pages/admin/WorkflowTemplatesAdminPage';
+// ── Admin Portal Imports (Auth & RBAC Completion) ─────────────────────────────
+import AdminLoginPage from '@/pages/admin/AdminLoginPage';
+import AdminDashboardPage from '@/pages/admin/AdminDashboardPage';
+import AdminLayout from '@/components/layout/AdminLayout';
 
 // ── Document Page Imports (Milestone 4) ───────────────────────────────────────
 import DocumentListPage from '@/pages/documents/DocumentListPage';
 import DocumentCreatePage from '@/pages/documents/DocumentCreatePage';
 import DocumentDetailPage from '@/pages/documents/DocumentDetailPage';
+import BlankDocPage from '@/pages/documents/BlankDocPage';
+import StartFromTemplatePage from '@/pages/documents/StartFromTemplatePage';
+import SubmitWizard from '@/pages/documents/SubmitWizard';
+import TemplateStudioEntryPage from '@/pages/templates/TemplateStudioEntryPage';
+import MyTemplatesPage from '@/pages/templates/MyTemplatesPage';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
+
+// FR-6.8 / FR-15.5 — the TipTap editor is the heaviest thing in the app and is
+// needed by exactly three routes. Lazy-loading it keeps /documents and
+// /documents/new light; <Suspense> below shows the same spinner these pages
+// use while the chunk arrives.
+// Route-level split for the landing page: it owns the three.js/R3F chunk, which
+// must not ship in the initial bundle for authenticated routes (landing §10).
+const LandingPage = lazy(() => import('@/pages/landing/LandingPage'));
+const DocumentEditorPage = lazy(() => import('@/pages/documents/DocumentEditorPage'));
+const FormFillPage = lazy(() => import('@/pages/documents/FormFillPage'));
+const TemplateEditorPage = lazy(() => import('@/pages/templates/TemplateEditorPage'));
+// Lazy: the import review screen is only reached deliberately, and keeping it
+// out of the main bundle matters more than its first-paint speed (FR-6.8).
+const ImportTemplatePage = lazy(() => import('@/pages/templates/ImportTemplatePage'));
 
 // ── Approvals Page Imports (Milestone 5) ──────────────────────────────────────
 import ApprovalsPage from '@/pages/approvals/ApprovalsPage';
+
+// ── New Feature Pages ─────────────────────────────────────────────────────────
+import WorkflowsPage from '@/pages/workflows/WorkflowsPage';
+import SearchPage from '@/pages/search/SearchPage';
+import AnalyticsPage from '@/pages/analytics/AnalyticsPage';
+import ChatPage from '@/pages/chat/ChatPage';
+import SettingsPage from '@/pages/settings/SettingsPage';
+import DraftsPage from '@/pages/drafts/DraftsPage';
+import AgentPage from '@/pages/agent/AgentPage';
+import AgentKnowledgePage from '@/pages/admin/AgentKnowledgePage';
 
 // ── Component Imports ─────────────────────────────────────────────────────────
 import ProtectedRoute from '@/components/auth/ProtectedRoute';
@@ -56,27 +89,16 @@ const queryClient = new QueryClient({
   },
 });
 
-// ── Coming Soon Placeholder ───────────────────────────────────────────────────
-function ComingSoonPage({ title }: { title: string }) {
+/** Fallback for the lazily-loaded editor routes — matches their own spinner. */
+function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
-    <div className="empty-state" style={{ minHeight: 'calc(100vh - 64px)' }}>
-      <div style={{
-        width: '64px', height: '64px', borderRadius: '16px',
-        background: 'hsla(217, 100%, 50%, 0.08)',
-        border: '1px solid hsla(217, 100%, 50%, 0.2)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        marginBottom: '8px',
-      }}>
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary-400)" strokeWidth="2">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
+    <Suspense fallback={
+      <div className="page-content" style={{ paddingTop: 48, textAlign: 'center' }}>
+        <div className="spinner" style={{ width: 32, height: 32, margin: '0 auto' }} />
       </div>
-      <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)' }}>{title}</h2>
-      <p style={{ color: 'var(--text-muted)', maxWidth: '400px' }}>
-        This feature is coming in a future milestone. Check back soon!
-      </p>
-    </div>
+    }>
+      {children}
+    </Suspense>
   );
 }
 
@@ -84,69 +106,152 @@ function ComingSoonPage({ title }: { title: string }) {
 function AppInner() {
   const { isAuthenticated } = useAuth();
   const { theme } = useUIStore();
-  
+
   useIdleTimeout(isAuthenticated);
 
-  // Apply theme
+  // Apply theme: Ice uses the `.dark` class (shadcn-canonical). We also keep the
+  // data-theme attribute in sync for any residual selectors during the migration.
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    root.setAttribute('data-theme', theme);
   }, [theme]);
 
-  // Connect WebSocket when authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      wsManager.connect();
-    } else {
-      wsManager.disconnect();
-    }
-    return () => wsManager.disconnect();
-  }, [isAuthenticated]);
+  // NOTE: real-time push is handled by the two feature-specific hooks
+  // (useChatWebSocket, useNotificationWebSocket), which connect to the
+  // actual backend routes (/ws/chat/{id}, /ws/notifications). The generic
+  // `wsManager` in lib/ws.ts pointed at a URL matching neither route and
+  // was previously wired up here, producing a doomed connect/retry loop on
+  // every page load — removed rather than "fixed" since it was redundant
+  // with the two working hooks.
 
   return (
     <Routes>
+      {/* ── Public Landing Route ─────────────────────────────────── */}
+      <Route
+        path="/"
+        element={
+          <Suspense
+            fallback={
+              <div
+                style={{ minHeight: '100svh', background: 'var(--background)' }}
+                aria-busy="true"
+              />
+            }
+          >
+            <LandingPage />
+          </Suspense>
+        }
+      />
+
       {/* ── Public Auth Routes ────────────────────────────────────── */}
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/register" element={<RegisterPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
 
-        {/* ── Protected App Routes (inside AppLayout) ───────────────── */}
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <AppLayout />
-            </ProtectedRoute>
-          }
-        >
-          {/* Default redirect */}
-          <Route index element={<Navigate to="/dashboard" replace />} />
+      {/* ── Onboarding (authenticated, but no org yet) ────────────── */}
+      <Route
+        path="/onboarding"
+        element={
+          <ProtectedRoute allowNoOrg>
+            <OnboardingPage />
+          </ProtectedRoute>
+        }
+      />
 
-          {/* Dashboard */}
-          <Route path="dashboard" element={<DashboardPage />} />
+      {/* ── Protected App Routes (inside AppLayout) ───────────────── */}
+      <Route
+        element={
+          <ProtectedRoute>
+            <AppLayout />
+          </ProtectedRoute>
+        }
+      >
+        {/* Dashboard */}
+        <Route path="dashboard" element={<DashboardPage />} />
 
           {/* Profile / Settings */}
           <Route path="profile" element={<ProfilePage />} />
 
-          {/* ── Milestone 3: Administration Routes ──────────────────── */}
-          <Route path="admin/organization" element={<OrganizationSettingsPage />} />
-          <Route path="admin/departments" element={<DepartmentsPage />} />
-          <Route path="admin/roles" element={<RolesPage />} />
-          <Route path="admin/members" element={<MembersPage />} />
-          <Route path="admin/document-types" element={<DocumentTypesAdminPage />} />
+          {/* ── Milestone 3: Administration Routes (Moved to /admin portal) ── */}
 
           {/* ── Milestone 4: Documents & Forms Routes ───────────────── */}
           <Route path="documents" element={<DocumentListPage />} />
           <Route path="documents/new" element={<DocumentCreatePage />} />
+          {/* Deep link: renders the hub with the upload modal open */}
+          <Route path="documents/new/upload" element={<DocumentCreatePage />} />
+          <Route path="documents/new/blank" element={<BlankDocPage />} />
+          <Route path="documents/new/from-template/:templateId" element={<StartFromTemplatePage />} />
+          {/* Template Studio (Phase 2) — static segments outrank documents/:id */}
+          <Route path="documents/templates/mine" element={<MyTemplatesPage />} />
+          <Route path="documents/templates/new" element={<TemplateStudioEntryPage />} />
+          <Route path="documents/templates/import" element={<LazyRoute><ImportTemplatePage /></LazyRoute>} />
+          <Route path="documents/templates/:id/edit" element={<LazyRoute><TemplateEditorPage /></LazyRoute>} />
           <Route path="documents/:id" element={<DocumentDetailPage />} />
+          <Route path="documents/:id/edit" element={<LazyRoute><DocumentEditorPage /></LazyRoute>} />
+          <Route path="documents/:id/fill" element={<LazyRoute><FormFillPage /></LazyRoute>} />
+          <Route path="documents/:id/submit" element={<SubmitWizard />} />
 
-          {/* Milestone 5+ routes (coming soon UI) */}
+          {/* Feature routes */}
           <Route path="approvals/*" element={<ApprovalsPage />} />
-          <Route path="workflows/*" element={<ComingSoonPage title="Workflows" />} />
-          <Route path="search" element={<ComingSoonPage title="Search" />} />
-          <Route path="analytics/*" element={<ComingSoonPage title="Analytics" />} />
+          <Route path="workflows/*" element={<WorkflowsPage />} />
+          <Route path="search" element={<SearchPage />} />
+          <Route path="analytics/*" element={<AnalyticsPage />} />
+          <Route path="chat" element={<ChatPage />} />
+          {/* §11 Drafts and §12 Agent — available to every role (the Agent's
+              knowledge ADMINISTRATION is Main-Admin-only, see /admin below). */}
+          <Route path="drafts" element={<DraftsPage />} />
+          <Route path="agent" element={<AgentPage />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
 
         {/* ── Catch-all ─────────────────────────────────────────────── */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
+
+        {/* ── Admin Portal (/admin) ─────────────────────────────────── */}
+        {/* Separate login page — not shared with employee login */}
+        <Route path="/admin/login" element={<AdminLoginPage />} />
+        {/* Protected admin shell — Main Admin + HR (superadmin bypasses via
+            hasRole()). HR's day-to-day access per requirements §2.2; pages
+            reserved for the Main Administrator only (Roles & Perms, Agent
+            legal knowledge) gate themselves further inside the shell. */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute requireRole={['admin', 'hr']}>
+              <AdminLayout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<Navigate to="/admin/dashboard" replace />} />
+          <Route path="dashboard" element={<AdminDashboardPage />} />
+          {/* Re-use existing admin section pages under the new Admin shell */}
+          <Route path="organization" element={<OrganizationSettingsPage />} />
+          <Route path="departments" element={<DepartmentsPage />} />
+          {/* Main Administrator only (§13.4) — HR's day-to-day access does
+              not extend to roles/permissions management under this baseline. */}
+          <Route
+            path="roles"
+            element={
+              <ProtectedRoute requireRole={['admin']}>
+                <RolesPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route path="members" element={<MembersPage />} />
+          <Route path="document-types" element={<DocumentTypesAdminPage />} />
+          <Route path="workflow-templates" element={<WorkflowTemplatesAdminPage />} />
+          {/* §13.6 Agent legal knowledge — Main Administrator only; HR does
+              not receive this privilege by default (§2.5). Enforced again
+              server-side in AgentService.assert_can_manage_knowledge. */}
+          <Route
+            path="agent-knowledge"
+            element={
+              <ProtectedRoute requireRole={['admin']}>
+                <AgentKnowledgePage />
+              </ProtectedRoute>
+            }
+          />
+        </Route>
       </Routes>
   );
 }

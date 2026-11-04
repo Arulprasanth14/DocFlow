@@ -75,6 +75,20 @@ async def list_notifications(
     )
 
 
+@router.get(
+    "/unread-count",
+    status_code=status.HTTP_200_OK,
+    summary="Get the current user's unread notification count",
+)
+async def get_unread_count(
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    repo = NotificationRepository(db)
+    count = await repo.unread_count(current_user.id)
+    return {"count": count}
+
+
 @router.post(
     "/{notification_id}/read",
     status_code=status.HTTP_204_NO_CONTENT,

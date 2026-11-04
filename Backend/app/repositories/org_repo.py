@@ -8,7 +8,7 @@ import re
 import uuid
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -52,6 +52,17 @@ class OrganizationRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_name(self, name: str) -> Organization | None:
+        """Case-insensitive exact-name lookup — used by the join-request flow,
+        where a user types the org name they want to request access to."""
+        result = await self.db.execute(
+            select(Organization).where(
+                func.lower(Organization.name) == name.strip().lower(),
+                Organization.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def create(self, name: str, plan: str = "trial") -> Organization:
         """Create an org with a unique slug (append random suffix on collision)."""
         base_slug = _slugify(name)
@@ -68,21 +79,31 @@ class OrganizationRepository:
 
     async def create_default_roles(self, org_id: UUID) -> dict[str, Role]:
         """
-        Seed the 5 system roles for a newly created organization.
+        Seed the 4 system roles for a newly created organization.
         Returns a dict mapping role name → Role object.
         """
-        # Ensure all permission codes exist in the permissions table
-        for role_name, role_def in SYSTEM_ROLES.items():
-            for perm_code in role_def["permissions"]:
-                existing = await self.db.execute(
-                    select(PermissionModel).where(PermissionModel.code == str(perm_code))
-                )
-                if not existing.scalar_one_or_none():
-                    perm = PermissionModel(
-                        code=str(perm_code),
-                        category=str(perm_code).split(":")[0],
-                    )
-                    self.db.add(perm)
+        # Ensure all permission codes exist in the permissions table.
+        # `permissions.code` is a GLOBAL catalog shared across every org, so
+        # this runs once per unique code ever seen, not per-org. A plain
+        # "SELECT then INSERT if missing" is not safe here: two orgs created
+        # around the same time (different sessions/transactions, READ
+        # COMMITTED isolation) can both miss each other's uncommitted insert
+        # and then both try to INSERT the same code, raising
+        # UniqueViolationError on permissions_code_key. An atomic
+        # INSERT ... ON CONFLICT DO NOTHING sidesteps the race entirely.
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        all_codes = {
+            str(perm_code)
+            for role_def in SYSTEM_ROLES.values()
+            for perm_code in role_def["permissions"]
+        }
+        if all_codes:
+            stmt = pg_insert(PermissionModel).values([
+                {"code": code, "category": code.split(":")[0]}
+                for code in all_codes
+            ]).on_conflict_do_nothing(index_elements=["code"])
+            await self.db.execute(stmt)
 
         await self.db.flush()
 
@@ -195,6 +216,45 @@ class OrgMemberRepository:
 
         permissions = sorted(str(rp.permission_code) for rp in role.permissions)
         return member, org, role, permissions
+
+    async def get_primary_membership_details(
+        self, user_id: UUID
+    ) -> tuple[OrganizationMember, Organization, Role, list[str]] | None:
+        """
+        The user's primary ACTIVE membership with its org, role and permission
+        codes, in two queries (join + permissions).
+
+        Replaces the get_first_org_for_user -> get_membership -> org -> role
+        -> permissions chain (five sequential round trips). Login latency is
+        dominated by round trips to the database, so this matters.
+
+        Only ACTIVE, non-deleted memberships of non-deleted organizations
+        count: a pending/rejected/removed membership means "no organization".
+        """
+        row = (
+            await self.db.execute(
+                select(OrganizationMember, Organization, Role)
+                .join(Organization, Organization.id == OrganizationMember.org_id)
+                .join(Role, Role.id == OrganizationMember.role_id)
+                .where(
+                    OrganizationMember.user_id == user_id,
+                    OrganizationMember.status == "active",
+                    OrganizationMember.deleted_at.is_(None),
+                    Organization.deleted_at.is_(None),
+                )
+                .order_by(OrganizationMember.joined_at.asc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        member, org, role = row
+        codes = (
+            await self.db.execute(
+                select(RolePermission.permission_code).where(RolePermission.role_id == role.id)
+            )
+        ).scalars().all()
+        return member, org, role, sorted(str(c) for c in codes)
 
     async def get_first_org_for_user(self, user_id: UUID) -> OrganizationMember | None:
         """Find the user's primary org membership (first active one)."""

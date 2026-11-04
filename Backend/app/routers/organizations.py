@@ -41,6 +41,10 @@ from app.schemas.org import (
     DepartmentCreateRequest,
     DepartmentResponse,
     DepartmentUpdateRequest,
+    JoinRequestAccept,
+    JoinRequestCreate,
+    JoinRequestStatusResponse,
+    OrgNameAvailability,
     MemberInviteRequest,
     MemberResponse,
     MemberUpdateRequest,
@@ -102,6 +106,11 @@ async def update_my_org(
         name=body.name,
         logo_url=body.logo_url,
         settings=body.settings,
+        industry=body.industry,
+        timezone=body.timezone,
+        branding_primary_color=body.branding_primary_color,
+        branding_accent_color=body.branding_accent_color,
+        notification_defaults=body.notification_defaults.model_dump() if body.notification_defaults else None,
     )
     return OrgResponse.model_validate(org)
 
@@ -283,16 +292,17 @@ async def create_role(
     current_user: CurrentUser,
     db: DatabaseDep,
 ) -> RoleResponse:
-    """Create a custom role with optional initial permissions."""
-    if not current_user.org_id:
-        from app.core.exceptions import ForbiddenException
-        raise ForbiddenException("No organization context")
-    svc = RoleService(db)
-    return await svc.create_role(
-        org_id=current_user.org_id,
-        name=body.name,
-        description=body.description,
-        permissions=body.permissions,
+    """
+    DISABLED — DocFlow's RBAC model is fixed to exactly 3 roles (Admin,
+    Worker, Trainee), seeded identically for every org
+    (domain/enums.py::SYSTEM_ROLES). There is no custom-role builder: the
+    endpoint is kept (rather than removed) only so old clients get a clear
+    error instead of a 404.
+    """
+    from app.core.exceptions import ForbiddenException
+    raise ForbiddenException(
+        "Custom roles are not supported. DocFlow has 3 fixed roles: "
+        "Admin, Worker, and Trainee."
     )
 
 
@@ -304,16 +314,11 @@ async def update_role(
     current_user: CurrentUser,
     db: DatabaseDep,
 ) -> RoleResponse:
-    """Update a role's name or description."""
-    if not current_user.org_id:
-        from app.core.exceptions import ForbiddenException
-        raise ForbiddenException("No organization context")
-    svc = RoleService(db)
-    return await svc.update_role(
-        role_id=role_id,
-        org_id=current_user.org_id,
-        name=body.name,
-        description=body.description,
+    """DISABLED — see create_role. The 3 fixed roles' names/descriptions are
+    not editable."""
+    from app.core.exceptions import ForbiddenException
+    raise ForbiddenException(
+        "Roles are fixed in DocFlow and cannot be renamed or edited."
     )
 
 
@@ -325,15 +330,14 @@ async def set_role_permissions(
     current_user: CurrentUser,
     db: DatabaseDep,
 ) -> RoleResponse:
-    """Replace the full permission set for a role. Invalidates member caches."""
-    if not current_user.org_id:
-        from app.core.exceptions import ForbiddenException
-        raise ForbiddenException("No organization context")
-    svc = RoleService(db)
-    return await svc.set_permissions(
-        role_id=role_id,
-        org_id=current_user.org_id,
-        permission_codes=body.permissions,
+    """DISABLED — see create_role. Each fixed role's permission set is
+    defined by domain/enums.py::SYSTEM_ROLES and is not editable per-org;
+    allowing edits here would let an org silently drift from the Admin/
+    Worker/Trainee permission guarantees (e.g. granting a Trainee approval
+    rights), which the rest of the system assumes hold everywhere."""
+    from app.core.exceptions import ForbiddenException
+    raise ForbiddenException(
+        "Role permissions are fixed in DocFlow and cannot be edited."
     )
 
 
@@ -405,7 +409,12 @@ async def invite_member(
         from app.core.exceptions import ForbiddenException
         raise ForbiddenException("No organization context")
     svc = MemberService(db)
-    return await svc.invite_member(org_id=current_user.org_id, invite=body)
+    return await svc.invite_member(
+        org_id=current_user.org_id,
+        invite=body,
+        actor_roles=current_user.roles,
+        actor_is_superadmin=current_user.is_superadmin,
+    )
 
 
 @router.patch("/me/members/{member_id}", response_model=MemberResponse,
@@ -428,6 +437,8 @@ async def update_member(
         dept_id=body.dept_id,
         team_id=body.team_id,
         status=body.status,
+        actor_roles=current_user.roles,
+        actor_is_superadmin=current_user.is_superadmin,
     )
 
 
@@ -443,5 +454,127 @@ async def remove_member(
         from app.core.exceptions import ForbiddenException
         raise ForbiddenException("No organization context")
     svc = MemberService(db)
-    await svc.remove_member(member_id=member_id, org_id=current_user.org_id)
+    await svc.remove_member(
+        member_id=member_id,
+        org_id=current_user.org_id,
+        actor_roles=current_user.roles,
+        actor_is_superadmin=current_user.is_superadmin,
+    )
     return MessageResponse(message="Member removed")
+
+
+# ── Join Requests ─────────────────────────────────────────────────────────────
+# Self-service "request access to an existing organization" for the Create
+# Account flow. Unlike invite_member (admin-initiated, instantly active),
+# this is user-initiated and creates a PENDING membership — the user is never
+# auto-joined; an org admin must approve it (same Members screen, Pending tab).
+
+@router.post("/join-requests", response_model=MessageResponse, status_code=201)
+async def create_join_request(
+    body: JoinRequestCreate,
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> MessageResponse:
+    """Request to join an existing organization by name. No org membership
+    required to call this - it's how an orgless user gets one, pending
+    approval. Every admin and HR user of that organization is notified."""
+    from app.models.user import User
+    from app.services.join_request_service import JoinRequestService
+
+    user = await db.get(User, current_user.id)
+    result = await JoinRequestService(db).request_join(user, body.org_name)
+    return MessageResponse(
+        message=f"Request to join '{result['org_name']}' submitted. An administrator must approve it before you can access the workspace."
+    )
+
+
+@router.get("/availability", response_model=OrgNameAvailability)
+async def check_org_name_availability(
+    current_user: CurrentUser,
+    db: DatabaseDep,
+    name: str = Query(..., min_length=0, max_length=255),
+) -> OrgNameAvailability:
+    """Case-insensitive availability check for the onboarding form (debounced
+    by the client). The database's unique index is the real guarantee; this
+    gives instant feedback."""
+    from app.services.account_service import AccountService
+
+    ok, reason = await AccountService(db).is_org_name_available(name)
+    return OrgNameAvailability(available=ok, reason=reason)
+
+
+@router.get("/search", response_model=list[str])
+async def search_organizations(
+    current_user: CurrentUser,
+    db: DatabaseDep,
+    q: str = Query(..., min_length=0, max_length=100),
+) -> list[str]:
+    """Organization NAMES matching `q` (max 5) for the join picker."""
+    from app.services.join_request_service import JoinRequestService
+
+    return await JoinRequestService(db).search_organizations(q)
+
+
+@router.get("/me/join-requests", dependencies=[require_permission("admin:users")])
+async def list_pending_join_requests(
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> list[dict]:
+    """Pending requests to join the caller's organization (admin / HR)."""
+    from app.services.join_request_service import JoinRequestService
+
+    if not current_user.org_id:
+        return []
+    return await JoinRequestService(db).list_pending(
+        current_user.org_id, current_user.roles, current_user.is_superadmin
+    )
+
+
+@router.post("/me/join-requests/{request_id}/accept", dependencies=[require_permission("admin:users")])
+async def accept_join_request(
+    request_id: UUID,
+    body: JoinRequestAccept,
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> dict:
+    """Accept a request, choosing the role. First decision wins; a request
+    already handled by someone else returns 409 naming who handled it."""
+    from app.services.join_request_service import JoinRequestService
+
+    return await JoinRequestService(db).accept(
+        actor_id=current_user.id,
+        actor_roles=current_user.roles,
+        actor_is_superadmin=current_user.is_superadmin,
+        org_id=current_user.org_id,
+        request_id=request_id,
+        role_id=body.role_id,
+    )
+
+
+@router.post("/me/join-requests/{request_id}/reject", dependencies=[require_permission("admin:users")])
+async def reject_join_request(
+    request_id: UUID,
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> dict:
+    from app.services.join_request_service import JoinRequestService
+
+    return await JoinRequestService(db).reject(
+        actor_id=current_user.id,
+        actor_roles=current_user.roles,
+        actor_is_superadmin=current_user.is_superadmin,
+        org_id=current_user.org_id,
+        request_id=request_id,
+    )
+
+
+@router.get("/join-requests/mine", response_model=JoinRequestStatusResponse)
+async def get_my_join_request(
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> JoinRequestStatusResponse:
+    """Check whether the current user has a pending join request on file —
+    used by the onboarding screen to show "request pending" instead of the
+    create/request form again after a page reload."""
+    svc = MemberService(db)
+    return await svc.get_my_join_request(current_user.id)

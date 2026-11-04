@@ -18,13 +18,15 @@ from app.core.exceptions import (
 )
 from app.core.redis import cache_delete, cache_get, cache_set
 from app.domain.enums import Permission
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import Organization, OrganizationMember, Role
+from app.models.user import User
 from app.repositories.dept_repo import DepartmentRepository, TeamRepository
 from app.repositories.org_repo import OrgMemberRepository, OrganizationRepository
 from app.repositories.role_repo import MemberRepository, RoleRepository
 from app.repositories.user_repo import UserRepository
 from app.schemas.org import (
     DepartmentResponse,
+    JoinRequestStatusResponse,
     MemberInviteRequest,
     MemberResponse,
     MemberRoleInfo,
@@ -72,6 +74,11 @@ class OrgService:
         name: str | None = None,
         logo_url: str | None = None,
         settings: dict | None = None,
+        industry: str | None = None,
+        timezone: str | None = None,
+        branding_primary_color: str | None = None,
+        branding_accent_color: str | None = None,
+        notification_defaults: dict | None = None,
     ) -> Organization:
         org = await self.get_org(org_id)
         if name is not None:
@@ -80,6 +87,16 @@ class OrgService:
             org.logo_url = logo_url
         if settings is not None:
             org.settings = {**org.settings, **settings}
+        if industry is not None:
+            org.industry = industry
+        if timezone is not None:
+            org.timezone = timezone
+        if branding_primary_color is not None:
+            org.branding_primary_color = branding_primary_color
+        if branding_accent_color is not None:
+            org.branding_accent_color = branding_accent_color
+        if notification_defaults is not None:
+            org.notification_defaults = notification_defaults
         await self.db.flush()
         await self.db.commit()
         logger.info("org_updated", org_id=str(org_id))
@@ -162,6 +179,28 @@ class DeptService:
         if not dept:
             raise NotFoundException("Department not found")
 
+        # ── Gap 4: Circular ancestor check ──────────────────────────────────
+        if parent_id is not None and parent_id != dept.parent_id:
+            # Cannot parent to self
+            if parent_id == dept_id:
+                raise ConflictException(
+                    "Cannot set parent: a department cannot be its own parent"
+                )
+            # Walk the proposed parent's ancestor chain to detect cycles
+            visited: set[str] = set()
+            cursor_id: UUID | None = parent_id
+            while cursor_id is not None:
+                if str(cursor_id) in visited:
+                    # Already visited once — something is already cyclic in DB, bail
+                    break
+                if cursor_id == dept_id:
+                    raise ConflictException(
+                        "Cannot set parent: would create a circular department hierarchy"
+                    )
+                visited.add(str(cursor_id))
+                ancestor = await self.dept_repo.get_by_id(cursor_id, org_id)
+                cursor_id = ancestor.parent_id if ancestor else None
+
         if code and code != dept.code:
             if await self.dept_repo.code_exists(org_id, code, exclude_id=dept_id):
                 raise ConflictException(f"Department code '{code}' already exists")
@@ -176,6 +215,38 @@ class DeptService:
         dept = await self.dept_repo.get_by_id(dept_id, org_id)
         if not dept:
             raise NotFoundException("Department not found")
+
+        # ── Gap 3: block deletion if members are assigned ──────────────────────
+        from sqlalchemy import select, func
+        from app.models.organization import OrganizationMember
+        member_count_result = await self.db.execute(
+            select(func.count()).where(
+                OrganizationMember.dept_id == dept_id,
+                OrganizationMember.deleted_at.is_(None),
+            )
+        )
+        member_count = member_count_result.scalar_one()
+        if member_count > 0:
+            raise ConflictException(
+                f"Cannot delete department — {member_count} member(s) are still assigned to it. "
+                "Reassign them first."
+            )
+
+        # ── Gap 3: block deletion if child departments exist ──────────────────
+        from app.models.organization import Department as DeptModel
+        child_count_result = await self.db.execute(
+            select(func.count()).where(
+                DeptModel.parent_id == dept_id,
+                DeptModel.deleted_at.is_(None),
+            )
+        )
+        child_count = child_count_result.scalar_one()
+        if child_count > 0:
+            raise ConflictException(
+                f"Cannot delete department — it has {child_count} sub-department(s). "
+                "Delete or reassign the sub-departments first."
+            )
+
         await self.dept_repo.soft_delete(dept)
         await self.db.commit()
         logger.info("dept_deleted", dept_id=str(dept_id))
@@ -438,26 +509,61 @@ class MemberService:
         self,
         org_id: UUID,
         invite: MemberInviteRequest,
+        actor_roles: list[str] | None = None,
+        actor_is_superadmin: bool = False,
     ) -> MemberResponse:
         """
-        Invite a user to the org by email.
-        - If user exists → add them as member (or raise conflict if already a member).
-        - If user doesn't exist → create a pending_invite user and add as member.
+        Add a user to the org by email, with credentials the admin assigns directly.
+
+        - If the user already has a DocFlow account → add them as a member (or
+          raise conflict if already a member). Their existing credentials are
+          never touched by an invite.
+        - If the user doesn't exist yet → create their account AND a Firebase
+          identity using the admin-supplied password (there is no email-sending
+          infrastructure for an "accept invite" link, so the admin relays the
+          password to the new employee out of band). The account is active
+          immediately — the employee can log in right away with the email the
+          admin assigned.
+
+        Requirements report §2.1/2.2/13.3: the Main Administrator can add
+        Worker, Trainee, or HR members; HR can add only Worker/Trainee —
+        never another HR account or an administrator account. Enforced here
+        (not just via the router's `admin:users` permission, which both
+        Main Admin and HR hold) so a crafted request can't escalate.
         """
         # Validate role belongs to org
         role = await self.role_repo.get_by_id(invite.role_id, org_id)
         if not role:
             raise NotFoundException("Role not found")
 
+        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        if role.name == "admin":
+            raise ForbiddenException(
+                "The Main Administrator role cannot be assigned via invite"
+            )
+        if role.name == "hr" and not is_main_admin:
+            raise ForbiddenException("Only the Main Administrator can add an HR user")
+
         # Find or create user
         user = await self.user_repo.get_by_email(str(invite.email))
         if not user:
+            from app.core.firebase import create_firebase_user
+
+            try:
+                firebase_uid = create_firebase_user(
+                    email=str(invite.email),
+                    password=invite.password,
+                    name=invite.name,
+                )
+            except ValueError as exc:
+                raise ConflictException(str(exc)) from exc
+
             user = await self.user_repo.create(
                 email=str(invite.email),
                 name=invite.name,
+                firebase_uid=firebase_uid,
             )
-            # Mark as pending invite
-            user.status = "pending_invite"
+            user.status = "active"
             await self.db.flush()
         else:
             # Check not already a member
@@ -475,6 +581,30 @@ class MemberService:
 
         logger.info("member_invited", org_id=str(org_id), user_id=str(user.id))
 
+        # Best-effort notification — never fails the invite itself. Does NOT
+        # include the admin-assigned password (never emailed in plaintext);
+        # tells the invitee their account is ready and to use the password
+        # their admin shared with them out of band.
+        try:
+            from app.domain.enums import NotificationType
+            from app.services.notification_service import NotificationService
+
+            org = await self.org_repo.get_by_id(org_id)
+            await NotificationService(self.db).notify(
+                org_id=org_id,
+                user_id=user.id,
+                type=NotificationType.SYSTEM,
+                title=f"You've been added to {org.name if org else 'an organization'}",
+                body=(
+                    f"An administrator added you as a {role.name} with the email "
+                    f"{invite.email}. Sign in using the password your admin shared "
+                    "with you."
+                ),
+                deep_link="/dashboard",
+            )
+        except Exception as exc:
+            logger.warning("member_invited_notification_failed", org_id=str(org_id), error=str(exc))
+
         return MemberResponse(
             id=member.id,
             org_id=member.org_id,
@@ -488,6 +618,38 @@ class MemberService:
             role=MemberRoleInfo.model_validate(role),
         )
 
+    async def _assert_not_last_admin(self, member, org_id: UUID) -> None:
+        """
+        An organization must always keep at least one active Main
+        Administrator. Without this, demoting or removing the last admin
+        leaves an organization nobody can administer (no one can approve join
+        requests, manage members, or change settings).
+        """
+        from sqlalchemy import func, select
+
+        current_role = member.role.name if member.role else None
+        if current_role != "admin" or member.status != "active":
+            return
+        others = (
+            await self.db.execute(
+                select(func.count())
+                .select_from(OrganizationMember)
+                .join(Role, Role.id == OrganizationMember.role_id)
+                .where(
+                    OrganizationMember.org_id == org_id,
+                    OrganizationMember.id != member.id,
+                    OrganizationMember.status == "active",
+                    OrganizationMember.deleted_at.is_(None),
+                    Role.name == "admin",
+                )
+            )
+        ).scalar_one()
+        if not others:
+            raise ConflictException(
+                "This is the organization's only administrator. Make someone "
+                "else an administrator first - an organization must always have one."
+            )
+
     async def update_member(
         self,
         member_id: UUID,
@@ -497,15 +659,33 @@ class MemberService:
         dept_id: UUID | None = None,
         team_id: UUID | None = None,
         status: str | None = None,
+        actor_roles: list[str] | None = None,
+        actor_is_superadmin: bool = False,
     ) -> MemberResponse:
         member = await self.member_repo.get_member_with_user(member_id, org_id)
         if not member:
             raise NotFoundException("Member not found")
 
+        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        current_role_name = member.role.name if member.role else None
+
         if role_id is not None:
             role = await self.role_repo.get_by_id(role_id, org_id)
             if not role:
                 raise NotFoundException("Role not found")
+            # §13.4: HR must not grant itself or others Main Administrator or
+            # HR-only privileges, and must not edit an existing Main
+            # Admin/HR member's role (privilege escalation / tampering with
+            # a peer or superior admin account).
+            if not is_main_admin and (
+                role.name in ("admin", "hr") or current_role_name in ("admin", "hr")
+            ):
+                raise ForbiddenException(
+                    "Only the Main Administrator can assign or change an "
+                    "HR/Main Administrator role"
+                )
+            if role.name != "admin":
+                await self._assert_not_last_admin(member, org_id)
             member.role_id = role_id
             # Invalidate permission cache on role change
             await cache_delete(_perm_cache_key(member.user_id, org_id))
@@ -534,10 +714,29 @@ class MemberService:
             role=MemberRoleInfo.model_validate(member.role) if member.role else None,
         )
 
-    async def remove_member(self, member_id: UUID, org_id: UUID) -> None:
+    async def remove_member(
+        self,
+        member_id: UUID,
+        org_id: UUID,
+        actor_roles: list[str] | None = None,
+        actor_is_superadmin: bool = False,
+    ) -> None:
         member = await self.member_repo.get_member_with_user(member_id, org_id)
         if not member:
             raise NotFoundException("Member not found")
+
+        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        # §2.1/13.3: "Delete a member" (an active/suspended account) is
+        # Main Administrator-only. Denying a still-PENDING join request is a
+        # distinct, lower-stakes action that reuses this same endpoint
+        # (see organizations.py's remove_member docstring / MembersPage's
+        # "Deny" button) — HR may still process those as part of normal
+        # day-to-day member management.
+        if member.status != "pending" and not is_main_admin:
+            raise ForbiddenException("Only the Main Administrator can delete a member")
+
+        await self._assert_not_last_admin(member, org_id)
+
         from app.models.base import utcnow
         member.deleted_at = utcnow()
         member.status = "inactive"
@@ -546,6 +745,42 @@ class MemberService:
         await self.db.flush()
         await self.db.commit()
         logger.info("member_removed", member_id=str(member_id))
+
+    # ── Join Requests ─────────────────────────────────────────────────────────
+    # Self-service "request access to an existing organization" — the normal
+    # user is never auto-joined; this creates a pending membership that an org
+    # admin must explicitly approve (PATCH .../members/{id} with status=active)
+    # or deny (DELETE .../members/{id}), same as any other member action.
+
+    async def request_join(self, user_id: UUID, org_name: str) -> JoinRequestStatusResponse:
+        """Delegates to JoinRequestService (the single implementation)."""
+        from app.services.join_request_service import JoinRequestService
+
+        user = await self.db.get(User, user_id)
+        if user is None:
+            raise NotFoundException("User not found")
+        result = await JoinRequestService(self.db).request_join(user, org_name)
+        return JoinRequestStatusResponse(org_name=result["org_name"], status="pending")
+
+    async def get_my_join_request(self, user_id: UUID) -> JoinRequestStatusResponse:
+        from sqlalchemy import select
+
+        result = await self.db.execute(
+            select(OrganizationMember, Organization)
+            .join(Organization, Organization.id == OrganizationMember.org_id)
+            .where(
+                OrganizationMember.user_id == user_id,
+                OrganizationMember.status == "pending",
+                OrganizationMember.deleted_at.is_(None),
+            )
+            .order_by(OrganizationMember.joined_at.desc())
+            .limit(1)
+        )
+        row = result.first()
+        if not row:
+            return JoinRequestStatusResponse(org_name=None, status=None)
+        member, org = row
+        return JoinRequestStatusResponse(org_name=org.name, status=member.status)
 
 
 # ── Permission Cache Helpers (for external use) ───────────────────────────────

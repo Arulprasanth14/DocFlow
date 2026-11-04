@@ -140,12 +140,28 @@ class SessionInfo(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PendingRequestInfo(BaseModel):
+    """A join request the user has submitted and is awaiting a decision."""
+    org_name: str
+    requested_at: datetime | None = None
+
+
 class LoginResponse(BaseModel):
-    """Response for successful login / register — contains access token + user context."""
+    """
+    Response for successful login / register — access token + user context.
+
+    `state` is the ONLY thing the frontend should route on:
+      HAS_ORG          -> org_membership is set; go to the dashboard
+      PENDING_REQUEST  -> show "waiting for approval"; pending_request is set
+      NO_ORG           -> show Create / Join organization
+    These are normal outcomes, returned with HTTP 200 - never as errors.
+    """
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
     org_membership: OrgMembershipResponse | None
+    state: str = "NO_ORG"
+    pending_request: PendingRequestInfo | None = None
 
 
 class TokenRefreshResponse(BaseModel):

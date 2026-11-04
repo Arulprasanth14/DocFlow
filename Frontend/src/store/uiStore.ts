@@ -24,6 +24,7 @@ interface UIState {
   closeModal: () => void;
   setGlobalLoading: (loading: boolean) => void;
   toggleTheme: () => void;
+  setTheme: (theme: 'dark' | 'light') => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -32,7 +33,7 @@ export const useUIStore = create<UIState>()(
       sidebarCollapsed: false,
       activeModal: null,
       globalLoading: false,
-      theme: 'dark',
+      theme: 'light',
 
       toggleSidebar: () =>
         set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
@@ -47,10 +48,22 @@ export const useUIStore = create<UIState>()(
 
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+
+      setTheme: (theme) => set({ theme }),
     }),
     {
       name: 'docflow-ui',
       storage: createJSONStorage(() => localStorage),
+      version: 2,
+      // Bumping to version 2 forces a migration for any user who had
+      // the old 'dark' default persisted — resets them to 'light'.
+      migrate: (persistedState) => {
+        const state = persistedState as Partial<UIState>;
+        return {
+          ...state,
+          theme: 'light' as const,
+        };
+      },
       partialize: (state) => ({
         sidebarCollapsed: state.sidebarCollapsed,
         theme: state.theme,

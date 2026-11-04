@@ -176,7 +176,7 @@ export default function DocumentTypesAdminPage() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+          <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
             Document Types & Form Schemas
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -249,7 +249,7 @@ export default function DocumentTypesAdminPage() {
                           fontWeight: 700,
                           fontSize: '0.85rem',
                           color: 'var(--color-primary-400)',
-                          background: 'hsla(217, 100%, 50%, 0.1)',
+                          background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
                           padding: '4px 8px',
                           borderRadius: 'var(--radius-sm)',
                         }}
@@ -309,8 +309,8 @@ export default function DocumentTypesAdminPage() {
                           cursor: 'pointer',
                           border: 'none',
                           background: dt.is_active
-                            ? 'hsla(150, 80%, 40%, 0.15)'
-                            : 'hsla(0, 0%, 50%, 0.15)',
+                            ? 'color-mix(in srgb, var(--status-approved) 15%, transparent)'
+                            : 'color-mix(in srgb, var(--muted-foreground) 15%, transparent)',
                           color: dt.is_active
                             ? 'var(--color-success-400)'
                             : 'var(--text-muted)',
@@ -359,7 +359,7 @@ export default function DocumentTypesAdminPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.75)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(6px)',
                 zIndex: 300,
               }}
@@ -382,7 +382,7 @@ export default function DocumentTypesAdminPage() {
                 flexDirection: 'column',
                 borderRadius: 'var(--radius-xl)',
                 overflow: 'hidden',
-                boxShadow: '0 24px 64px rgba(0, 0, 0, 0.5)',
+                boxShadow: 'var(--shadow-lg)',
               }}
               className="glass-card"
             >
@@ -436,7 +436,7 @@ export default function DocumentTypesAdminPage() {
                     <div
                       style={{
                         padding: '12px 16px',
-                        background: 'hsla(0, 84%, 60%, 0.12)',
+                        background: 'color-mix(in srgb, var(--destructive) 12%, transparent)',
                         border: '1px solid var(--color-error-400)',
                         borderRadius: 'var(--radius-md)',
                         color: 'var(--color-error-400)',

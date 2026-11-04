@@ -47,12 +47,27 @@ class User(BaseModel):
         UUID(as_uuid=True), ForeignKey("departments.id", use_alter=True, name="fk_user_department"), nullable=True, index=True,
     )
 
+    # ── Reporting line (Workflow module WF-STG-23/24) ──────────────────────
+    # The "Submitter's Manager" approver rule needs a real per-person manager.
+    # Before this column the rule resolved to `departments.head_user_id`, so an
+    # entire department shared one approver and a department head was their own
+    # manager (which BR-05 forbids). NULL means "not set": resolution then
+    # falls back to the department head, so no existing organization breaks,
+    # and only a submitter with neither is blocked at preflight (WF-STG-24).
+    # Self-reference needs use_alter: users is created before the FK is added.
+    manager_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", use_alter=True, name="fk_user_manager"),
+        nullable=True, index=True,
+    )
+
     # Relationships
     sessions: Mapped[list["Session"]] = relationship(
         "Session", back_populates="user", lazy="noload", cascade="all, delete-orphan"
     )
     memberships: Mapped[list["OrganizationMember"]] = relationship(  # type: ignore[name-defined]
-        "OrganizationMember", back_populates="user", lazy="noload"
+        "OrganizationMember", back_populates="user", lazy="noload",
+        foreign_keys="OrganizationMember.user_id",
     )
 
 

@@ -27,11 +27,13 @@ firebase-admin==6.5.0
 redis[hiredis]==5.1.1
 celery[redis]==5.4.0
 celery[beat]==5.4.0
+kombu==5.6.2
 flower==2.0.1
 
 # --- Storage ---
 boto3==1.35.36
 minio==7.2.9
+cloudinary==1.41.0
 
 # --- HTTP ---
 httpx==0.27.2
@@ -43,28 +45,34 @@ limits==3.13.0
 # --- Logging & Observability ---
 structlog==24.4.0
 sentry-sdk[fastapi]==2.16.0
-opentelemetry-api==1.27.0
-opentelemetry-sdk==1.27.0
-opentelemetry-instrumentation-fastapi==0.48b0
-opentelemetry-instrumentation-sqlalchemy==0.48b0
-opentelemetry-exporter-otlp==1.27.0
-prometheus-client==0.21.0
-prometheus-fastapi-instrumentator==7.0.0
 
 # --- AI / ML ---
-anthropic==0.34.2
-openai==1.51.0
+google-generativeai==0.8.1
 langchain==0.3.1
-langchain-anthropic==0.2.3
-langchain-openai==0.2.1
-tiktoken==0.7.0
+langchain-google-genai==2.0.1
 
-# --- OCR ---
+# --- OCR / document text extraction ---
 pytesseract==0.3.13
+pdf2image==1.17.0
 pdfplumber==0.11.4
 python-docx==1.1.2
 openpyxl==3.1.5
 Pillow==10.4.0
+# PDF text extraction for the Agent's knowledge ingestion (app/ai/ingestion.py)
+pypdf==6.20.1
+
+# PDF GENERATION for the immutable submission snapshot (FR-13.8) and document
+# export (FR-6.7). Pure Python, no system packages. Noto Sans (SIL OFL 1.1) is
+# bundled in app/assets/fonts because reportlab's own Vera family has only 283
+# glyphs and cannot render the rupee sign, Greek or Cyrillic.
+reportlab==4.2.5
+
+# --- TLS ---
+# Routes Python's certificate verification through the OS trust store so a
+# private/corporate root CA is honoured. Required on TLS-inspecting networks,
+# where the bundled certifi roots cannot verify the presented chain and every
+# outbound HTTPS call (e.g. to the Gemini API) fails. See app/core/trust.py.
+truststore==0.10.5
 
 # --- Security / Sanitisation ---
 bleach==6.1.0

@@ -19,6 +19,21 @@ from app.config import settings
 
 def configure_logging() -> None:
     """Configure structlog for the application. Call once on startup."""
+    # Windows' default console codepage (cp1252) can't encode arbitrary
+    # Unicode (e.g. a checkmark, an emoji, a non-Latin name in an error
+    # message). Without this, a single non-ASCII character anywhere in a
+    # logged string raises UnicodeEncodeError and crashes the ENTIRE
+    # application — this has already taken the whole server down once
+    # (main.py's startup log line). Force UTF-8 on stdout/stderr so a
+    # future non-ASCII log line degrades the character, not the process.
+    import sys
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

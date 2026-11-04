@@ -16,12 +16,23 @@ import {
 } from '@/hooks/useOrg';
 import type { MemberDetail } from '@/types';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { useAuthStore } from '@/store/authStore';
+import { useQueryClient } from '@tanstack/react-query';
+import { orgsApi } from '@/lib/api/orgs';
 
 interface InviteFormData {
   email: string;
   name: string;
   role_id: string;
   dept_id: string;
+  password: string;
+}
+
+function generatePassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const bytes = new Uint32Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => chars[b % chars.length]).join('');
 }
 
 interface EditMemberFormData {
@@ -35,6 +46,7 @@ export default function MembersPage() {
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
   const [deptFilter, setDeptFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
 
   const { data: membersData, isLoading: membersLoading } = useMembers({
     page,
@@ -42,10 +54,20 @@ export default function MembersPage() {
     search: search || undefined,
     role_id: roleFilter || undefined,
     dept_id: deptFilter || undefined,
+    status: statusFilter || undefined,
   });
 
   const { data: roles = [] } = useRoles();
   const { data: depts = [] } = useDepartments(true);
+
+  // §2.1/2.2/13.3: the Main Administrator can add Worker, Trainee, or HR;
+  // HR can add only Worker/Trainee and can never delete a member or touch
+  // an HR/Main-Admin member's role. Backend (org_service.py) enforces this
+  // regardless of what the UI shows — this filtering is for usability, not
+  // the authorization boundary itself.
+  const hasRole = useAuthStore((s) => s.hasRole);
+  const isMainAdmin = useAuthStore((s) => s.user?.is_superadmin) || hasRole('admin');
+  const assignableRoles = roles.filter((r) => r.name !== 'admin' && (isMainAdmin || r.name !== 'hr'));
 
   const inviteMember = useInviteMember();
   const updateMember = useUpdateMember();
@@ -55,7 +77,8 @@ export default function MembersPage() {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [selectedMember, setSelectedMember] = useState<MemberDetail | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  
+  const [newCredentials, setNewCredentials] = useState<{ email: string; password: string } | null>(null);
+
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   const [confirmState, setConfirmState] = useState<{ id: string; email: string } | null>(null);
@@ -64,6 +87,7 @@ export default function MembersPage() {
     register: registerInvite,
     handleSubmit: handleInviteSubmit,
     reset: resetInvite,
+    setValue: setInviteValue,
   } = useForm<InviteFormData>();
 
   const {
@@ -89,8 +113,9 @@ export default function MembersPage() {
     resetInvite({
       email: '',
       name: '',
-      role_id: roles[0]?.id || '',
+      role_id: assignableRoles[0]?.id || '',
       dept_id: '',
+      password: generatePassword(),
     });
     setInviteModalOpen(true);
   };
@@ -102,10 +127,13 @@ export default function MembersPage() {
         name: data.name || undefined,
         role_id: data.role_id,
         dept_id: data.dept_id || null,
+        password: data.password,
       });
       setInviteModalOpen(false);
-      setSuccessMsg(`Invited ${data.email} successfully.`);
-      setTimeout(() => setSuccessMsg(null), 4000);
+      // There's no email-sending infrastructure for an invite link — these
+      // are the only credentials the new member will ever see, so show them
+      // once here for the admin to copy and relay out of band.
+      setNewCredentials({ email: data.email, password: data.password });
     } catch (e: any) {
       setInviteError(e.message || 'Failed to send invitation');
     }
@@ -144,6 +172,61 @@ export default function MembersPage() {
     setConfirmState({ id: member.id, email });
   };
 
+  const [approveError, setApproveError] = useState<string | null>(null);
+
+  // Join requests: accepting REQUIRES choosing a role (and any one admin/HR
+  // can decide - first decision wins, the server answers 409 to the rest).
+  const [acceptFor, setAcceptFor] = useState<MemberDetail | null>(null);
+  const [acceptRoleId, setAcceptRoleId] = useState('');
+  const queryClient = useQueryClient();
+
+  const refreshMembers = () => {
+    queryClient.invalidateQueries({ queryKey: ['org', 'members'] });
+    queryClient.invalidateQueries({ queryKey: ['members'] });
+    queryClient.invalidateQueries({ queryKey: ['org'] });
+  };
+
+  // Roles an approver may hand out from a request: never Main Admin; HR only
+  // if the reviewer is the Main Admin (the server enforces the same rule).
+  const joinAssignableRoles = roles.filter(
+    (r) => r.name === 'worker' || r.name === 'trainee' || (r.name === 'hr' && isMainAdmin),
+  );
+
+  const onApproveRequest = (member: MemberDetail) => {
+    setApproveError(null);
+    setAcceptFor(member);
+    setAcceptRoleId(joinAssignableRoles.find((r) => r.name === 'worker')?.id ?? joinAssignableRoles[0]?.id ?? '');
+  };
+
+  const confirmAccept = async () => {
+    if (!acceptFor || !acceptRoleId) return;
+    const target = acceptFor;
+    try {
+      const res = await orgsApi.acceptJoinRequest(target.id, acceptRoleId);
+      setSuccessMsg(`Admitted ${target.user?.email || 'request'} as ${res.role}. They've been emailed.`);
+      setTimeout(() => setSuccessMsg(null), 4000);
+    } catch (e: any) {
+      // 409 = someone else already handled it; the message names who.
+      setApproveError(e.message || 'Failed to accept request');
+    } finally {
+      setAcceptFor(null);
+      refreshMembers();
+    }
+  };
+
+  const onDenyRequest = async (member: MemberDetail) => {
+    setApproveError(null);
+    try {
+      await orgsApi.rejectJoinRequest(member.id);
+      setSuccessMsg(`Rejected ${member.user?.email || 'request'}. They've been emailed.`);
+      setTimeout(() => setSuccessMsg(null), 4000);
+    } catch (e: any) {
+      setApproveError(e.message || 'Failed to reject request');
+    } finally {
+      refreshMembers();
+    }
+  };
+
   const executeRemove = async () => {
     if (!confirmState) return;
     try {
@@ -170,7 +253,7 @@ export default function MembersPage() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+          <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
             Organization Members
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -192,13 +275,83 @@ export default function MembersPage() {
               marginBottom: '20px',
               padding: '12px 16px',
               borderRadius: 'var(--radius-md)',
-              background: 'hsla(145, 70%, 45%, 0.1)',
-              border: '1px solid hsla(145, 70%, 45%, 0.25)',
+              background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
               color: 'var(--color-success-400)',
               fontSize: '0.875rem',
             }}
           >
             ✓ {successMsg}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {approveError && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            style={{
+              marginBottom: '20px', padding: '12px 16px', borderRadius: 'var(--radius-md)',
+              background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
+              color: 'var(--color-error-400)', fontSize: '0.875rem',
+            }}
+          >
+            {approveError}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* New-member credentials — shown once, right after invite. The member
+          gets a real email letting them know their account was created, but
+          it deliberately never contains the password (never emailed in
+          plaintext) — this is still the only place the admin sees it, to
+          relay out of band. */}
+      <AnimatePresence>
+        {newCredentials && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            style={{
+              marginBottom: '20px',
+              padding: '16px 20px',
+              borderRadius: 'var(--radius-md)',
+              background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+              <div>
+                <p style={{ fontWeight: 700, color: 'var(--text-primary)', fontSize: '0.9rem', marginBottom: '6px' }}>
+                  Member added — share these credentials with them
+                </p>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '10px' }}>
+                  There's no automatic invite email. Send this password to{' '}
+                  {newCredentials.email} yourself (chat, in person, etc.) — it won't be shown again.
+                </p>
+                <div style={{ display: 'flex', gap: '16px', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                  <span><strong>Email:</strong> {newCredentials.email}</span>
+                  <span><strong>Password:</strong> {newCredentials.password}</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(
+                      `Email: ${newCredentials.email}\nPassword: ${newCredentials.password}`
+                    ).catch(() => {});
+                  }}
+                >
+                  Copy
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setNewCredentials(null)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -267,12 +420,30 @@ export default function MembersPage() {
           </select>
         </div>
 
-        {(search || roleFilter || deptFilter) && (
+        {/* Status Filter */}
+        <div style={{ flex: '0 1 200px' }}>
+          <select
+            className="input"
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="pending">Pending Requests</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+
+        {(search || roleFilter || deptFilter || statusFilter) && (
           <button
             onClick={() => {
               setSearch('');
               setRoleFilter('');
               setDeptFilter('');
+              setStatusFilter('');
               setPage(1);
             }}
             className="btn btn-ghost btn-sm"
@@ -322,6 +493,13 @@ export default function MembersPage() {
                   const u = member.user;
                   const r = member.role;
                   const dept = depts.find((d) => d.id === member.dept_id);
+                  // HR cannot delete any member, or edit an HR/Main-Admin
+                  // member's role (backend-enforced in org_service.py;
+                  // hidden here too so HR isn't offered an action that
+                  // will just 403).
+                  const targetIsProtected = r?.name === 'admin' || r?.name === 'hr';
+                  const canEditThisMember = isMainAdmin || !targetIsProtected;
+                  const canRemoveThisMember = isMainAdmin;
                   const initials = u?.name
                     ? u.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()
                     : u?.email?.[0]?.toUpperCase() || '?';
@@ -379,8 +557,8 @@ export default function MembersPage() {
                             fontSize: '0.78rem',
                             fontWeight: 600,
                             color: 'var(--color-primary-300)',
-                            background: 'hsla(217, 100%, 50%, 0.12)',
-                            border: '1px solid hsla(217, 100%, 50%, 0.25)',
+                            background: 'color-mix(in srgb, var(--primary) 12%, transparent)',
+                            border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
                             padding: '3px 10px',
                             borderRadius: 'var(--radius-full)',
                           }}
@@ -406,8 +584,8 @@ export default function MembersPage() {
                             borderRadius: 'var(--radius-full)',
                             background:
                               member.status === 'active'
-                                ? 'hsla(145, 70%, 50%, 0.12)'
-                                : 'hsla(38, 92%, 50%, 0.12)',
+                                ? 'color-mix(in srgb, var(--status-approved) 14%, transparent)'
+                                : 'color-mix(in srgb, var(--status-pending) 14%, transparent)',
                             color:
                               member.status === 'active'
                                 ? 'var(--color-success-400)'
@@ -426,20 +604,47 @@ export default function MembersPage() {
                       {/* Actions */}
                       <td style={{ padding: '16px 20px', textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: '8px' }}>
-                          <button
-                            onClick={() => openEditModal(member)}
-                            className="btn btn-ghost btn-sm"
-                            style={{ fontSize: '0.8rem' }}
-                          >
-                            Edit Role/Dept
-                          </button>
-                          <button
-                            onClick={() => onRemoveMember(member)}
-                            className="btn btn-ghost btn-sm"
-                            style={{ fontSize: '0.8rem', color: 'var(--color-error-400)' }}
-                          >
-                            Remove
-                          </button>
+                          {member.status === 'pending' ? (
+                            <>
+                              <button
+                                onClick={() => onApproveRequest(member)}
+                                className="btn btn-ghost btn-sm"
+                                style={{ fontSize: '0.8rem', color: 'var(--color-success-400)' }}
+                                disabled={updateMember.isPending}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => onDenyRequest(member)}
+                                className="btn btn-ghost btn-sm"
+                                style={{ fontSize: '0.8rem', color: 'var(--color-error-400)' }}
+                                disabled={removeMember.isPending}
+                              >
+                                Deny
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {canEditThisMember && (
+                                <button
+                                  onClick={() => openEditModal(member)}
+                                  className="btn btn-ghost btn-sm"
+                                  style={{ fontSize: '0.8rem' }}
+                                >
+                                  Edit Role/Dept
+                                </button>
+                              )}
+                              {canRemoveThisMember && (
+                                <button
+                                  onClick={() => onRemoveMember(member)}
+                                  className="btn btn-ghost btn-sm"
+                                  style={{ fontSize: '0.8rem', color: 'var(--color-error-400)' }}
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -492,7 +697,7 @@ export default function MembersPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -526,8 +731,8 @@ export default function MembersPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',
@@ -589,6 +794,45 @@ export default function MembersPage() {
                   <div style={{ marginBottom: '16px' }}>
                     <label
                       style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        fontSize: '0.8125rem',
+                        fontWeight: 600,
+                        color: 'var(--text-secondary)',
+                        marginBottom: '6px',
+                      }}
+                    >
+                      Initial Password
+                      <button
+                        type="button"
+                        onClick={() => setInviteValue('password', generatePassword())}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: 'var(--color-primary-400)', fontSize: '0.75rem', fontWeight: 600, padding: 0,
+                        }}
+                      >
+                        Generate new
+                      </button>
+                    </label>
+                    <input
+                      type="text"
+                      className="input"
+                      style={{ fontFamily: 'monospace' }}
+                      required
+                      minLength={8}
+                      {...registerInvite('password')}
+                    />
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '6px' }}>
+                      They'll get an email letting them know their account is ready —
+                      but it never includes the password, so you'll still need to
+                      share this with them yourself.
+                    </p>
+                  </div>
+
+                  <div style={{ marginBottom: '16px' }}>
+                    <label
+                      style={{
                         display: 'block',
                         fontSize: '0.8125rem',
                         fontWeight: 600,
@@ -599,7 +843,7 @@ export default function MembersPage() {
                       Role
                     </label>
                     <select className="input" required {...registerInvite('role_id')}>
-                      {roles.map((r) => (
+                      {assignableRoles.map((r) => (
                         <option key={r.id} value={r.id}>
                           {r.name} {r.is_system ? '(System)' : ''}
                         </option>
@@ -660,7 +904,7 @@ export default function MembersPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -697,8 +941,8 @@ export default function MembersPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',
@@ -729,7 +973,7 @@ export default function MembersPage() {
                       Assigned Role
                     </label>
                     <select className="input" required {...registerEdit('role_id')}>
-                      {roles.map((r) => (
+                      {assignableRoles.map((r) => (
                         <option key={r.id} value={r.id}>
                           {r.name} {r.is_system ? '(System)' : ''}
                         </option>
@@ -800,6 +1044,29 @@ export default function MembersPage() {
           </>
         )}
       </AnimatePresence>
+
+      <ConfirmDialog
+        open={!!acceptFor}
+        title="Admit to organization"
+        message={`Choose the role ${acceptFor?.user?.name || acceptFor?.user?.email || 'this person'} will have. They'll be emailed as soon as you confirm.`}
+        confirmLabel="Admit"
+        confirmDisabled={!acceptRoleId}
+        onConfirm={confirmAccept}
+        onCancel={() => setAcceptFor(null)}
+      >
+        <select
+          className="input"
+          value={acceptRoleId}
+          onChange={(e) => setAcceptRoleId(e.target.value)}
+          style={{ width: '100%' }}
+        >
+          {joinAssignableRoles.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmState !== null}

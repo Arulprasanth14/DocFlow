@@ -94,27 +94,44 @@ export function useRegister() {
       password,
       name,
       orgName,
+      joinOrgName,
     }: {
       email: string;
       password: string;
       name: string;
+      /** Create a brand-new organization and become its admin. */
       orgName?: string;
+      /**
+       * Request access to an existing organization by name — NOT an instant
+       * join. Creates a pending membership an admin must approve. Mutually
+       * exclusive with orgName; exactly one (or neither, for a bare account
+       * with no org yet) should be set by the caller.
+       */
+      joinOrgName?: string;
     }) => {
       // 1. Create Firebase user
-      await registerWithFirebaseEmail(email, password);
-      
-      // 2. We don't await the backend sync here because onAuthStateChanged
-      // will fire and do it. However, if they provided an orgName, we might
-      // need to ensure it's passed.
-      // Wait, AuthContext POSTs to /users/me/sync without org_name for Google.
-      // For registration, we should explicitly call it to pass the orgName.
-      
-      // Actually, since onAuthStateChanged is asynchronous, doing a POST here
-      // might race with AuthProvider's POST.
-      // Since they just created the account, AuthProvider's POST will act as the creation.
-      // Let's import apiClient to do the specific sync call with org_name if needed.
-      const apiClient = (await import('@/lib/api/client')).default;
-      await apiClient.post('/users/me/sync', { name, org_name: orgName });
+      const fbUser = await registerWithFirebaseEmail(email, password);
+
+      // 2. Create the account (and organization, if requested) and obtain a
+      // DocFlow session — via the shared exchange, which sends the FIREBASE
+      // token to /users/me/sync. The previous code posted here with the
+      // default auth header (a DocFlow token, or nothing at that moment),
+      // which that endpoint cannot verify, and it raced AuthProvider's own
+      // exchange that could finish first with "no organization".
+      const { syncAndExchange } = await import('@/lib/auth/syncProfile');
+      const { tokenStore } = await import('@/lib/api/client');
+      const loginData = await syncAndExchange(fbUser, orgName?.trim() || undefined, name);
+      tokenStore.set(loginData.access_token);
+      useAuthStore
+        .getState()
+        .setAuth(loginData.user, loginData.access_token, loginData.org_membership);
+
+      // 3. "Request access" path: submit a pending join request now that
+      // the account exists. Never auto-joins — an admin must approve it.
+      if (joinOrgName) {
+        const { orgsApi } = await import('@/lib/api/orgs');
+        await orgsApi.requestJoin(joinOrgName);
+      }
     },
     onError: (err: Error & { code?: string }) => {
       const code = err.code ?? '';
@@ -132,7 +149,12 @@ export function useLogout() {
     mutationFn: async () => {
       // Sign out of Firebase. AuthProvider clears Zustand and tokenStore.
       await firebaseSignOutUser();
-      
+
+      // Drop locally cached draft content so it can't leak to the next user
+      // signing in on this device.
+      const { clearAllDraftsLocal } = await import('@/lib/offline/draftCache');
+      await clearAllDraftsLocal();
+
       // Best effort backend logout to clear session row (if we had one)
       const { logout: backendLogout } = await import('@/lib/api/auth');
       await backendLogout().catch(() => {});
@@ -158,6 +180,8 @@ export function useLogoutAll() {
       const { logoutAll: backendLogoutAll } = await import('@/lib/api/auth');
       await backendLogoutAll().catch(() => {});
       await firebaseSignOutUser();
+      const { clearAllDraftsLocal } = await import('@/lib/offline/draftCache');
+      await clearAllDraftsLocal();
     },
     onSuccess: () => {
       queryClient.clear();

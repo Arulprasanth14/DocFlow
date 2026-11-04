@@ -6,7 +6,6 @@ Presigned upload flow: Client → POST /uploads/presign → Client PUT → POST 
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -35,6 +34,57 @@ def _get_s3_client():
     return boto3.client("s3", **kwargs)
 
 
+# ── encryption at rest (FR-9.9) ───────────────────────────────────────────────
+#
+# Applied to the writes the backend performs itself. A presigned PUT is not one
+# of them: signing an encryption header there obliges the browser to echo it
+# exactly, and a mismatch — or a MinIO with no KMS — turns every upload into a
+# signature error. Those objects are covered by the bucket's default
+# encryption, which is a deployment setting, and `describe_bucket_encryption`
+# below exists so its absence is visible rather than assumed.
+
+
+def _sse_params() -> dict[str, Any]:
+    """Encryption arguments for a server-side write, or {} when switched off."""
+    algorithm = (settings.S3_SSE or "").strip()
+    if not algorithm:
+        return {}
+    params: dict[str, Any] = {"ServerSideEncryption": algorithm}
+    if algorithm == "aws:kms" and settings.S3_SSE_KMS_KEY_ID:
+        params["SSEKMSKeyId"] = settings.S3_SSE_KMS_KEY_ID
+    return params
+
+
+def describe_bucket_encryption(bucket: str) -> dict[str, Any]:
+    """
+    What the bucket's default encryption actually is.
+
+    Returns `{"enabled": bool, "detail": str}`. Never raises: this is used to
+    report a fact at startup, and a storage backend that does not implement the
+    call (older MinIO returns NotImplemented) must not stop the app from
+    booting.
+    """
+    try:
+        client = _get_s3_client()
+        res = client.get_bucket_encryption(Bucket=bucket)
+        rules = res.get("ServerSideEncryptionConfiguration", {}).get("Rules", [])
+        algorithms = [
+            r.get("ApplyServerSideEncryptionByDefault", {}).get("SSEAlgorithm")
+            for r in rules
+        ]
+        algorithms = [a for a in algorithms if a]
+        if algorithms:
+            return {"enabled": True, "detail": ", ".join(algorithms)}
+        return {"enabled": False, "detail": "no default rule"}
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "unknown")
+        if code in {"ServerSideEncryptionConfigurationNotFoundError", "NoSuchBucket"}:
+            return {"enabled": False, "detail": code}
+        return {"enabled": False, "detail": f"could not be read ({code})"}
+    except Exception as exc:  # noqa: BLE001 — a reporting call must never raise
+        return {"enabled": False, "detail": f"could not be read ({type(exc).__name__})"}
+
+
 # ── Allowed File Types ─────────────────────────────────────────────────────────
 ALLOWED_MIME_TYPES: set[str] = {
     "application/pdf",
@@ -48,6 +98,12 @@ ALLOWED_MIME_TYPES: set[str] = {
     "image/webp",
     "text/plain",
     "text/csv",
+    # FR-9.1 import formats. Added for template import; the importer
+    # decides what it can actually read, this set only decides what may
+    # be stored at all.
+    "application/rtf",
+    "text/rtf",
+    "application/vnd.oasis.opendocument.text",
 }
 
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -136,3 +192,189 @@ def delete_object(bucket: str, storage_key: str) -> None:
 def compute_checksum(data: bytes) -> str:
     """Compute SHA-256 checksum of file bytes."""
     return hashlib.sha256(data).hexdigest()
+
+
+def download_object(bucket: str, storage_key: str, max_bytes: int | None = None) -> bytes:
+    """
+    Read an object back into memory.
+
+    Uploads go client-direct to storage via a presigned PUT, so this is how the
+    backend gets hold of the bytes it never saw — currently for the antivirus /
+    macro pass in app/services/antivirus. `max_bytes` caps the read so a huge
+    object cannot be pulled into the API process by accident; the caller is
+    expected to treat a cap hit as "not scanned" rather than "clean".
+    """
+    try:
+        client = _get_s3_client()
+        obj = client.get_object(Bucket=bucket, Key=storage_key)
+        body = obj["Body"]
+        data = body.read(max_bytes + 1) if max_bytes is not None else body.read()
+        body.close()
+        return data
+    except ClientError as exc:
+        raise ServiceUnavailableException("Storage") from exc
+
+
+def replace_object(bucket: str, storage_key: str, data: bytes, mime_type: str) -> None:
+    """
+    Overwrite an object in place — used when the macro stripper rewrites a
+    document, so the only copy anyone can download is the cleaned one.
+    """
+    try:
+        client = _get_s3_client()
+        client.put_object(
+            Bucket=bucket, Key=storage_key, Body=data, ContentType=mime_type,
+            **_sse_params(),  # FR-9.9
+        )
+    except ClientError as exc:
+        raise ServiceUnavailableException("Storage") from exc
+
+
+# ── Resumable upload (FR-3.2) ─────────────────────────────────────────────────
+#
+# S3/MinIO multipart upload. The reason to use it rather than invent a chunk
+# protocol is that the *server* needs no state of its own to resume: S3 already
+# remembers which parts of an upload id have landed, so `list_parts` is the
+# resume answer and there is no session table, no Redis key and no temp file to
+# expire. The client keeps `{upload_id, storage_key}` (localStorage) and can
+# come back to it after a network drop, a reload or a closed tab.
+#
+# Nothing here calls into the single-PUT path above; small files keep using it.
+
+#: Part size. S3 requires every part except the last to be >= 5 MB, and allows
+#: at most 10,000 parts. 8 MB keeps a 50 MB upload (the cap in validate_file)
+#: to seven parts, so a dropped connection costs at most 8 MB of re-upload.
+MULTIPART_PART_SIZE = 8 * 1024 * 1024
+
+#: Below this, a resumable upload is not worth its extra round trips.
+MULTIPART_MIN_BYTES = MULTIPART_PART_SIZE
+
+
+class UploadSessionGone(Exception):
+    """The multipart upload id no longer exists (completed, aborted, expired)."""
+
+
+def _is_missing_upload(exc: ClientError) -> bool:
+    return exc.response.get("Error", {}).get("Code") in {"NoSuchUpload", "NoSuchKey", "404"}
+
+
+def create_multipart_upload(bucket: str, storage_key: str, mime_type: str) -> str:
+    """Begin a multipart upload and return its upload id."""
+    try:
+        client = _get_s3_client()
+        res = client.create_multipart_upload(
+            Bucket=bucket, Key=storage_key, ContentType=mime_type,
+            # FR-9.9 — set at initiation; every part inherits it, so no
+            # per-part header is needed and the browser is unaffected.
+            **_sse_params(),
+        )
+        return str(res["UploadId"])
+    except ClientError as exc:
+        raise ServiceUnavailableException("Storage") from exc
+
+
+def presign_upload_part(
+    bucket: str,
+    storage_key: str,
+    upload_id: str,
+    part_number: int,
+    expires_in_seconds: int = 3600,
+) -> str:
+    """
+    Presigned PUT URL for one part.
+
+    ContentType is deliberately not signed here: the browser sets no content
+    type on a Blob slice, and a signed header the client cannot reproduce makes
+    every part fail with a signature mismatch.
+    """
+    try:
+        client = _get_s3_client()
+        return client.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": bucket,
+                "Key": storage_key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=expires_in_seconds,
+        )
+    except ClientError as exc:
+        raise ServiceUnavailableException("Storage") from exc
+
+
+def list_multipart_parts(bucket: str, storage_key: str, upload_id: str) -> list[dict[str, Any]]:
+    """
+    Which parts storage already holds, as `[{"part_number", "etag", "size"}]`.
+
+    This is what makes resume work without the client having kept anything but
+    the upload id — and it is also where `complete_multipart_upload` gets its
+    ETags, so the browser never has to read the ETag response header (which
+    requires a CORS ExposeHeaders rule that is easy to forget and silently
+    breaks the upload when it is missing).
+    """
+    parts: list[dict[str, Any]] = []
+    try:
+        client = _get_s3_client()
+        marker = 0
+        while True:
+            res = client.list_parts(
+                Bucket=bucket, Key=storage_key, UploadId=upload_id, PartNumberMarker=marker
+            )
+            for p in res.get("Parts", []):
+                parts.append(
+                    {
+                        "part_number": int(p["PartNumber"]),
+                        "etag": str(p["ETag"]),
+                        "size": int(p.get("Size", 0)),
+                    }
+                )
+            if not res.get("IsTruncated"):
+                break
+            marker = int(res.get("NextPartNumberMarker", 0))
+    except ClientError as exc:
+        if _is_missing_upload(exc):
+            raise UploadSessionGone(upload_id) from exc
+        raise ServiceUnavailableException("Storage") from exc
+    parts.sort(key=lambda p: p["part_number"])
+    return parts
+
+
+def complete_multipart_upload(
+    bucket: str, storage_key: str, upload_id: str, parts: list[dict[str, Any]]
+) -> None:
+    """Assemble the parts into the final object. `parts` must be sorted."""
+    if not parts:
+        raise UploadSessionGone(upload_id)
+    try:
+        client = _get_s3_client()
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=storage_key,
+            UploadId=upload_id,
+            MultipartUpload={
+                "Parts": [
+                    {"PartNumber": p["part_number"], "ETag": p["etag"]} for p in parts
+                ]
+            },
+        )
+    except ClientError as exc:
+        if _is_missing_upload(exc):
+            raise UploadSessionGone(upload_id) from exc
+        raise ServiceUnavailableException("Storage") from exc
+
+
+def abort_multipart_upload(bucket: str, storage_key: str, upload_id: str) -> None:
+    """
+    Discard an unfinished upload and the parts it has accumulated.
+
+    Aborting is best-effort on purpose: a cancelled upload must not leave the
+    user with an error, and an already-gone upload is the outcome we wanted.
+    """
+    try:
+        client = _get_s3_client()
+        client.abort_multipart_upload(Bucket=bucket, Key=storage_key, UploadId=upload_id)
+    except ClientError as exc:
+        if _is_missing_upload(exc):
+            return
+        raise ServiceUnavailableException("Storage") from exc
