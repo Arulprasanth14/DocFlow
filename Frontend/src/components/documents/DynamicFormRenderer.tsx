@@ -283,7 +283,7 @@ function renderFieldControl(
                     ? '1px solid var(--color-primary-500)'
                     : '1px solid var(--border-subtle)',
                   background: selected
-                    ? 'hsla(217, 100%, 50%, 0.15)'
+                    ? 'color-mix(in srgb, var(--primary) 15%, transparent)'
                     : 'var(--bg-overlay)',
                   color: selected
                     ? 'var(--color-primary-300)'

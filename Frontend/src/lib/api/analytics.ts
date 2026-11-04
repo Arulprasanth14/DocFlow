@@ -16,6 +16,9 @@ export interface PeriodParams {
   period?: ReportPeriod;
   year?: number;
   month?: number;
+  /** Index signature so this can be passed straight to apiClient's `params`
+   *  (Record<string, string | number | boolean | undefined>). */
+  [key: string]: string | number | boolean | undefined;
 }
 
 /** Which records the caller's role allowed into these figures (§2.5). */

@@ -8,7 +8,6 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, PostgresDsn, RedisDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,6 +71,14 @@ class Settings(BaseSettings):
     S3_BUCKET_EXPORTS: str = "docflow-exports"
     S3_BUCKET_OCR_INPUT: str = "docflow-ocr-input"
     S3_BUCKET_TEMPLATES: str = "docflow-templates"
+    # FR-9.9 — server-side encryption for objects the backend writes
+    # itself. "AES256" (SSE-S3) or "aws:kms". Empty means "do not ask
+    # for it", which is the default: on a MinIO without KMS configured,
+    # requesting SSE fails the write outright. Objects uploaded straight
+    # from the browser are covered by the bucket's default encryption
+    # instead — see the deployment checklist.
+    S3_SSE: str = ""
+    S3_SSE_KMS_KEY_ID: str = ""
 
     # ── AI ───────────────────────────────────────────────────────────────────
     # Provider-independent configuration. The Agent/RAG core never talks to a
@@ -101,6 +108,47 @@ class Settings(BaseSettings):
     # so switching models can never silently mix incompatible vector spaces.
     AI_EMBEDDING_MODEL: str = ""
     AI_EMBEDDING_DIM: int = 0        # 0 = use the provider default
+
+    # ── Upload safety (spec FR-3.3 / FR-9.8) ──────────────────────────────
+    # "structural" validates the container and strips Office macros but is NOT
+    # a virus scan — a file it passes is labelled "File checked", never
+    # "scanned". Set to "clamav" once a clamd service is reachable to get real
+    # signature scanning; "off" disables the pass entirely.
+    AV_SCANNER: Literal["structural", "clamav", "off"] = "structural"
+    CLAMAV_HOST: str = "clamav"
+    CLAMAV_PORT: int = 3310
+    AV_TIMEOUT_SECONDS: float = 30.0
+    # Files above this are recorded as "not checked" rather than pulled into
+    # the API process. Honest by design: unchecked is never reported as clean.
+    AV_MAX_INLINE_BYTES: int = 25 * 1024 * 1024
+
+    # ── Draft retention (spec FR-14.7) ────────────────────────────────────
+    # Drafts untouched for this long are SOFT-deleted by the nightly purge.
+    # 0 disables it. DRY RUN by default: the task reports what it would remove
+    # and changes nothing until this is explicitly turned off.
+    # Spec FR-14.9 says 90 days and "configurable"; 90 is now the default so
+    # the shipped behaviour matches the written policy.
+    DRAFT_RETENTION_DAYS: int = 90
+    # FR-14.9 / spec 24: warn the owner this many days before their draft is
+    # purged. 0 disables the notice (the purge still runs).
+    DRAFT_RETENTION_NOTICE_DAYS: int = 7
+    DRAFT_RETENTION_DRY_RUN: bool = True
+    DRAFT_RETENTION_BATCH_LIMIT: int = 500
+
+    # ── Expiry reminders (FR-13.4) ────────────────────────────────────────
+    # On by default: a reminder only ever fires for a document whose owner
+    # explicitly set an expiry date AND asked to be reminded, so the feature
+    # is opt-in per document already. The switch exists so an operator can
+    # stop the fan-out without a deploy.
+    # FR-14.9 — an "empty" draft is one nobody ever put anything into. These
+    # are created just by clicking a template, so they pile up fast and are
+    # purged on a much shorter clock than real abandoned work.
+    EMPTY_DRAFT_RETENTION_HOURS: int = 24
+
+    EXPIRY_REMINDERS_ENABLED: bool = True
+    # Log what would be sent without sending it. Useful on first rollout,
+    # when a batch of imported documents may all come due at once.
+    EXPIRY_REMINDERS_DRY_RUN: bool = False
 
     AI_REQUEST_TIMEOUT_SECONDS: float = 60.0
     AI_MAX_RETRIES: int = 2

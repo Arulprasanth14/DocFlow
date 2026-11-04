@@ -122,10 +122,10 @@ export default function OrganizationSettingsPage() {
               color: 'var(--color-primary-300)',
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
-              background: 'hsla(217, 100%, 50%, 0.1)',
+              background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
               padding: '4px 10px',
               borderRadius: 'var(--radius-full)',
-              border: '1px solid hsla(217, 100%, 50%, 0.25)',
+              border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
             }}
           >
             Admin Workspace
@@ -137,20 +137,23 @@ export default function OrganizationSettingsPage() {
               color: 'var(--color-success-400)',
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
-              background: 'hsla(145, 70%, 50%, 0.1)',
+              background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
               padding: '4px 10px',
               borderRadius: 'var(--radius-full)',
-              border: '1px solid hsla(145, 70%, 50%, 0.25)',
+              border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
             }}
           >
             Plan: {org.plan.toUpperCase()}
           </span>
         </div>
         <h1
+          data-page-title
+          className="font-display"
           style={{
-            fontSize: '2rem',
-            fontWeight: 800,
-            color: 'var(--text-primary)',
+            fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)',
+            fontWeight: 400,
+            lineHeight: 1.1,
+            color: 'var(--foreground)',
             marginBottom: '6px',
           }}
         >
@@ -446,8 +449,8 @@ export default function OrganizationSettingsPage() {
                   marginBottom: '20px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(145, 70%, 45%, 0.1)',
-                  border: '1px solid hsla(145, 70%, 45%, 0.25)',
+                  background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
                   color: 'var(--color-success-400)',
                   fontSize: '0.875rem',
                 }}
@@ -477,8 +480,8 @@ export default function OrganizationSettingsPage() {
         className="glass-card"
         style={{
           padding: '24px 28px',
-          borderColor: 'hsla(0, 82%, 55%, 0.3)',
-          background: 'hsla(0, 82%, 55%, 0.03)',
+          borderColor: 'color-mix(in srgb, var(--destructive) 30%, transparent)',
+          background: 'color-mix(in srgb, var(--destructive) 4%, transparent)',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
@@ -496,9 +499,9 @@ export default function OrganizationSettingsPage() {
             disabled
             title="Please contact Enterprise support to suspend your workspace"
             style={{
-              background: 'hsla(0, 82%, 55%, 0.15)',
+              background: 'color-mix(in srgb, var(--destructive) 15%, transparent)',
               color: 'var(--color-error-400)',
-              border: '1px solid hsla(0, 82%, 55%, 0.3)',
+              border: '1px solid color-mix(in srgb, var(--destructive) 30%, transparent)',
               cursor: 'not-allowed',
             }}
           >

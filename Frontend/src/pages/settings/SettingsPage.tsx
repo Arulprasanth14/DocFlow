@@ -8,10 +8,12 @@ import { useAuthStore } from '@/store/authStore';
 import {
   User, Bell, Palette, Shield, ChevronRight,
   Moon, Sun, Monitor, Check, Eye, EyeOff,
-  Save, AlertCircle, Building
+  Save, AlertCircle, Building, Sparkles
 } from 'lucide-react';
 import { useUIStore } from '@/store/uiStore';
 import { useMyOrg, useDepartments } from '@/hooks/useOrg';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { AISettingsSection } from '@/components/ai/AISettingsSection';
 
 const C = {
   card: 'var(--bg-elevated)', surface: 'var(--bg-surface)', overlay: 'var(--bg-overlay)',
@@ -23,12 +25,13 @@ const C = {
   muted: 'var(--text-muted)', disabled: 'var(--text-disabled)',
 };
 
-type SettingsSection = 'profile' | 'notifications' | 'appearance' | 'security';
+type SettingsSection = 'profile' | 'notifications' | 'appearance' | 'ai' | 'security';
 
 const sections: { key: SettingsSection; label: string; icon: React.ElementType; desc: string }[] = [
   { key: 'profile', label: 'Profile', icon: User, desc: 'Manage your personal information' },
   { key: 'notifications', label: 'Notifications', icon: Bell, desc: 'Control alerts and emails' },
   { key: 'appearance', label: 'Appearance', icon: Palette, desc: 'Theme and display settings' },
+  { key: 'ai', label: 'AI assistance', icon: Sparkles, desc: 'Turn AI suggestions on or off' },
   { key: 'security', label: 'Security', icon: Shield, desc: 'Password and session management' },
 ];
 
@@ -47,7 +50,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       <div style={{
         width: 18, height: 18, borderRadius: '50%', background: 'white',
         position: 'absolute', top: 3, left: checked ? 21 : 3,
-        transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+        transition: 'left 0.2s', boxShadow: 'var(--shadow-sm)',
       }} />
     </button>
   );
@@ -372,24 +375,24 @@ export default function SettingsPage() {
       case 'profile': return <ProfileSection user={user} />;
       case 'notifications': return <NotificationsSection />;
       case 'appearance': return <AppearanceSection />;
+      case 'ai': return <AISettingsSection />;
       case 'security': return <SecuritySection />;
     }
   };
 
   return (
-    <div style={{ position: 'relative', minHeight: '100%', overflow: 'hidden' }}>
-      <div style={{ position: 'absolute', bottom: -150, left: -100, width: 600, height: 600, borderRadius: 9999, background: 'radial-gradient(circle, rgba(37,99,235,0.12) 0%, transparent 68%)', filter: 'blur(200px)', zIndex: 1, pointerEvents: 'none' }} />
+    <div className="page-content" style={{ paddingTop: 24, minHeight: '100%' }}>
+      {/* Header */}
+      <PageHeader
+        breadcrumbs={[{ label: 'Account' }, { label: 'Settings' }]}
+        title="Settings"
+        description="Manage your account preferences and security"
+      />
 
-      <div style={{ position: 'relative', zIndex: 10, padding: 32 }}>
-        {/* Header */}
-        <div style={{ marginBottom: 28 }}>
-          <h1 style={{ fontSize: 26, fontWeight: 800, color: C.heading, margin: 0 }}>Settings</h1>
-          <p style={{ color: C.muted, fontSize: 14, marginTop: 4 }}>Manage your account preferences and security</p>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 24, alignItems: 'start' }}>
+      <div style={{ marginTop: 24 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 24, alignItems: 'start' }} className="settings-grid">
           {/* Sidebar Nav */}
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: 8, position: 'sticky', top: 24 }}>
+          <div className="glass-card" style={{ padding: 8, position: 'sticky', top: 88 }}>
             {sections.map(s => {
               const Icon = s.icon;
               const isActive = activeSection === s.key;
@@ -430,6 +433,7 @@ export default function SettingsPage() {
           border-color: var(--border-subtle) !important;
           color: var(--text-primary) !important;
         }
+        @media (max-width: 760px) { .settings-grid { grid-template-columns: 1fr !important; } }
       `}</style>
     </div>
   );

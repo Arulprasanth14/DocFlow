@@ -135,6 +135,63 @@ class GeminiProvider(LLMProvider, EmbeddingProvider):
             finish_reason=finish,
         )
 
+    async def stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_output_tokens: int = 1024,
+    ):
+        """FR-10.3 — stream text deltas from Gemini via SSE streamGenerateContent."""
+        contents = [
+            {
+                "role": "model" if m.role == "assistant" else "user",
+                "parts": [{"text": m.content}],
+            }
+            for m in messages
+        ]
+        payload: dict = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_output_tokens,
+            },
+        }
+        if system:
+            payload["systemInstruction"] = {"parts": [{"text": system}]}
+
+        model = self.chat_model
+        url = f"{API_ROOT}/models/{model}:streamGenerateContent?alt=sse"
+
+        try:
+            from app.ai.providers._http import _verify_option
+            async with httpx.AsyncClient(timeout=settings.AI_REQUEST_TIMEOUT_SECONDS, verify=_verify_option()) as client:
+                async with client.stream("POST", url, json=payload, headers=_headers()) as resp:
+                    if resp.status_code != 200:
+                        res = await self.generate(messages, system=system, temperature=temperature, max_output_tokens=max_output_tokens)
+                        yield res.text
+                        return
+
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data:"):
+                            raw = line[5:].strip()
+                            if raw:
+                                try:
+                                    chunk = json.loads(raw)
+                                    cands = chunk.get("candidates") or []
+                                    if cands:
+                                        parts = (cands[0].get("content") or {}).get("parts") or []
+                                        for p in parts:
+                                            delta = p.get("text")
+                                            if delta:
+                                                yield delta
+                                except Exception:
+                                    continue
+        except Exception:
+            res = await self.generate(messages, system=system, temperature=temperature, max_output_tokens=max_output_tokens)
+            yield res.text
+
     # ── Embeddings ──────────────────────────────────────────────────────────
 
     async def embed(

@@ -73,8 +73,15 @@ export default function SubmitWorkflowModal({
 
   return (
     <>
-      <div
-        style={{ position: 'fixed', inset: 0, background: 'hsla(220, 50%, 5%, 0.7)', backdropFilter: 'blur(4px)', zIndex: 200 }}
+      {/* The scrim is a real button: a div with an onClick cannot be
+          reached or announced, and "click outside to cancel" was the
+          only way to discover it. tabIndex -1 keeps it out of the tab
+          order — the dialog has its own Cancel button. */}
+      <button
+        type="button"
+        aria-label="Cancel and close"
+        tabIndex={-1}
+        style={{ position: 'fixed', inset: 0, background: 'var(--overlay-scrim)', backdropFilter: 'blur(4px)', zIndex: 200, border: 'none', cursor: 'default' }}
         onClick={onCancel}
       />
       <div
@@ -93,7 +100,7 @@ export default function SubmitWorkflowModal({
 
           {/* Template picker */}
           <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+            <label htmlFor="swm-workflow" style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
               Approval Workflow <span style={{ color: 'var(--color-error-400)' }}>*</span>
             </label>
             {templatesLoading ? (
@@ -101,14 +108,14 @@ export default function SubmitWorkflowModal({
             ) : templates.length === 0 ? (
               <div style={{
                 padding: '12px 14px', borderRadius: 'var(--radius-md)',
-                background: 'hsla(38, 92%, 50%, 0.1)', border: '1px solid hsla(38, 92%, 50%, 0.25)',
-                color: 'var(--color-warning-400)', fontSize: '0.85rem',
+                background: 'color-mix(in srgb, var(--status-pending) 12%, transparent)', border: '1px solid color-mix(in srgb, var(--status-pending) 25%, transparent)',
+                color: 'var(--status-pending)', fontSize: '0.85rem',
               }}>
                 No approval workflows exist in your organization yet. Ask an admin to
                 create one under Admin → Workflow Templates before you can submit.
               </div>
             ) : (
-              <select className="input" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+              <select id="swm-workflow" className="input" value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
                 <option value="">— Select a workflow —</option>
                 {templates.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
@@ -120,9 +127,10 @@ export default function SubmitWorkflowModal({
           {/* Review panel */}
           {templateId && (
             <div style={{ marginBottom: '18px' }}>
-              <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+              {/* Names the list below it, not a control. */}
+              <span style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
                 Approval Sequence
-              </label>
+              </span>
               {reviewLoading ? (
                 <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Loading approvers...</div>
               ) : review ? (
@@ -138,7 +146,7 @@ export default function SubmitWorkflowModal({
                     >
                       <span style={{
                         flexShrink: 0, width: '22px', height: '22px', borderRadius: '50%',
-                        background: 'var(--color-primary-500)', color: 'white',
+                        background: 'var(--primary)', color: 'var(--primary-foreground)',
                         fontSize: '0.75rem', fontWeight: 700,
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                       }}>
@@ -170,10 +178,11 @@ export default function SubmitWorkflowModal({
 
           {/* Deadline */}
           <div style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+            <label htmlFor="swm-deadline" style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
               Final Deadline (Optional)
             </label>
             <input
+              id="swm-deadline"
               type="date"
               className="input"
               value={dueAt}
@@ -185,8 +194,8 @@ export default function SubmitWorkflowModal({
           <label style={{
             display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '20px',
             padding: '12px 14px', borderRadius: 'var(--radius-md)',
-            background: confirmed ? 'hsla(145, 70%, 45%, 0.08)' : 'var(--bg-overlay)',
-            border: `1px solid ${confirmed ? 'hsla(145, 70%, 45%, 0.3)' : 'var(--border-subtle)'}`,
+            background: confirmed ? 'color-mix(in srgb, var(--status-approved) 10%, transparent)' : 'var(--bg-overlay)',
+            border: `1px solid ${confirmed ? 'color-mix(in srgb, var(--status-approved) 30%, transparent)' : 'var(--border-subtle)'}`,
             cursor: templateId ? 'pointer' : 'not-allowed', opacity: templateId ? 1 : 0.5,
           }}>
             <input
@@ -205,8 +214,8 @@ export default function SubmitWorkflowModal({
           {error && (
             <div style={{
               marginBottom: '16px', padding: '12px 16px', borderRadius: 'var(--radius-md)',
-              background: 'hsla(0, 82%, 55%, 0.1)', border: '1px solid hsla(0, 82%, 55%, 0.25)',
-              color: 'var(--color-error-400)', fontSize: '0.875rem',
+              background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
+              color: 'var(--destructive)', fontSize: '0.875rem',
             }}>
               {error}
             </div>

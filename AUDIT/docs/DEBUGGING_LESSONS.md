@@ -37,6 +37,12 @@ Template (copy for each new entry, newest first):
 - How to prevent:
 ```
 
+### 2026-10-26 — shadcn token utilities need a Tailwind v4 `@theme inline` bridge
+- Symptom: shadcn/Aceternity `components/ui/*` render unstyled; `bg-background`/`bg-card`/`border-border` produce nothing.
+- Root cause: canonical tokens (`--background`, `--primary`, …) defined in plain `:root` are NOT registered as Tailwind utilities. Tailwind v4 only generates color utilities from a `@theme` block.
+- Fix: `src/index.css` maps each token into `@theme inline { --color-background: var(--background); … }` (inline so utilities follow the `.dark` override). Theme switches via the `.dark` class on `<html>` (set in `App.tsx`), matching `@custom-variant dark (&:is(.dark *))`.
+- How to prevent: when adding a new token, add it to `:root`/`.dark` AND to the `@theme inline` block. Inline styles use `color-mix(in srgb, var(--token) N%, transparent)` for tints (no hardcoded hsla). Legacy token names (`--bg-*`, `--text-*`, `--color-primary-*`) are aliases to Ice tokens — don't reintroduce them for new code; use the Ice/shadcn names.
+
 ### Seeded from evidence in code comments (undated; each fix is present in code today)
 ### Shared AsyncSession across tasks broke tests
 - Symptom: tests failed with asyncpg "Future attached to a different loop"/task-affinity errors.
@@ -67,6 +73,30 @@ Template (copy for each new entry, newest first):
 
 ### Corporate TLS inspection broke outbound HTTPS (AI calls)
 - Fix: `truststore` OS cert store (`core/trust.py`) or `AI_CA_BUNDLE`. Never disable verification.
+
+## UI redesign v2 lessons (non-obvious)
+- **Translucent `--card` made flat cards see-through.** v2 defines `--card` as a low-alpha glass color (for
+  `.glass-card`/GlassCard with backdrop-blur). The ~1,400 legacy inline cards use `var(--bg-elevated)` **without**
+  blur, so they rendered as washed-out transparent boxes. Fix: point legacy `--bg-elevated`/`--bg-card` at the
+  opaque `--card-solid`; keep `--glass-bg` on translucent `--card`. Only real glass surfaces are translucent.
+- **`approvals-theme.css` was a second design system.** It redefined the entire token set (black `#030213`
+  primary, pure-white cards, different radius) inside `.approvals-wrapper`, so the Approvals page ignored the
+  global theme. Fix: collapse it to inherit the global tokens; only keep the extra vars (`--input-background`,
+  `--switch-background`) the imported components need.
+- **`background: \`${var}ee\`` is invalid.** AdminLayout's topbar built `var(--sidebar)ee` to fake opacity — a
+  CSS var can't take a hex-alpha suffix, so it produced no background. Use a real token + `backdrop-filter`.
+- **A fixed `z-index:-1` background needs a transparent ancestor.** LivingBackground has no background-color;
+  if the shell root paints an opaque `background`, it hides the aura. Remove the root bg (the body owns
+  `--background`) and let glass surfaces sit above.
+- **Tailwind v4 + GSAP:** register `useGSAP`/`Flip` once in `main.tsx` via `gsap.registerPlugin`; animate only
+  transform/opacity; never animate `blur`/`filter` (the LivingBackground drift moves blurred blobs, not the blur).
+- **Blue box on a pipeline label ("Pending"):** it was the **browser text-selecting** the stage label (the
+  label text was selectable), not a leaked class or focus style. Fixed with `user-select:none` on pipeline
+  chips/labels + a themed `::selection` rule in `index.css`. (A fixed palm-tree icon at bottom-right is a
+  **browser extension**, not app code — `grep` finds no such asset in `src/`.)
+- **Dashboard duplication / mismatched counts:** route every count through the one `useDashboardData` hook and
+  keep each fact to a single widget (see DESIGN.md §13). The old dashboard showed the same status in a
+  "Document Status" card, the pipeline, the KPI row and "Pending Review" — four places that could disagree.
 
 Older audit history (bugs fixed before this log) lives in `AUDIT/CHANGELOG.md` and `AUDIT/AUDIT_REPORT.md`; those files are partly outdated, so re-verify before relying on them.
 

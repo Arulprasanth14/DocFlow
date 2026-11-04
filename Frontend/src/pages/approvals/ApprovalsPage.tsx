@@ -2,11 +2,10 @@ import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronLeft, ChevronRight, Check, X, MoreHorizontal, FileText,
-  TrendingUp, TrendingDown,
-  Plus, Clock, Users, CheckCircle2, XCircle, Search, ChevronDown,
+  Plus, Search, ChevronDown,
   ArrowUpDown, AlignJustify, UserPlus, History
 } from "lucide-react";
-import { toast, Toaster } from "sonner";
+import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 import {
   useMyApprovalQueue, useApproveStep, useRejectStep,
@@ -16,6 +15,11 @@ import type { ApprovalStep } from "@/lib/api/approvals";
 import { ApiClientError } from "@/lib/api/client";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ApprovalHistoryPanel from "@/components/approvals/ApprovalHistoryPanel";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { IconChip } from "@/components/ui/IconChip";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { StatusBadge as StatusPill } from "@/components/ui/StatusBadge";
+import { Skeleton } from "@/components/ui/Skeleton";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +28,7 @@ type TabKey  = "pending" | "approved" | "rejected" | "all";
 
 interface Approval {
   id: string;
+  documentId?: string | null;
   title: string;
   requester: string;
   initials: string;
@@ -63,7 +68,7 @@ const C = {
 /** Deterministic avatar colour from the person's name — stable per user
  *  without needing an avatar service, and never a random/placeholder value. */
 function avatarColor(seed: string): string {
-  const palette = ["#6366F1", "#0EA5E9", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899"];
+  const palette = ["var(--chart-3)", "var(--chart-2)", "var(--chart-5)", "var(--chart-4)", "var(--destructive)", "var(--chart-1)", "var(--status-revoked)"];
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 997;
   return palette[h % palette.length];
@@ -104,6 +109,7 @@ function mapStepToApproval(step: ApprovalStep): Approval {
 
   return {
     id: step.id,
+    documentId: step.document_id,
     title,
     requester,
     initials,
@@ -128,24 +134,6 @@ function Avatar({ initials, bg, size = 32 }: { initials: string; bg: string; siz
     }}>
       {initials}
     </div>
-  );
-}
-
-function StatusBadge({ status }: { status: Status }) {
-  const cfg = {
-    pending:  { label: "Pending",  color: C.amber, bg: C.amberTint },
-    approved: { label: "Approved", color: C.green, bg: C.greenTint },
-    rejected: { label: "Rejected", color: C.red,   bg: C.redTint   },
-  }[status];
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center",
-      padding: "5px 10px", borderRadius: 999,
-      fontSize: 12, fontWeight: 500,
-      color: cfg.color, background: cfg.bg,
-    }}>
-      {cfg.label}
-    </span>
   );
 }
 
@@ -315,102 +303,23 @@ export default function ApprovalsPage() {
   const allPageSelected = paged.length > 0 && selected.size >= paged.length;
 
   return (
-    <div style={{
-      background: C.bg,
-      minHeight: "100%",
-      fontFamily: "'Inter', sans-serif",
-      color: C.text,
-    }}>
-      <Toaster
-        position="bottom-right"
-        toastOptions={{
-          style: {
-            background: C.surface, color: C.text,
-            border: `1px solid ${C.border}`,
-            borderLeft: `4px solid ${C.accent}`,
-            fontSize: 14,
-          },
-        }}
-      />
-
-      <div style={{ padding: "32px", maxWidth: "100%" }}>
-
+    <div className="page-content" style={{ paddingTop: 24 }}>
         {/* ── Page header ── */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
-          <div>
-            <h1 style={{ fontSize: 28, fontWeight: 700, color: C.text, margin: 0, lineHeight: 1.2 }}>
-              Approvals
-            </h1>
-            <p style={{ fontSize: 14, color: C.muted, margin: "6px 0 0" }}>
-              Review and act on requests waiting for you
-            </p>
-          </div>
-          <button
-            onClick={() => navigate('/documents/new')}
-            style={{
-              display: "flex", alignItems: "center", gap: 8,
-              padding: "10px 18px", borderRadius: 10,
-              background: C.accent, color: "#fff",
-              border: "none", cursor: "pointer",
-              fontSize: 14, fontWeight: 600,
-              fontFamily: "'Inter', sans-serif",
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = C.accentHover)}
-            onMouseLeave={e => (e.currentTarget.style.background = C.accent)}
-          >
-            <Plus size={16} />
-            New Approval Request
-          </button>
-        </div>
+        <PageHeader
+          breadcrumbs={[{ label: "Workspace" }, { label: "Approvals" }]}
+          title="Approvals"
+          description="Review and act on requests waiting for you"
+          actions={
+            <button className="btn btn-primary" onClick={() => navigate('/documents/new')}>
+              <Plus size={16} /> New Request
+            </button>
+          }
+        />
 
-        {/* ── Stat cards ── */}
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 16,
-          marginBottom: 24,
-        }}>
-          {[
-            { icon: Clock,        label: "Awaiting You",        value: counts.pending,       color: C.amber, tint: C.amberTint, trend: "+2 today", up: false, goodWhenDown: true  },
-            { icon: Users,        label: "Awaiting Others",     value: 14,                   color: C.blue,  tint: C.blueTint,  trend: "+5 today", up: true,  goodWhenDown: false },
-            { icon: CheckCircle2, label: "Approved This Month", value: counts.approved + 44, color: C.green, tint: C.greenTint, trend: "+12%",     up: true,  goodWhenDown: false },
-            { icon: XCircle,      label: "Rejected This Month", value: counts.rejected + 4,  color: C.red,   tint: C.redTint,   trend: "−3%",      up: false, goodWhenDown: true  },
-          ].map(({ icon: Icon, label, value, color, tint, trend, up, goodWhenDown }) => {
-            const isPositive = goodWhenDown ? !up : up;
-            return (
-              <div key={label} style={{
-                background: C.surface, border: `1px solid ${C.border}`,
-                borderRadius: 16, padding: 24,
-              }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
-                  <div style={{
-                    width: 36, height: 36, borderRadius: 8,
-                    background: tint,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>
-                    <Icon size={18} style={{ color }} />
-                  </div>
-                  <span style={{
-                    fontSize: 12, fontWeight: 500,
-                    display: "flex", alignItems: "center", gap: 3,
-                    color: isPositive ? C.green : C.red,
-                  }}>
-                    {up ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
-                    {trend}
-                  </span>
-                </div>
-                <p style={{ fontSize: 26, fontWeight: 700, color: C.text, margin: 0, lineHeight: 1 }}>{value}</p>
-                <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>{label}</p>
-              </div>
-            );
-          })}
-        </div>
+        <div style={{ height: 20 }} />
 
         {/* ── Main card ── */}
-        <div style={{
-          background: C.surface, border: `1px solid ${C.border}`,
-          borderRadius: 16, overflow: "hidden",
-        }}>
+        <div className="glass-card" style={{ overflow: "hidden" }}>
 
           {/* ── Tabs ── */}
           <div style={{
@@ -631,30 +540,23 @@ export default function ApprovalsPage() {
 
               {/* Rows */}
               <div>
-                {paged.length === 0 ? (
-                  <div style={{
-                    display: "flex", flexDirection: "column",
-                    alignItems: "center", justifyContent: "center",
-                    padding: "80px 24px", gap: 12,
-                  }}>
-                    <div style={{
-                      width: 56, height: 56, borderRadius: 16,
-                      background: C.hover,
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>
-                      <CheckCircle2 size={28} style={{ color: C.muted, opacity: 0.5 }} />
-                    </div>
-                    <div style={{ textAlign: "center" }}>
-                      <p style={{ fontWeight: 600, fontSize: 14, color: C.text, margin: 0 }}>
-                        {activeTab === "pending" ? "You're all caught up 🎉" : `No ${activeTab} approvals`}
-                      </p>
-                      <p style={{ fontSize: 14, color: C.muted, margin: "4px 0 0" }}>
-                        {activeTab === "pending"
-                          ? "Nothing needs your attention right now."
-                          : `No documents have been ${activeTab} yet.`}
-                      </p>
-                    </div>
+                {myQueueQ.isLoading ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <div key={i} style={{ padding: "16px 24px" }}><Skeleton style={{ height: 40 }} /></div>
+                    ))}
                   </div>
+                ) : myQueueQ.isError ? (
+                  <div style={{ padding: "48px 24px" }}>
+                    <EmptyState art="inbox" title="Couldn't load approvals" description="Something went wrong fetching your queue."
+                      action={<button className="btn btn-secondary btn-sm" onClick={() => myQueueQ.refetch()}>Retry</button>} />
+                  </div>
+                ) : paged.length === 0 ? (
+                  <EmptyState
+                    art="checklist"
+                    title={activeTab === "pending" ? "You're all caught up" : `No ${activeTab} approvals`}
+                    description={activeTab === "pending" ? "Nothing needs your attention right now." : `No documents have been ${activeTab} yet.`}
+                  />
                 ) : (
                   paged.map((item, idx) => {
                     const isSelected = selected.has(item.id);
@@ -664,7 +566,7 @@ export default function ApprovalsPage() {
                     const stageBg =
                       item.status === "rejected" ? C.redTint
                       : item.status === "approved" ? C.greenTint
-                      : "rgba(255,255,255,0.06)";
+                      : "color-mix(in srgb, var(--foreground) 6%, transparent)";
                     const stageColor =
                       item.status === "rejected" ? C.red
                       : item.status === "approved" ? C.green
@@ -689,7 +591,7 @@ export default function ApprovalsPage() {
                         }}
                         onMouseEnter={() => setHovered(item.id)}
                         onMouseLeave={() => setHovered(null)}
-                        onClick={() => toast("Opening document detail…", { description: item.title })}
+                        onClick={() => item.documentId && navigate(`/documents/${item.documentId}`)}
                       >
                         {/* Checkbox */}
                         <div onClick={e => toggleRow(item.id, e)}>
@@ -706,13 +608,7 @@ export default function ApprovalsPage() {
                           display: "flex", alignItems: "center", gap: 12,
                           padding: "16px 16px 16px 0", minWidth: 0,
                         }}>
-                          <div style={{
-                            width: 40, height: 40, borderRadius: 8, flexShrink: 0,
-                            background: C.accentTint,
-                            display: "flex", alignItems: "center", justifyContent: "center",
-                          }}>
-                            <FileText size={17} style={{ color: C.accent }} />
-                          </div>
+                          <IconChip tone="primary" size={40}><FileText size={17} /></IconChip>
                           <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
                             <p style={{
                               fontSize: 14, fontWeight: 600, color: C.text,
@@ -751,7 +647,7 @@ export default function ApprovalsPage() {
                         <div style={{ fontSize: 13, color: C.muted }}>{item.requestedAt}</div>
 
                         {/* Status */}
-                        <div><StatusBadge status={item.status} /></div>
+                        <div><StatusPill status={item.status} /></div>
 
                         {/* Actions */}
                         <div style={{
@@ -905,10 +801,6 @@ export default function ApprovalsPage() {
           )}
 
         </div>
-
-        {/* bottom breathing room */}
-        <div style={{ height: 32 }} />
-      </div>
 
       <ConfirmDialog
         open={actionModal.open}

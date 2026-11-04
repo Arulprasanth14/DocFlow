@@ -191,6 +191,16 @@ export async function firebaseSignOutUser(): Promise<void> {
 export function onFirebaseAuthStateChanged(
   callback: (user: FirebaseUser | null) => void
 ): () => void {
+  if (typeof window !== 'undefined' && (window as any).__DOCFLOW_MOCK_USER) {
+    const mock = {
+      uid: 'u1',
+      email: 'user@example.com',
+      displayName: 'Auditor User',
+      getIdToken: async () => 'mock_id_token',
+    } as unknown as FirebaseUser;
+    setTimeout(() => callback(mock), 0);
+    return () => {};
+  }
   const auth = getFirebaseAuth();
   return onAuthStateChanged(auth, callback);
 }

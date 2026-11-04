@@ -1,0 +1,7 @@
+# Module Documentation folder - Do not commit
+module doc/
+.archify/
+.claude/
+scripts/
+.ruff_cache/
+graphify-out/

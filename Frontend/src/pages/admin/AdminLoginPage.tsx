@@ -186,9 +186,9 @@ export default function AdminLoginPage() {
         position: 'relative',
         overflow: 'hidden',
         background:
-          'radial-gradient(ellipse at 70% 0%, hsla(10, 80%, 15%, 0.6) 0%, transparent 55%), ' +
-          'radial-gradient(ellipse at 0% 100%, hsla(35, 90%, 12%, 0.5) 0%, transparent 60%), ' +
-          'hsl(222, 20%, 7%)',
+          'radial-gradient(ellipse at 70% 0%, color-mix(in srgb, var(--destructive) 16%, transparent) 0%, transparent 55%), ' +
+          'radial-gradient(ellipse at 0% 100%, color-mix(in srgb, var(--chart-4) 14%, transparent) 0%, transparent 60%), ' +
+          'var(--background)',
       }}
     >
       {/* Background particles */}
@@ -199,12 +199,12 @@ export default function AdminLoginPage() {
         <div style={{
           position: 'absolute', top: '-5%', right: '-8%',
           width: '480px', height: '480px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(10, 80%, 45%, 0.07) 0%, transparent 70%)',
+          background: 'radial-gradient(circle, color-mix(in srgb, var(--destructive) 8%, transparent) 0%, transparent 70%)',
         }} />
         <div style={{
           position: 'absolute', bottom: '-10%', left: '-5%',
           width: '520px', height: '520px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(35, 90%, 45%, 0.06) 0%, transparent 70%)',
+          background: 'radial-gradient(circle, color-mix(in srgb, var(--chart-4) 8%, transparent) 0%, transparent 70%)',
         }} />
       </div>
 
@@ -217,14 +217,14 @@ export default function AdminLoginPage() {
       >
         <div
           style={{
-            background: 'hsla(222, 25%, 10%, 0.85)',
+            background: 'var(--card)',
             backdropFilter: 'blur(24px)',
-            border: '1px solid hsla(15, 80%, 45%, 0.2)',
+            border: '1px solid color-mix(in srgb, var(--chart-4) 25%, transparent)',
             borderRadius: '20px',
             padding: '44px 40px',
             boxShadow:
-              '0 4px 6px -1px rgba(0,0,0,0.5), 0 2px 4px -2px rgba(0,0,0,0.4), ' +
-              'inset 0 1px 0 hsla(15, 80%, 60%, 0.08)',
+              '0 4px 6px -1px color-mix(in srgb, var(--foreground) 14%, transparent), 0 2px 4px -2px color-mix(in srgb, var(--foreground) 10%, transparent), ' +
+              'inset 0 1px 0 color-mix(in srgb, var(--chart-4) 10%, transparent)',
           }}
         >
           {/* Header */}
@@ -233,9 +233,9 @@ export default function AdminLoginPage() {
             <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
               <div style={{
                 width: '56px', height: '56px', borderRadius: '16px',
-                background: 'linear-gradient(135deg, hsl(10, 75%, 40%), hsl(35, 85%, 45%))',
+                background: 'linear-gradient(135deg, var(--destructive), var(--chart-4))',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 4px 20px hsla(10, 75%, 40%, 0.4)',
+                boxShadow: '0 4px 20px color-mix(in srgb, var(--destructive) 40%, transparent)',
                 color: 'white',
               }}>
                 <ShieldIcon />
@@ -243,7 +243,7 @@ export default function AdminLoginPage() {
               <div>
                 <div style={{
                   fontSize: '1.5rem', fontWeight: 800, letterSpacing: '-0.02em',
-                  background: 'linear-gradient(135deg, hsl(15, 80%, 65%), hsl(38, 90%, 60%))',
+                  background: 'linear-gradient(135deg, var(--destructive), var(--chart-4))',
                   WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
                 }}>
                   DocFlow Admin
@@ -253,12 +253,12 @@ export default function AdminLoginPage() {
 
             <h1 style={{
               fontSize: '1.25rem', fontWeight: 700,
-              color: 'hsl(210, 30%, 92%)',
+              color: 'var(--foreground)',
               marginTop: '8px', marginBottom: '4px',
             }}>
               Administrator Access
             </h1>
-            <p style={{ color: 'hsl(215, 15%, 55%)', fontSize: '0.875rem' }}>
+            <p style={{ color: 'var(--muted-foreground)', fontSize: '0.875rem' }}>
               Restricted portal — authorized personnel only
             </p>
           </div>
@@ -268,19 +268,19 @@ export default function AdminLoginPage() {
             display: 'flex', alignItems: 'center', gap: '10px',
             marginBottom: '28px',
           }}>
-            <div style={{ flex: 1, height: '1px', background: 'hsla(15, 50%, 35%, 0.3)' }} />
+            <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
             <span style={{
               fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.08em',
-              color: 'hsl(35, 80%, 55%)',
+              color: 'var(--chart-4)',
               padding: '3px 10px',
-              border: '1px solid hsla(35, 80%, 45%, 0.3)',
+              border: '1px solid color-mix(in srgb, var(--chart-4) 30%, transparent)',
               borderRadius: '20px',
-              background: 'hsla(35, 80%, 45%, 0.08)',
+              background: 'color-mix(in srgb, var(--chart-4) 10%, transparent)',
               whiteSpace: 'nowrap',
             }}>
               🔐 ADMIN ONLY
             </span>
-            <div style={{ flex: 1, height: '1px', background: 'hsla(15, 50%, 35%, 0.3)' }} />
+            <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
           </div>
 
           {/* Form */}
@@ -289,7 +289,7 @@ export default function AdminLoginPage() {
             <div style={{ marginBottom: '16px' }}>
               <label style={{
                 display: 'block', fontSize: '0.8125rem', fontWeight: 600,
-                color: 'hsl(215, 15%, 70%)', marginBottom: '6px',
+                color: 'var(--muted-foreground)', marginBottom: '6px',
               }}>
                 Administrator Email
               </label>
@@ -300,13 +300,13 @@ export default function AdminLoginPage() {
                 placeholder="admin@company.com"
                 className="input"
                 style={{
-                  background: 'hsla(222, 25%, 13%, 0.8)',
-                  borderColor: 'hsla(15, 50%, 35%, 0.25)',
+                  background: 'var(--popover)',
+                  borderColor: 'var(--border)',
                 }}
                 {...register('email')}
               />
               {errors.email && (
-                <p style={{ color: 'hsl(10, 75%, 60%)', fontSize: '0.8rem', marginTop: '4px' }}>
+                <p style={{ color: 'var(--destructive)', fontSize: '0.8rem', marginTop: '4px' }}>
                   {errors.email.message}
                 </p>
               )}
@@ -316,7 +316,7 @@ export default function AdminLoginPage() {
             <div style={{ marginBottom: '28px' }}>
               <label style={{
                 display: 'block', fontSize: '0.8125rem', fontWeight: 600,
-                color: 'hsl(215, 15%, 70%)', marginBottom: '6px',
+                color: 'var(--muted-foreground)', marginBottom: '6px',
               }}>
                 Password
               </label>
@@ -329,8 +329,8 @@ export default function AdminLoginPage() {
                   className="input"
                   style={{
                     paddingRight: '44px',
-                    background: 'hsla(222, 25%, 13%, 0.8)',
-                    borderColor: 'hsla(15, 50%, 35%, 0.25)',
+                    background: 'var(--popover)',
+                    borderColor: 'var(--border)',
                   }}
                   {...register('password')}
                 />
@@ -340,14 +340,14 @@ export default function AdminLoginPage() {
                   style={{
                     position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)',
                     background: 'none', border: 'none', cursor: 'pointer',
-                    color: 'hsl(215, 15%, 50%)', padding: '4px',
+                    color: 'var(--muted-foreground)', padding: '4px',
                   }}
                 >
                   <EyeIcon open={showPwd} />
                 </button>
               </div>
               {errors.password && (
-                <p style={{ color: 'hsl(10, 75%, 60%)', fontSize: '0.8rem', marginTop: '4px' }}>
+                <p style={{ color: 'var(--destructive)', fontSize: '0.8rem', marginTop: '4px' }}>
                   {errors.password.message}
                 </p>
               )}
@@ -373,10 +373,10 @@ export default function AdminLoginPage() {
                 justifyContent: 'center',
                 gap: '8px',
                 background: isSubmitting
-                  ? 'hsla(10, 60%, 35%, 0.5)'
-                  : 'linear-gradient(135deg, hsl(10, 75%, 42%), hsl(35, 85%, 48%))',
+                  ? 'color-mix(in srgb, var(--destructive) 50%, transparent)'
+                  : 'linear-gradient(135deg, var(--destructive), var(--chart-4))',
                 color: 'white',
-                boxShadow: isSubmitting ? 'none' : '0 4px 16px hsla(10, 75%, 40%, 0.35)',
+                boxShadow: isSubmitting ? 'none' : '0 4px 16px color-mix(in srgb, var(--destructive) 35%, transparent)',
                 transition: 'all 0.2s',
               }}
             >
@@ -384,7 +384,7 @@ export default function AdminLoginPage() {
                 <>
                   <div style={{
                     width: '18px', height: '18px', borderRadius: '50%',
-                    border: '2px solid rgba(255,255,255,0.3)',
+                    border: '2px solid color-mix(in srgb, var(--primary-foreground) 40%, transparent)',
                     borderTopColor: 'white',
                     animation: 'spin 0.7s linear infinite',
                   }} />
@@ -410,9 +410,9 @@ export default function AdminLoginPage() {
                   marginTop: '16px',
                   padding: '12px 16px',
                   borderRadius: '10px',
-                  background: 'hsla(10, 80%, 45%, 0.1)',
-                  border: '1px solid hsla(10, 80%, 45%, 0.25)',
-                  color: 'hsl(10, 80%, 65%)',
+                  background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
+                  color: 'var(--destructive)',
                   fontSize: '0.875rem',
                   display: 'flex',
                   alignItems: 'flex-start',
@@ -430,12 +430,12 @@ export default function AdminLoginPage() {
           {/* Footer — link back to employee login */}
           <p style={{
             textAlign: 'center', marginTop: '28px',
-            color: 'hsl(215, 15%, 45%)', fontSize: '0.8125rem',
+            color: 'var(--muted-foreground)', fontSize: '0.8125rem',
           }}>
             Not an admin?{' '}
             <a
               href="/login"
-              style={{ color: 'hsl(215, 80%, 60%)', fontWeight: 600, textDecoration: 'none' }}
+              style={{ color: 'var(--primary)', fontWeight: 600, textDecoration: 'none' }}
             >
               Employee login →
             </a>
@@ -444,7 +444,7 @@ export default function AdminLoginPage() {
 
         {/* Bottom tagline */}
         <p style={{
-          textAlign: 'center', color: 'hsl(215, 15%, 35%)',
+          textAlign: 'center', color: 'var(--muted-foreground)',
           fontSize: '0.75rem', marginTop: '20px',
         }}>
           DocFlow Administrator Portal · Secure Access

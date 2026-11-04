@@ -47,6 +47,18 @@ def ensure_os_trust_store() -> bool:
     if not getattr(settings, "SSL_USE_OS_TRUST_STORE", True):
         return False
 
+    import sys
+    # Python 3.12+ compatibility: truststore.inject_into_ssl() monkey-patches
+    # ssl.SSLContext in a way that breaks Python 3.12's `options` setter
+    # (ssl.py:562 super(SSLContext, SSLContext).options.__set__ enters infinite
+    # recursion when botocore/boto3 creates its urllib3 SSL context).
+    if sys.version_info >= (3, 12):
+        logger.info(
+            "os_trust_store_skipped_py312",
+            detail="Skipping global truststore injection on Python 3.12+ to prevent botocore SSLContext recursion",
+        )
+        return False
+
     try:
         import truststore
     except ImportError:

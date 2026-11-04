@@ -162,6 +162,36 @@ class AttachmentResponse(BaseModel):
 
 # ── Document Templates ────────────────────────────────────────────────────────
 
+class WatcherResponse(BaseModel):
+    """Someone CC'd on a document (FR-13.4)."""
+    id: UUID
+    user_id: UUID
+    name: str | None = None
+    email: str | None = None
+    added_by: UUID
+    added_by_name: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WatcherAddRequest(BaseModel):
+    user_id: UUID
+
+
+class WatcherCandidateResponse(BaseModel):
+    """
+    A colleague who can be added as a watcher.
+
+    Deliberately only id/name/email: this endpoint is open to any member who
+    can open the document, so it must not become a way to read the org's
+    roles, departments or activity.
+    """
+    user_id: UUID
+    name: str | None = None
+    email: str | None = None
+
+
 class DocumentTemplateCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     default_field_values: dict[str, Any] = Field(default={})
@@ -194,6 +224,14 @@ class DocumentCreateRequest(BaseModel):
     dept_id: UUID | None = None
     due_at: datetime | None = None
     submit_immediately: bool = Field(default=False, description="If true, sets status to submitted instead of draft")
+    # Documents module: how the draft was started (TEMPLATE | BLANK | UPLOAD).
+    source: str | None = Field(default=None, description="template | blank | upload")
+    confidentiality: str | None = Field(default=None, description="public | internal | confidential")
+    current_step: str | None = Field(default=None, description="Wizard/editor step to resume at")
+    # Start from a Template Studio template: the server pins the template's
+    # CURRENT PUBLISHED version so a later edit can't change this document
+    # (spec C9 / FR-11.5). The client sends the template id, never a version id.
+    template_id: UUID | None = Field(default=None, description="Template Studio template to fill")
 
     model_config = {"extra": "ignore", "populate_by_name": True}
 
@@ -206,9 +244,83 @@ class DocumentUpdateRequest(BaseModel):
     metadata_: dict[str, Any] | None = Field(default=None, alias="metadata")
     dept_id: UUID | None = None
     due_at: datetime | None = None
+    confidentiality: str | None = None
+    current_step: str | None = None
     change_reason: str | None = Field(default=None, description="Reason for version history")
+    # ── Submission details (FR-13.4) ──────────────────────────────────────
+    # `None` means "not supplied, leave alone". Clearing a date therefore
+    # needs an explicit sentinel, which the UI sends as the empty string —
+    # see DocumentService.update_document.
+    category: str | None = Field(default=None, max_length=100)
+    effective_from: datetime | None = None
+    expires_at: datetime | None = None
+    reminder_days_before: int | None = Field(default=None, ge=0, le=365)
+    # Explicitly clear a date or the reminder (the UI's "no expiry" choice),
+    # because a null above is indistinguishable from "unchanged".
+    clear_fields: list[str] | None = Field(
+        default=None,
+        description="Detail fields to null out: effective_from, expires_at, reminder_days_before, category",
+    )
 
     model_config = {"extra": "ignore", "populate_by_name": True}
+
+
+class DocumentContentResponse(BaseModel):
+    """Editable body of a document (spec §9 DocumentContent)."""
+    document_id: UUID
+    content: dict[str, Any] = Field(default_factory=dict)
+    answers: dict[str, Any] = Field(default_factory=dict)
+    rendered_snapshot_url: str | None = None
+    pdf_url: str | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DocumentContentUpdateRequest(BaseModel):
+    """Autosave for the freeform editor / template answers. Partial is fine."""
+    content: dict[str, Any] | None = None
+    answers: dict[str, Any] | None = None
+
+    model_config = {"extra": "ignore"}
+
+
+class DocumentFillFieldSchema(BaseModel):
+    """One question in the pinned template version (spec §21.2)."""
+    key: str
+    label: str
+    type: str = "text"
+    required: bool = False
+    help_text: str | None = None
+    example: str | None = None
+    default_value: Any | None = None
+    validation: dict[str, Any] = Field(default_factory=dict)
+    format: str | None = None
+    options: list[Any] = Field(default_factory=list)
+    if_empty_behavior: str = "keep_blank"
+    order_index: int = 0
+    section: str | None = None
+
+
+class DocumentFillSchemaResponse(BaseModel):
+    """
+    Everything Form Fill needs, read from the version the document is PINNED to
+    (FR-12.x / C9) rather than from the template's current state — so editing,
+    archiving or deleting the template cannot change a document being filled.
+    """
+    #: None when the questions were read from a template rather than a
+    #: document — the FR-12.1 case, where no draft exists yet.
+    document_id: UUID | None = None
+    template_id: UUID | None = None
+    template_version_id: UUID | None = None
+    template_name: str | None = None
+    version_no: int | None = None
+    content: dict[str, Any] = Field(default_factory=dict)
+    fields: list[DocumentFillFieldSchema] = Field(default_factory=list)
+    answers: dict[str, Any] = Field(default_factory=dict)
+    # True when the template this was pinned to has since been deleted; the
+    # document still fills correctly from its pinned snapshot.
+    template_deleted: bool = False
 
 
 class DocumentSubmitRequest(BaseModel):
@@ -243,6 +355,19 @@ class DocumentResponse(BaseModel):
     due_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Documents module (Phase 1): wizard/autosave fields.
+    source: str = "template"
+    confidentiality: str | None = None
+    current_step: str | None = None
+    template_version_id: UUID | None = None
+    version: int = 1
+    # Submission details (FR-13.4).
+    category: str | None = None
+    effective_from: datetime | None = None
+    expires_at: datetime | None = None
+    reminder_days_before: int | None = None
+    reminder_sent_at: datetime | None = None
+    watcher_count: int = 0
     attachment_count: int = 0
     comment_count: int = 0
     version_count: int = 1
@@ -259,8 +384,69 @@ class DocumentResponse(BaseModel):
 
 
 class PaginatedDocumentsResponse(BaseModel):
+    """
+    FR-1.4 / spec §25.1 — keyset (cursor) pagination.
+
+    `next_cursor` is the forward-only cursor; null means "no more rows".
+    `total` is a count of the whole filtered set and is only computed for a
+    request with no cursor, because counting on every page of a 100k-row
+    table is exactly the cost keyset pagination exists to avoid. On a
+    cursor request it is echoed back as -1, meaning "not counted".
+    """
     items: list[DocumentResponse]
     total: int
     page: int
     limit: int
     pages: int
+    next_cursor: str | None = None
+
+
+class DocumentPDFStateResponse(BaseModel):
+    """
+    FR-13.8 — state of the frozen snapshot's PDF.
+
+    `status`: None (never requested) | 'pending' | 'ready' | 'failed'.
+    `download_url` is a short-lived presigned URL, present only when ready.
+    `checksum` is the SHA-256 of the PDF bytes; because rendering is
+    deterministic, re-rendering the same snapshot reproduces it, so the
+    artefact can be proven to match what was submitted.
+    `available` is False when the deployment has not applied the migration
+    that adds these columns, letting the UI stay silent rather than show a
+    control that cannot work.
+    """
+
+    status: str | None = None
+    checksum: str | None = None
+    rendered_at: datetime | None = None
+    error: str | None = None
+    download_url: str | None = None
+    available: bool = True
+    has_snapshot: bool = False
+
+
+# ── Submission pre-flight (spec FR-13, §25.4) ─────────────────────────────────
+
+class FieldProblemSchema(BaseModel):
+    """One blocked (or flagged) field, in the shape the UI points at."""
+    field: str
+    code: str
+    message: str
+
+
+class SubmitCheckRequest(BaseModel):
+    """
+    Ask whether a draft may move past `stage`.
+
+    'write' checks the document body only; each later stage includes the ones
+    before it, so 'confirm' is the whole submission. The workflow id is the
+    one currently selected in the wizard, which may not be saved yet.
+    """
+    stage: str = Field(default="confirm", description="write | workflow | details | confirm")
+    workflow_template_id: UUID | None = None
+
+
+class SubmitCheckResponse(BaseModel):
+    """`ok` is false when anything blocks. Warnings never block."""
+    ok: bool
+    errors: list[FieldProblemSchema] = Field(default_factory=list)
+    warnings: list[FieldProblemSchema] = Field(default_factory=list)

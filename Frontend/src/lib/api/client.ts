@@ -16,7 +16,7 @@
  *      AuthProvider clears state → ProtectedRoute redirects to /login.
  */
 
-import type { ApiError } from '@/types';
+import type { ApiError, FieldProblem } from '@/types';
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';
 
@@ -24,13 +24,20 @@ export class ApiClientError extends Error {
   readonly status: number;
   readonly detail: string;
   readonly requestId?: string;
+  /**
+   * Per-field breakdown of a 422, when the server could attribute the
+   * failure. Empty for every other error, so callers can check `.length`
+   * rather than the status code.
+   */
+  readonly fields: FieldProblem[];
 
-  constructor(status: number, detail: string, requestId?: string) {
+  constructor(status: number, detail: string, requestId?: string, fields?: FieldProblem[]) {
     super(detail);
     this.name = 'ApiClientError';
     this.status = status;
     this.detail = detail;
     this.requestId = requestId;
+    this.fields = fields ?? [];
   }
 }
 
@@ -129,7 +136,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
     } catch {
       errorData = { error: response.statusText, status_code: response.status };
     }
-    throw new ApiClientError(response.status, errorData.error, requestId);
+    throw new ApiClientError(response.status, errorData.error, requestId, errorData.fields);
   }
 
   if (response.status === 204 || response.headers.get('content-length') === '0') {
@@ -212,6 +219,51 @@ export const apiClient = {
 
   delete: <T>(path: string, options?: RequestOptions) =>
     request<T>(path, { ...options, method: 'DELETE' }),
+
+  /**
+   * Download a file the API returns as bytes (document export, FR-6.7).
+   *
+   * Goes through fetch with the Authorization header rather than putting the
+   * URL in an <a href>: a bare link carries no token, so the browser would
+   * get a 401 and show it as a broken download. Returns the blob and the
+   * filename the server asked for in Content-Disposition.
+   */
+  download: async (path: string): Promise<{ blob: Blob; filename: string }> => {
+    const url = new URL(`${BASE_URL}${path}`, window.location.origin);
+    const token = tokenStore.get();
+    const response = await fetch(url.toString(), {
+      method: 'GET',
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!response.ok) {
+      let detail = `Download failed (HTTP ${response.status})`;
+      try {
+        const body = await response.json();
+        detail = body?.error ?? detail;
+      } catch {
+        /* a non-JSON error body is not worth surfacing verbatim */
+      }
+      throw new ApiClientError(response.status, detail);
+    }
+    const disposition = response.headers.get('Content-Disposition') ?? '';
+    const match = /filename="?([^"]+)"?/i.exec(disposition);
+    return { blob: await response.blob(), filename: match?.[1] ?? 'document' };
+  },
 };
+
+/** Hand a fetched blob to the browser as a save dialog. */
+export function saveBlob(blob: Blob, filename: string): void {
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoked on the next tick: revoking immediately can cancel the download
+  // in some browsers before it has started reading the object URL.
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
 
 export default apiClient;

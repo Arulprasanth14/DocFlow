@@ -18,6 +18,7 @@ import {
   Plus, Loader2, ShieldAlert, Info, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { agentApi, type AgentCitation, type AnswerState } from '@/lib/api/agent';
+import { IconChip } from '@/components/ui/IconChip';
 
 const C = {
   card: 'var(--bg-elevated)',
@@ -218,21 +219,12 @@ export default function AgentPage() {
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <div style={{ padding: '20px 24px 10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div
-              style={{
-                width: 36, height: 36, borderRadius: 10,
-                background: `color-mix(in srgb, ${C.primary400} 12%, transparent)`,
-                border: `1px solid color-mix(in srgb, ${C.primary400} 25%, transparent)`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}
-            >
-              <Bot size={18} color={C.primary400} />
-            </div>
+            <IconChip tone="violet" size={38}><Bot size={18} /></IconChip>
             <div>
-              <h1 style={{ fontSize: 20, fontWeight: 800, color: C.heading, margin: 0 }}>
-                Agent
+              <h1 className="font-heading" style={{ fontSize: 20, fontWeight: 800, color: 'var(--foreground)', margin: 0, letterSpacing: '-0.01em' }}>
+                Agent <span style={{ fontSize: 10, fontWeight: 700, verticalAlign: 'middle', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--accent-violet)', background: 'var(--accent-violet-soft)', border: '1px solid color-mix(in srgb, var(--accent-violet) 30%, transparent)', borderRadius: 999, padding: '2px 8px', marginLeft: 6 }}>AI</span>
               </h1>
-              <p style={{ fontSize: 12, color: C.muted, margin: 0 }}>
+              <p style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
                 Answers from your organization's approved documents, with sources
               </p>
             </div>

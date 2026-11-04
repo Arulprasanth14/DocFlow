@@ -35,7 +35,6 @@ import {
 import { tokenStore } from '@/lib/api/client';
 import { syncAndExchange } from '@/lib/auth/syncProfile';
 import { useAuthStore } from '@/store/authStore';
-import type { AuthUser } from '@/types';
 
 // ── Context shape ─────────────────────────────────────────────────────────────
 

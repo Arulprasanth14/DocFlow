@@ -34,6 +34,7 @@ TODO(verify): package manager — both `package-lock.json` and `pnpm-lock.yaml` 
 | API / business logic / DB change | `docs/ARCHITECTURE.md` + `docs/CODING_RULES.md` §Backend |
 | Bug / error / "it broke" | `docs/DEBUGGING_LESSONS.md` first |
 | "What's done / what's next" | `docs/IMPLEMENTATION_STATUS.md` |
+| Landing page (build record + its own design system) | `docs/LANDING_PAGE_SYSTEM.md` |
 | Roles, permissions, workflow/approval rules, doc lifecycle | `docs/PROJECT_CONTEXT.md` |
 | Auth / RBAC | `docs/ARCHITECTURE.md` §Auth + `docs/PROJECT_CONTEXT.md` §Roles |
 
@@ -54,4 +55,4 @@ TODO(verify): package manager — both `package-lock.json` and `pnpm-lock.yaml` 
 - [ ] `docs/IMPLEMENTATION_STATUS.md` (and `DEBUGGING_LESSONS.md` if relevant) updated.
 
 ## Warning: older notes in `AUDIT/`
-`AUDIT/PROJECT_CONTEXT.md`, `STATUS.md`, `PENDING_WORK.md`, `AUDIT_REPORT.md`, `CHANGELOG.md`, `HOW_TO_RUN.md` predate the current code (e.g. they say "no tests", "search not started", "no AI provider", "4 admin roles TBD"). The code and `AUDIT/docs/*` win. Treat the old files as history only.
+Plans for finished work live in `AUDIT/docs/archive/` and describe history, not current behaviour. The code and the rest of `AUDIT/docs/*` win.

@@ -146,7 +146,7 @@ export function WorkflowChatPanel({
     maxWidth: '100vw',
     background: C.surface,
     borderLeft: `1px solid ${C.border}`,
-    boxShadow: '-8px 0 40px rgba(0,0,0,0.3)',
+    boxShadow: 'var(--shadow-lg)',
     zIndex: 500,
     display: 'flex',
     flexDirection: 'column',

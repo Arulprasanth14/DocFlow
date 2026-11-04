@@ -158,7 +158,7 @@ export default function WorkflowTemplatesAdminPage() {
     <div style={{ padding: '32px', maxWidth: '1280px', margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '32px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+          <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
             Workflow Templates
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -199,7 +199,7 @@ export default function WorkflowTemplatesAdminPage() {
                         style={{
                           padding: '4px 10px', borderRadius: 'var(--radius-full)', fontSize: '0.75rem', fontWeight: 700,
                           cursor: 'pointer', border: 'none',
-                          background: t.is_active ? 'hsla(150, 80%, 40%, 0.15)' : 'hsla(0, 0%, 50%, 0.15)',
+                          background: t.is_active ? 'color-mix(in srgb, var(--status-approved) 15%, transparent)' : 'color-mix(in srgb, var(--muted-foreground) 15%, transparent)',
                           color: t.is_active ? 'var(--color-success-400)' : 'var(--text-muted)',
                         }}
                       >
@@ -227,7 +227,7 @@ export default function WorkflowTemplatesAdminPage() {
       {/* View Stages Modal (read-only — stages are immutable after creation) */}
       {viewingId && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-          <div onClick={() => setViewingId(null)} style={{ position: 'absolute', inset: 0, background: 'hsla(220, 50%, 5%, 0.75)', backdropFilter: 'blur(6px)' }} />
+          <div onClick={() => setViewingId(null)} style={{ position: 'absolute', inset: 0, background: 'var(--overlay-scrim)', backdropFilter: 'blur(6px)' }} />
           <div className="glass-card" style={{ position: 'relative', width: '94%', maxWidth: 640, maxHeight: '80vh', overflowY: 'auto', padding: 28, borderRadius: 'var(--radius-xl)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
               <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--text-primary)' }}>
@@ -267,7 +267,7 @@ export default function WorkflowTemplatesAdminPage() {
       {/* Create Modal */}
       {modalOpen && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
-          <div onClick={() => setModalOpen(false)} style={{ position: 'absolute', inset: 0, background: 'hsla(220, 50%, 5%, 0.75)', backdropFilter: 'blur(6px)' }} />
+          <div onClick={() => setModalOpen(false)} style={{ position: 'absolute', inset: 0, background: 'var(--overlay-scrim)', backdropFilter: 'blur(6px)' }} />
           <div className="glass-card" style={{ position: 'relative', width: '94%', maxWidth: 760, maxHeight: '88vh', display: 'flex', flexDirection: 'column', borderRadius: 'var(--radius-xl)', overflow: 'hidden' }}>
             <div style={{ padding: '20px 28px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--text-primary)' }}>New Workflow Template</h2>
@@ -277,7 +277,7 @@ export default function WorkflowTemplatesAdminPage() {
             <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 20 }}>
                 {error && (
-                  <div style={{ padding: '12px 16px', background: 'hsla(0, 84%, 60%, 0.12)', border: '1px solid var(--color-error-400)', borderRadius: 'var(--radius-md)', color: 'var(--color-error-400)', fontSize: '0.85rem', fontWeight: 600 }}>
+                  <div style={{ padding: '12px 16px', background: 'color-mix(in srgb, var(--destructive) 12%, transparent)', border: '1px solid var(--color-error-400)', borderRadius: 'var(--radius-md)', color: 'var(--color-error-400)', fontSize: '0.85rem', fontWeight: 600 }}>
                     ⚠️ {error}
                   </div>
                 )}

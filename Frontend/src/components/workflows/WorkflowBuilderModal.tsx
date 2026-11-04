@@ -20,7 +20,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  X, Plus, Trash2, GripVertical, AlertCircle, Loader2, Users, User,
+  X, Plus, Trash2, GripVertical, AlertCircle, Loader2, Users,
   ShieldCheck, Clock, Info,
 } from 'lucide-react';
 import {
@@ -221,7 +221,7 @@ export default function WorkflowBuilderModal({
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+        position: 'fixed', inset: 0, background: 'var(--overlay-scrim)',
         zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 20,
       }}

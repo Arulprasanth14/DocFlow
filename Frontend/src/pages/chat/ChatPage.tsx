@@ -136,7 +136,7 @@ function NewDMModal({ onClose, onStart }: {
   });
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+    <div style={{ position: 'fixed', inset: 0, background: 'var(--overlay-scrim)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.card, borderRadius: 20, padding: 24, width: 380, maxHeight: '70vh', display: 'flex', flexDirection: 'column', gap: 16, border: `1px solid ${C.border}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Users size={18} color={C.primary400} />
@@ -271,7 +271,7 @@ export default function ChatPage() {
   return (
     <div style={{ position: 'relative', height: 'calc(100vh - var(--header-height))', display: 'flex', overflow: 'hidden' }}>
       {/* Ambient glow */}
-      <div style={{ position: 'absolute', top: -150, right: -100, width: 500, height: 500, borderRadius: 9999, background: 'radial-gradient(circle, rgba(37,99,235,0.1) 0%, transparent 65%)', filter: 'blur(180px)', zIndex: 1, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: -150, right: -100, width: 500, height: 500, borderRadius: 9999, background: 'radial-gradient(circle, color-mix(in srgb, var(--primary) 10%, transparent) 0%, transparent 65%)', filter: 'blur(180px)', zIndex: 1, pointerEvents: 'none' }} />
 
       <div style={{ position: 'relative', zIndex: 10, display: 'flex', width: '100%' }}>
         {/* ── Sidebar ── */}
@@ -432,7 +432,7 @@ export default function ChatPage() {
       <style>{`
         .conv-item:hover { background: var(--bg-elevated) !important; border-color: var(--border-subtle) !important; }
         .member-row:hover { background: var(--bg-elevated) !important; }
-        .chat-input-box:focus-within { border-color: var(--color-primary-500) !important; box-shadow: 0 0 0 3px hsla(217, 100%, 50%, 0.1); }
+        .chat-input-box:focus-within { border-color: var(--color-primary-500) !important; box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent); }
         @keyframes typingDot { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>

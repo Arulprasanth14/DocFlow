@@ -16,23 +16,23 @@ import { useAuthStore } from '@/store/authStore';
 
 // ── Accent palette (matches AdminLayout) ─────────────────────────────────────
 const A = {
-  accent:       'hsl(28, 80%, 54%)',
-  accentDim:    'hsla(28, 80%, 54%, 0.1)',
-  accentBorder: 'hsla(28, 80%, 54%, 0.25)',
-  red:          'hsl(10, 75%, 55%)',
-  redDim:       'hsla(10, 75%, 55%, 0.1)',
-  redBorder:    'hsla(10, 75%, 55%, 0.25)',
-  blue:         'hsl(217, 90%, 60%)',
-  blueDim:      'hsla(217, 90%, 60%, 0.1)',
-  blueBorder:   'hsla(217, 90%, 60%, 0.2)',
-  green:        'hsl(145, 65%, 50%)',
-  greenDim:     'hsla(145, 65%, 50%, 0.1)',
-  greenBorder:  'hsla(145, 65%, 50%, 0.2)',
-  bgCard:       'hsla(222, 24%, 12%, 0.8)',
-  border:       'hsla(15, 60%, 40%, 0.18)',
-  textPrimary:  'hsl(215, 20%, 92%)',
-  textSecondary:'hsl(215, 15%, 62%)',
-  textMuted:    'hsl(215, 12%, 42%)',
+  accent:       'var(--chart-4)',
+  accentDim:    'color-mix(in srgb, var(--chart-4) 12%, transparent)',
+  accentBorder: 'color-mix(in srgb, var(--chart-4) 30%, transparent)',
+  red:          'var(--destructive)',
+  redDim:       'color-mix(in srgb, var(--destructive) 12%, transparent)',
+  redBorder:    'color-mix(in srgb, var(--destructive) 30%, transparent)',
+  blue:         'var(--primary)',
+  blueDim:      'color-mix(in srgb, var(--primary) 12%, transparent)',
+  blueBorder:   'color-mix(in srgb, var(--primary) 25%, transparent)',
+  green:        'var(--status-approved)',
+  greenDim:     'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+  greenBorder:  'color-mix(in srgb, var(--status-approved) 25%, transparent)',
+  bgCard:       'var(--card)',
+  border:       'var(--border)',
+  textPrimary:  'var(--foreground)',
+  textSecondary:'var(--muted-foreground)',
+  textMuted:    'var(--muted-foreground)',
 } as const;
 
 // ── Role summary data (static — matches SYSTEM_ROLES) ────────────────────────
@@ -189,7 +189,7 @@ export default function AdminDashboardPage() {
             Admin Dashboard
           </span>
         </div>
-        <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: A.textPrimary, marginBottom: '4px' }}>
+        <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: A.textPrimary, marginBottom: '4px' }}>
           {timeGreeting}, {user?.name?.split(' ')[0] ?? 'Admin'} 👋
         </h1>
         <p style={{ fontSize: '0.9rem', color: A.textSecondary }}>
@@ -266,7 +266,7 @@ export default function AdminDashboardPage() {
               }}
               onMouseEnter={e => {
                 (e.currentTarget as HTMLElement).style.borderColor = A.accentBorder;
-                (e.currentTarget as HTMLElement).style.background = 'hsla(28,80%,54%,0.06)';
+                (e.currentTarget as HTMLElement).style.background = 'color-mix(in srgb, var(--chart-4) 8%, transparent)';
               }}
               onMouseLeave={e => {
                 (e.currentTarget as HTMLElement).style.borderColor = A.border;

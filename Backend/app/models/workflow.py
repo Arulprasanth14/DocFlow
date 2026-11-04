@@ -22,6 +22,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -29,6 +30,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -82,8 +84,43 @@ class WorkflowTemplate(BaseModel):
         String(20), default="organization", server_default="organization", nullable=False,
     )
 
+    # ── Lifecycle + versioning (Workflow module DM-01..04, WF-LC-03) ───────
+    # `status` separates "archived" (hidden from pickers, in-flight runs
+    # continue, restorable) from `is_active`, which the older enable/disable
+    # action toggles. Both are kept: `is_active` is still read by existing
+    # callers and the two are moved in step by the service layer.
+    status: Mapped[str] = mapped_column(
+        String(20), default="active", server_default="active", nullable=False,
+    )
+    # Workflow-level setting WF-BLD-07 / BR-06: when true, a revised document
+    # restarts from stage 1 instead of returning to the stage that asked for
+    # the changes. Default OFF — the spec is explicit that a full re-approval
+    # must never happen implicitly.
+    require_full_reapproval: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
+    )
+    # Points at the newest immutable version. Nullable because a template
+    # created before versioning existed has none until the backfill runs.
+    # use_alter breaks the cycle with workflow_template_versions.template_id.
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_template_versions.id", use_alter=True,
+                   name="fk_wft_current_version"),
+        nullable=True,
+    )
+
     owner: Mapped["User | None"] = relationship(  # type: ignore[name-defined]
         "User", lazy="noload", foreign_keys=[created_by],
+    )
+    versions: Mapped[list["WorkflowTemplateVersion"]] = relationship(
+        "WorkflowTemplateVersion", back_populates="template",
+        lazy="noload", cascade="all, delete-orphan",
+        foreign_keys="WorkflowTemplateVersion.template_id",
+        order_by="WorkflowTemplateVersion.version_number",
+    )
+    shares: Mapped[list["WorkflowShare"]] = relationship(
+        "WorkflowShare", back_populates="template",
+        lazy="noload", cascade="all, delete-orphan",
     )
 
     # Relationships
@@ -611,4 +648,214 @@ class ApprovalDecisionRecord(BaseModel):
     )
     step_instance: Mapped["WorkflowStepInstance"] = relationship(
         "WorkflowStepInstance", back_populates="approval_decisions", lazy="noload",
+    )
+
+
+# ── 3. Workflow Definition Versioning & Sharing (Workflow module §4.4, §5.1) ──
+
+class WorkflowTemplateVersion(BaseModel):
+    """
+    An IMMUTABLE snapshot of a workflow definition (DM-01).
+
+    Why this exists: before it, `WorkflowTemplate.version` was a bare integer
+    counter and the stage rows were mutable, so
+      * `WorkflowService.advance_stage()` read the LIVE template, meaning an
+        edit silently re-routed runs that were already in flight, though
+        DM-02 says a run is pinned to one version "for its entire life"; and
+      * the stage list could not be edited at all without either violating
+        `approval_steps.stage_id` / `workflow_instances.current_stage_id`
+        (neither has ON DELETE) or orphaning the audit trail of approvals
+        already recorded against those stages.
+
+    Each save writes a new row here and never touches an existing one; a run
+    pins the version it was submitted against, so editing, archiving or
+    deleting the template afterwards cannot change it (BR-02, DM-02, E6).
+
+    `stages_snapshot` duplicates the ordered stage list as JSON for cheap,
+    join-free reads (audit timelines, "which stages did this run actually
+    use?") while `WorkflowVersionStage` holds the same data relationally for
+    querying and constraint enforcement.
+    """
+    __tablename__ = "workflow_template_versions"
+
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_templates.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Name and description are snapshotted too: the audit trail must show what
+    # the workflow was CALLED when a document went through it, not what it is
+    # called now (X-AUD-02 renders a human-readable timeline from this).
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    require_full_reapproval: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    stages_snapshot: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]",
+    )
+
+    template: Mapped["WorkflowTemplate"] = relationship(
+        "WorkflowTemplate", back_populates="versions",
+        lazy="noload", foreign_keys=[template_id],
+    )
+    stages: Mapped[list["WorkflowVersionStage"]] = relationship(
+        "WorkflowVersionStage", back_populates="version",
+        lazy="noload", cascade="all, delete-orphan",
+        order_by="WorkflowVersionStage.position",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "version_number",
+                         name="uq_wf_version_template_number"),
+    )
+
+
+class WorkflowVersionStage(BaseModel):
+    """
+    One stage inside an immutable workflow version (§5.5, §8).
+
+    Deliberately separate from the legacy `WorkflowStage`: those rows are
+    referenced by `approval_steps.stage_id` and cannot be rewritten without
+    destroying history, so versioned stages get their own table and the old
+    one is left exactly as it is.
+
+    `due_within_value` + `due_within_unit` are what the builder shows
+    ("2 days"); `due_within_hours` is what the engine computes with. Both are
+    stored so the UI can round-trip the wording the user chose instead of
+    re-deriving "48 hours" and showing that back to them.
+    """
+    __tablename__ = "workflow_version_stages"
+
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_template_versions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 'specific_user' | 'submitter_manager'  (§5.5 field B offers exactly two)
+    approver_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Required iff approver_type == 'specific_user' (enforced by a CHECK below).
+    approver_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    department_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True,
+    )
+    due_within_value: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    # 'hours' | 'days'
+    due_within_unit: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="days", server_default="days",
+    )
+    due_within_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
+    require_signing: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
+    )
+
+    version: Mapped["WorkflowTemplateVersion"] = relationship(
+        "WorkflowTemplateVersion", back_populates="stages", lazy="noload",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("version_id", "position", name="uq_wf_vstage_position"),
+        # 1 hour .. 30 days (O-5). A zero-hour deadline would be overdue on
+        # arrival; anything past 30 days is not an SLA.
+        CheckConstraint("due_within_hours >= 1 AND due_within_hours <= 720",
+                        name="ck_wf_vstage_due_within_hours"),
+        CheckConstraint(
+            "approver_type IN ('specific_user', 'submitter_manager')",
+            name="ck_wf_vstage_approver_type",
+        ),
+        # A 'specific_user' stage with nobody selected would resolve to nobody
+        # and stall the run forever; a 'submitter_manager' stage with somebody
+        # pinned would contradict its own rule.
+        CheckConstraint(
+            "(approver_type = 'specific_user' AND approver_user_id IS NOT NULL)"
+            " OR (approver_type = 'submitter_manager' AND approver_user_id IS NULL)",
+            name="ck_wf_vstage_approver_presence",
+        ),
+        CheckConstraint("due_within_unit IN ('hours', 'days')",
+                        name="ck_wf_vstage_due_within_unit"),
+    )
+
+
+class WorkflowShare(BaseModel):
+    """
+    A grant of USE permission on one workflow to one individual user (§5.1).
+
+    Ownership, visibility and permission-to-use are three separate concepts
+    and the spec is explicit that they must never be conflated:
+      ownership  -> workflow_templates.created_by
+      visibility -> DERIVED: "Shared" iff an active row exists here
+      use        -> this row
+
+    A grantee may view the configuration, select the workflow on upload and
+    duplicate it into their own private copy. They may NOT edit, archive,
+    delete or re-share it (WF-OWN-05).
+
+    Revoking sets `revoked_at` rather than deleting, so the audit trail keeps
+    who granted what to whom and when it ended (WF-OWN-11, E20). Runs already
+    started are unaffected by a revoke (WF-OWN-06, DM-02).
+    """
+    __tablename__ = "workflow_shares"
+
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_templates.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    grantee_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # v1 has exactly one grantable permission (§5.1). Stored rather than
+    # implied so that adding VIEW/EDIT later needs no migration of meaning.
+    permission: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="USE", server_default="USE",
+    )
+    granted_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False,
+    )
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    # The chat message that announced the share, so re-sharing returns the
+    # existing one instead of sending a second message (WF-OWN-07).
+    chat_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    template: Mapped["WorkflowTemplate"] = relationship(
+        "WorkflowTemplate", back_populates="shares", lazy="noload",
+    )
+    grantee: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", lazy="noload", foreign_keys=[grantee_user_id],
+    )
+
+    __table_args__ = (
+        # At most one LIVE share per (workflow, user). Revoked rows are kept
+        # for audit and must not block a later re-share, hence partial. This
+        # is what makes WF-OWN-07 ("sharing is idempotent") a database
+        # guarantee rather than a check-then-insert race.
+        Index(
+            "uq_workflow_share_active",
+            "template_id", "grantee_user_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        # The grantee "Shared with me" list and the upload picker both ask
+        # "which live shares do I have?" — the index §8 requires.
+        Index(
+            "idx_workflow_share_grantee_active",
+            "grantee_user_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
     )

@@ -15,11 +15,16 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  FileEdit, Trash2, Send, Clock, AlertCircle, Loader2, Plus, Sparkles, FileText,
+  FileEdit, Trash2, Send, Clock, AlertCircle, Plus, Sparkles, FileText,
 } from 'lucide-react';
 import { documentsApi } from '@/lib/api/documents';
 import { useAuthStore } from '@/store/authStore';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { GlassCard } from '@/components/ui/GlassCard';
+import { IconChip } from '@/components/ui/IconChip';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { Skeleton } from '@/components/ui/Skeleton';
 
 const C = {
   card: 'var(--bg-elevated)',
@@ -91,40 +96,24 @@ export default function DraftsPage() {
   const drafts = data?.items ?? [];
 
   return (
-    <div style={{ padding: 32, maxWidth: 1000, margin: '0 auto' }}>
+    <div className="page-content" style={{ paddingTop: 24, maxWidth: 1040, margin: '0 auto' }}>
       {/* Header */}
-      <div
-        style={{
-          display: 'flex', justifyContent: 'space-between',
-          alignItems: 'flex-start', gap: 16, marginBottom: 26,
-        }}
-      >
-        <div>
-          <h1 style={{ fontSize: 26, fontWeight: 800, color: C.heading, marginBottom: 6 }}>
-            Drafts
-          </h1>
-          <p style={{ fontSize: 13.5, color: C.body }}>
-            Unfinished documents you've saved. Nothing here is in an approval
-            workflow until you submit it.
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-          <button
-            onClick={() => navigate('/documents?compose=ai')}
-            className="btn btn-ghost btn-sm"
-            style={{ gap: 7 }}
-          >
-            <Sparkles size={14} /> Draft with AI
-          </button>
-          <button
-            onClick={() => navigate('/documents?compose=1')}
-            className="btn btn-primary btn-sm"
-            style={{ gap: 7 }}
-          >
-            <Plus size={14} /> New document
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        breadcrumbs={[{ label: 'Workspace' }, { label: 'Drafts' }]}
+        title="Drafts"
+        description="Unfinished documents you've saved. Nothing here is in an approval workflow until you submit it."
+        actions={
+          <>
+            <button onClick={() => navigate('/documents?compose=ai')} className="btn btn-secondary btn-sm" style={{ gap: 7 }}>
+              <Sparkles size={14} /> Draft with AI
+            </button>
+            <button onClick={() => navigate('/documents?compose=1')} className="btn btn-primary btn-sm" style={{ gap: 7 }}>
+              <Plus size={14} /> New document
+            </button>
+          </>
+        }
+      />
+      <div style={{ height: 24 }} />
 
       {actionError && (
         <div
@@ -141,8 +130,10 @@ export default function DraftsPage() {
       )}
 
       {isLoading ? (
-        <div style={{ padding: 40, textAlign: 'center' }}>
-          <Loader2 size={22} color={C.muted} className="dspin" />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} style={{ height: 68, borderRadius: 'var(--radius-lg)' }} />
+          ))}
         </div>
       ) : isError ? (
         <div
@@ -163,28 +154,14 @@ export default function DraftsPage() {
           </div>
         </div>
       ) : drafts.length === 0 ? (
-        <div
-          style={{
-            background: C.card, border: `1px dashed ${C.border}`,
-            borderRadius: 14, padding: '48px 30px', textAlign: 'center',
-          }}
-        >
-          <FileEdit size={30} color={C.disabled} style={{ marginBottom: 12 }} />
-          <div style={{ fontSize: 15, fontWeight: 600, color: C.heading, marginBottom: 6 }}>
-            No drafts yet
-          </div>
-          <div style={{ fontSize: 13, color: C.muted, maxWidth: 400, margin: '0 auto 18px' }}>
-            Documents you start but don't submit will appear here, so you can
-            pick them up later.
-          </div>
-          <button
-            onClick={() => navigate('/documents?compose=1')}
-            className="btn btn-primary btn-sm"
-            style={{ gap: 7 }}
-          >
-            <Plus size={14} /> Start a document
-          </button>
-        </div>
+        <GlassCard style={{ padding: 8 }}>
+          <EmptyState
+            art="documents"
+            title="No drafts yet"
+            description="Documents you start but don't submit will appear here, so you can pick them up later."
+            action={<button onClick={() => navigate('/documents?compose=1')} className="btn btn-primary btn-sm" style={{ gap: 7 }}><Plus size={14} /> Start a document</button>}
+          />
+        </GlassCard>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {drafts.map((d) => {
@@ -193,24 +170,12 @@ export default function DraftsPage() {
             ] as { placeholders?: string[]; model?: string } | undefined;
             const placeholders = aiMeta?.placeholders ?? [];
             return (
-              <div
+              <GlassCard
                 key={d.id}
-                style={{
-                  background: C.card, border: `1px solid ${C.border}`,
-                  borderRadius: 12, padding: '14px 16px',
-                  display: 'flex', alignItems: 'center', gap: 14,
-                }}
+                variant="interactive"
+                style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 14 }}
               >
-                <div
-                  style={{
-                    width: 38, height: 38, borderRadius: 10, flexShrink: 0,
-                    background: `color-mix(in srgb, ${C.primary400} 10%, transparent)`,
-                    border: `1px solid color-mix(in srgb, ${C.primary400} 22%, transparent)`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}
-                >
-                  <FileText size={17} color={C.primary400} />
-                </div>
+                <IconChip tone="primary" size={38}><FileText size={17} /></IconChip>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -279,7 +244,7 @@ export default function DraftsPage() {
                     <Trash2 size={12} /> Delete
                   </button>
                 </div>
-              </div>
+              </GlassCard>
             );
           })}
         </div>

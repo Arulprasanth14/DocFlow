@@ -99,6 +99,15 @@ class WorkflowTemplateUpdate(BaseModel):
     department_id: uuid.UUID | None = None
     document_type_scope: str | None = None
     is_active: bool | None = None
+    # Declared so the field is no longer silently discarded. Until workflow
+    # versioning lands, TemplateService.update() REFUSES a changed stage list
+    # with 422 instead of dropping it: `approval_steps.stage_id` and
+    # `workflow_instances.current_stage_id` both reference `workflow_stages.id`
+    # with no ON DELETE, so replacing stages in place would either violate
+    # those foreign keys or orphan the audit trail of runs that already used
+    # them. An IDENTICAL list is accepted as a no-op so that editing only the
+    # name or description keeps working.
+    stages: list[WorkflowStageCreate] | None = None
 
 
 class WorkflowTemplateResponse(BaseModel):

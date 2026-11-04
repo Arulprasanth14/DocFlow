@@ -13,6 +13,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 import { useRegister, useGoogleLogin, useMicrosoftLogin } from '@/hooks/useAuth';
 import { useAuth } from '@/contexts/AuthContext';
+import { LivingBackground } from '@/components/ui/LivingBackground';
+import { AuthBrandPanel } from '@/components/auth/AuthBrandPanel';
 
 // ── Zod Schema ─────────────────────────────────────────────────────────────────
 const registerSchema = z
@@ -76,34 +78,6 @@ const EyeIcon = ({ open }: { open: boolean }) => (
   </svg>
 );
 
-// ── Floating Particle ──────────────────────────────────────────────────────────
-function FloatingParticle({ delay, x, size }: { delay: number; x: number; size: number }) {
-  return (
-    <motion.div
-      style={{
-        position: 'absolute',
-        left: `${x}%`,
-        bottom: '-10px',
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: `hsla(${217 + Math.random() * 40}, 90%, 65%, ${0.15 + Math.random() * 0.2})`,
-        pointerEvents: 'none',
-      }}
-      animate={{
-        y: [0, -600],
-        opacity: [0, 0.8, 0],
-        scale: [0.5, 1, 0.5],
-      }}
-      transition={{
-        duration: 8 + Math.random() * 4,
-        delay,
-        repeat: Infinity,
-        ease: 'easeInOut',
-      }}
-    />
-  );
-}
 
 // ── Password Strength ──────────────────────────────────────────────────────────
 function PasswordStrength({ password }: { password: string }) {
@@ -113,7 +87,7 @@ function PasswordStrength({ password }: { password: string }) {
     { label: 'Number', ok: /[0-9]/.test(password) },
   ];
   const score = checks.filter((c) => c.ok).length;
-  const colors = ['#ef4444', '#f59e0b', '#22c55e'];
+  const colors = ['var(--destructive)', 'var(--status-pending)', 'var(--status-approved)'];
 
   if (!password) return null;
 
@@ -221,37 +195,15 @@ export default function RegisterPage() {
   const isLoading =
     googleLogin.isPending || microsoftLogin.isPending || registerMutation.isPending || isSubmitting;
 
-  const particles = Array.from({ length: 18 }, (_, i) => ({
-    delay: i * 0.5,
-    x: (i * 17 + 5) % 100,
-    size: 4 + (i % 4) * 3,
-  }));
-
   return (
-    <div
-      className="auth-container"
-      style={{
-        background: 'radial-gradient(ellipse at 40% 0%, hsla(217, 100%, 18%, 0.4) 0%, transparent 60%), radial-gradient(ellipse at 100% 100%, hsla(258, 90%, 18%, 0.35) 0%, transparent 60%), var(--bg-base)',
-      }}
-    >
-      {/* Fixed background layer (prevents absolute glow orbs from causing any scrollbar) */}
-      <div style={{ position: 'fixed', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 0 }}>
-        {/* Floating particles */}
-        {particles.map((p, i) => <FloatingParticle key={i} {...p} />)}
+    <div className="auth-split">
+      <LivingBackground variant="auth" />
+      <AuthBrandPanel
+        eyebrow="Create your workspace"
+        headline={<>Start running approvals in <em style={{ fontStyle: 'italic' }}>minutes</em>, not weeks.</>}
+      />
 
-        {/* Glow orbs */}
-        <div style={{
-          position: 'absolute', top: '-10%', left: '-5%',
-          width: '500px', height: '500px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(217, 100%, 50%, 0.08) 0%, transparent 70%)',
-        }} />
-        <div style={{
-          position: 'absolute', bottom: '-10%', right: '-5%',
-          width: '600px', height: '600px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(258, 90%, 50%, 0.07) 0%, transparent 70%)',
-        }} />
-      </div>
-
+      <div className="auth-form-col">
       {/* Registration card */}
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.97 }}
@@ -271,9 +223,9 @@ export default function RegisterPage() {
             <Link to="/login" style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', textDecoration: 'none', marginBottom: '16px' }}>
               <div style={{
                 width: '42px', height: '42px', borderRadius: '12px',
-                background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))',
+                background: 'var(--gradient-brand)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 4px 16px hsla(217, 100%, 50%, 0.3)',
+                boxShadow: 'var(--shadow-glow)',
               }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -459,7 +411,7 @@ export default function RegisterPage() {
                       style={{
                         flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
                         border: orgMode === 'create' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
-                        background: orgMode === 'create' ? 'hsla(217, 100%, 50%, 0.1)' : 'transparent',
+                        background: orgMode === 'create' ? 'color-mix(in srgb, var(--primary) 10%, transparent)' : 'transparent',
                         color: orgMode === 'create' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
                         fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
                       }}
@@ -473,7 +425,7 @@ export default function RegisterPage() {
                       style={{
                         flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
                         border: orgMode === 'join' ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
-                        background: orgMode === 'join' ? 'hsla(217, 100%, 50%, 0.1)' : 'transparent',
+                        background: orgMode === 'join' ? 'color-mix(in srgb, var(--primary) 10%, transparent)' : 'transparent',
                         color: orgMode === 'join' ? 'var(--color-primary-300)' : 'var(--text-secondary)',
                         fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
                       }}
@@ -530,8 +482,8 @@ export default function RegisterPage() {
                   marginTop: '16px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(0, 82%, 55%, 0.1)',
-                  border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                  background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                   color: 'var(--color-error-400)',
                   fontSize: '0.875rem',
                   display: 'flex',
@@ -561,6 +513,7 @@ export default function RegisterPage() {
           Enterprise Document Workflow & Approval Platform
         </p>
       </motion.div>
+      </div>
     </div>
   );
 }

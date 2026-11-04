@@ -25,8 +25,8 @@ import type { LoginResponse } from '@/types';
 
 /** The backend (or network) is unavailable — the user's account state is UNKNOWN. */
 export class TransientAuthError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
-    super(message);
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
     this.name = 'TransientAuthError';
   }
 }

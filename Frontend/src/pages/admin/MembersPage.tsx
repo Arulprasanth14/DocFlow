@@ -253,7 +253,7 @@ export default function MembersPage() {
         }}
       >
         <div>
-          <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+          <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
             Organization Members
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -275,8 +275,8 @@ export default function MembersPage() {
               marginBottom: '20px',
               padding: '12px 16px',
               borderRadius: 'var(--radius-md)',
-              background: 'hsla(145, 70%, 45%, 0.1)',
-              border: '1px solid hsla(145, 70%, 45%, 0.25)',
+              background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
               color: 'var(--color-success-400)',
               fontSize: '0.875rem',
             }}
@@ -294,7 +294,7 @@ export default function MembersPage() {
             exit={{ opacity: 0 }}
             style={{
               marginBottom: '20px', padding: '12px 16px', borderRadius: 'var(--radius-md)',
-              background: 'hsla(0, 82%, 55%, 0.1)', border: '1px solid hsla(0, 82%, 55%, 0.25)',
+              background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
               color: 'var(--color-error-400)', fontSize: '0.875rem',
             }}
           >
@@ -318,8 +318,8 @@ export default function MembersPage() {
               marginBottom: '20px',
               padding: '16px 20px',
               borderRadius: 'var(--radius-md)',
-              background: 'hsla(217, 100%, 50%, 0.08)',
-              border: '1px solid hsla(217, 100%, 50%, 0.25)',
+              background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
@@ -557,8 +557,8 @@ export default function MembersPage() {
                             fontSize: '0.78rem',
                             fontWeight: 600,
                             color: 'var(--color-primary-300)',
-                            background: 'hsla(217, 100%, 50%, 0.12)',
-                            border: '1px solid hsla(217, 100%, 50%, 0.25)',
+                            background: 'color-mix(in srgb, var(--primary) 12%, transparent)',
+                            border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
                             padding: '3px 10px',
                             borderRadius: 'var(--radius-full)',
                           }}
@@ -584,8 +584,8 @@ export default function MembersPage() {
                             borderRadius: 'var(--radius-full)',
                             background:
                               member.status === 'active'
-                                ? 'hsla(145, 70%, 50%, 0.12)'
-                                : 'hsla(38, 92%, 50%, 0.12)',
+                                ? 'color-mix(in srgb, var(--status-approved) 14%, transparent)'
+                                : 'color-mix(in srgb, var(--status-pending) 14%, transparent)',
                             color:
                               member.status === 'active'
                                 ? 'var(--color-success-400)'
@@ -697,7 +697,7 @@ export default function MembersPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -731,8 +731,8 @@ export default function MembersPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',
@@ -904,7 +904,7 @@ export default function MembersPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -941,8 +941,8 @@ export default function MembersPage() {
                       style={{
                         padding: '12px 16px',
                         borderRadius: 'var(--radius-md)',
-                        background: 'hsla(0, 82%, 55%, 0.1)',
-                        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                         color: 'var(--color-error-400)',
                         fontSize: '0.875rem',
                         display: 'flex',

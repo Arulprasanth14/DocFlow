@@ -94,6 +94,26 @@ class LLMProvider(abc.ABC):
         message.
         """
 
+    async def stream(
+        self,
+        messages: list[ChatMessage],
+        *,
+        system: str | None = None,
+        temperature: float = 0.2,
+        max_output_tokens: int = 1024,
+    ):
+        """
+        Stream text deltas. Concrete providers override with native streaming.
+        Default implementation yields the complete generated text as a single delta.
+        """
+        result = await self.generate(
+            messages,
+            system=system,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        yield result.text
+
 
 class EmbeddingProvider(abc.ABC):
     """Text → vector."""

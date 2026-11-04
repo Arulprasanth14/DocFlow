@@ -70,6 +70,20 @@ class Department(BaseModel):
         UUID(as_uuid=True), ForeignKey("users.id", use_alter=True, name="fk_department_head"), nullable=True
     )
 
+    # ── Signing rule (Workflow module WF-STG-20/21, BR-08) ─────────────────
+    # When true, any approval stage whose department is this one MUST capture a
+    # signature, and the server forces the flag on regardless of what the
+    # client sends. Identification is by this attribute or the department id —
+    # never by matching the name "Finance", which WF-STG-20 explicitly forbids
+    # because a rename would silently disable the rule.
+    #
+    # INHERITED down the tree (decision Q6 in AUDIT/DECISIONS.md): a department
+    # requires signing if it or ANY ancestor via parent_id has this set, so a
+    # sub-department of Finance cannot quietly accept an unsigned approval.
+    requires_signature: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False,
+    )
+
     organization: Mapped["Organization"] = relationship(
         "Organization", back_populates="departments", lazy="noload"
     )

@@ -122,7 +122,7 @@ export default function AgentKnowledgePage() {
   return (
     <div style={{ padding: 32, maxWidth: 1100, margin: '0 auto' }}>
       <div style={{ marginBottom: 26 }}>
-        <h1 style={{ fontSize: 26, fontWeight: 800, color: C.heading, marginBottom: 6 }}>
+        <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: C.heading, marginBottom: 6 }}>
           Agent Legal Documents
         </h1>
         <p style={{ fontSize: 13.5, color: C.body, lineHeight: 1.6 }}>

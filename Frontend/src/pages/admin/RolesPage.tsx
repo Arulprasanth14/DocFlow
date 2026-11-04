@@ -50,7 +50,7 @@ export default function RolesPage() {
     <div style={{ padding: '32px', maxWidth: '1100px', margin: '0 auto' }}>
       {/* Header */}
       <div style={{ marginBottom: '32px' }}>
-        <h1 style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '6px' }}>
+        <h1 data-page-title className="font-display" style={{ fontSize: 'clamp(1.75rem, 1.2rem + 2vw, 2.4rem)', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', marginBottom: '6px' }}>
           Roles & Permissions
         </h1>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem' }}>
@@ -97,8 +97,8 @@ export default function RolesPage() {
                       fontSize: '0.7rem',
                       fontWeight: 700,
                       color: 'var(--color-accent-300)',
-                      background: 'hsla(258, 90%, 65%, 0.15)',
-                      border: '1px solid hsla(258, 90%, 65%, 0.3)',
+                      background: 'color-mix(in srgb, var(--chart-3) 15%, transparent)',
+                      border: '1px solid color-mix(in srgb, var(--chart-3) 30%, transparent)',
                       padding: '2px 8px',
                       borderRadius: 'var(--radius-full)',
                     }}
@@ -132,7 +132,7 @@ export default function RolesPage() {
                       style={{
                         fontSize: '0.72rem',
                         color: 'var(--color-primary-300)',
-                        background: 'hsla(217, 100%, 50%, 0.1)',
+                        background: 'color-mix(in srgb, var(--primary) 10%, transparent)',
                         padding: '3px 8px',
                         borderRadius: 'var(--radius-sm)',
                         fontWeight: 600,
@@ -177,7 +177,7 @@ export default function RolesPage() {
               style={{
                 position: 'fixed',
                 inset: 0,
-                background: 'hsla(220, 50%, 5%, 0.7)',
+                background: 'var(--overlay-scrim)',
                 backdropFilter: 'blur(4px)',
                 zIndex: 200,
               }}
@@ -258,8 +258,8 @@ export default function RolesPage() {
                                 style={{
                                   padding: '8px 10px',
                                   borderRadius: 'var(--radius-sm)',
-                                  background: 'hsla(217, 100%, 50%, 0.12)',
-                                  border: '1px solid hsla(217, 100%, 50%, 0.25)',
+                                  background: 'color-mix(in srgb, var(--primary) 12%, transparent)',
+                                  border: '1px solid color-mix(in srgb, var(--primary) 25%, transparent)',
                                 }}
                               >
                                 <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--color-primary-300)' }}>

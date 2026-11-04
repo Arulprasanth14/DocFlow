@@ -101,7 +101,7 @@ export default function ConfirmDialog({
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
               <div style={{
                 width: '40px', height: '40px', borderRadius: '12px',
-                background: 'hsla(0, 82%, 55%, 0.1)', flexShrink: 0,
+                background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', flexShrink: 0,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 color: 'var(--color-error-400)',
               }}>
@@ -133,8 +133,8 @@ export default function ConfirmDialog({
                 onClick={onConfirm}
                 disabled={confirmDisabled}
                 style={{
-                  background: 'var(--color-error-500)',
-                  boxShadow: '0 4px 12px hsla(0, 82%, 55%, 0.25)',
+                  background: 'var(--destructive)',
+                  boxShadow: '0 4px 12px color-mix(in srgb, var(--destructive) 25%, transparent)',
                   opacity: confirmDisabled ? 0.5 : 1,
                   cursor: confirmDisabled ? 'not-allowed' : 'pointer',
                 }}

@@ -220,7 +220,7 @@ export default function SearchPage() {
   return (
     <div style={{ position: 'relative', minHeight: '100%' }}>
       {/* Ambient */}
-      <div style={{ position: 'absolute', top: -200, left: '50%', transform: 'translateX(-50%)', width: 800, height: 500, borderRadius: 9999, background: 'radial-gradient(circle, rgba(37,99,235,0.14) 0%, transparent 68%)', filter: 'blur(200px)', zIndex: 1, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: -200, left: '50%', transform: 'translateX(-50%)', width: 800, height: 500, borderRadius: 9999, background: 'radial-gradient(circle, color-mix(in srgb, var(--primary) 14%, transparent) 0%, transparent 68%)', filter: 'blur(200px)', zIndex: 1, pointerEvents: 'none' }} />
 
       <div style={{ position: 'relative', zIndex: 10, padding: '40px 32px', maxWidth: 860, margin: '0 auto' }}>
         {/* Hero Search */}
@@ -229,7 +229,7 @@ export default function SearchPage() {
             <div style={{ width: 40, height: 40, borderRadius: 12, background: `color-mix(in srgb, ${C.primary400} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${C.primary400} 25%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Search size={20} color={C.primary400} />
             </div>
-            <h1 style={{ fontSize: 28, fontWeight: 800, color: C.heading, margin: 0 }}>Global Search</h1>
+            <h1 data-page-title className="font-display" style={{ fontSize: '2rem', fontWeight: 400, lineHeight: 1.1, color: 'var(--foreground)', margin: 0 }}>Global Search</h1>
           </div>
           <p style={{ color: C.muted, fontSize: 14 }}>Find documents, workflows, and team members instantly</p>
         </div>
@@ -239,7 +239,7 @@ export default function SearchPage() {
           <div style={{
             display: 'flex', alignItems: 'center', gap: 12,
             background: C.card, border: `1.5px solid ${C.border}`, borderRadius: 18,
-            padding: '14px 20px', boxShadow: '0 4px 32px rgba(0,0,0,0.3)',
+            padding: '14px 20px', boxShadow: 'var(--shadow-lg)',
             transition: 'border-color 0.2s, box-shadow 0.2s',
           }}
             className="search-box"
@@ -443,7 +443,7 @@ export default function SearchPage() {
       <style>{`
         .search-box:focus-within {
           border-color: var(--color-primary-500) !important;
-          box-shadow: 0 0 0 3px hsla(217, 100%, 50%, 0.15), 0 4px 32px rgba(0,0,0,0.3) !important;
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent), var(--shadow-lg) !important;
         }
         .result-row:hover {
           border-color: var(--border-strong) !important;

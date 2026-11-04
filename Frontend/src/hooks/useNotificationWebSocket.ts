@@ -20,10 +20,10 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { tokenStore } from '@/lib/api/client';
 import { notificationKeys } from '@/hooks/useNotifications';
-import { useToastStore } from '@/store/toastStore';
 
 const WS_BASE = import.meta.env.VITE_WS_URL ?? 'ws://localhost:8000';
 
@@ -46,7 +46,7 @@ export interface NotificationPayload {
 export function useNotificationWebSocket(enabled: boolean = true) {
   const queryClient = useQueryClient();
   const location = useLocation();
-  const { pushToast } = useToastStore();
+  const navigate = useNavigate();
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -65,21 +65,19 @@ export function useNotificationWebSocket(enabled: boolean = true) {
 
     if (batch.length === 1) {
       const n = batch[0];
-      pushToast({
+      toast(n.title, {
         id: n.id,
-        title: n.title,
-        body: n.body ?? undefined,
-        deepLink: n.deep_link ?? undefined,
+        description: n.body ?? undefined,
+        ...(n.deep_link
+          ? { action: { label: 'View', onClick: () => navigate(n.deep_link!) } }
+          : {}),
       });
     } else {
-      pushToast({
+      toast(`${batch.length} new updates`, {
         id: `batch-${Date.now()}`,
-        title: `${batch.length} new updates`,
-        body: undefined,
-        deepLink: undefined,
       });
     }
-  }, [pushToast]);
+  }, [navigate]);
 
   const handleNotification = useCallback((notif: NotificationPayload) => {
     // 1. Instantly update React Query cache — prepend to list, bump unread count

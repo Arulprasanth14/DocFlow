@@ -20,10 +20,18 @@ import { apiClient } from './client';
 export interface WorkflowTemplateSummary {
   id: string;
   name: string;
+  /** Returned by the API (schemas/workflow_instances.py) but missing here, so
+   *  WorkflowsPage's reads of it failed to typecheck. */
+  description: string | null;
   department_id: string | null;
+  doc_type_id: string | null;
   is_active: boolean;
   version: number;
   created_at: string;
+  /** Ownership/sharing: lets the UI tell "mine" from shared and decide
+   *  whether to offer edit controls. */
+  created_by: string | null;
+  visibility: 'private' | 'organization';
 }
 
 export interface WorkflowInstance {

@@ -27,6 +27,7 @@ firebase-admin==6.5.0
 redis[hiredis]==5.1.1
 celery[redis]==5.4.0
 celery[beat]==5.4.0
+kombu==5.6.2
 flower==2.0.1
 
 # --- Storage ---
@@ -52,12 +53,19 @@ langchain-google-genai==2.0.1
 
 # --- OCR / document text extraction ---
 pytesseract==0.3.13
+pdf2image==1.17.0
 pdfplumber==0.11.4
 python-docx==1.1.2
 openpyxl==3.1.5
 Pillow==10.4.0
 # PDF text extraction for the Agent's knowledge ingestion (app/ai/ingestion.py)
 pypdf==6.20.1
+
+# PDF GENERATION for the immutable submission snapshot (FR-13.8) and document
+# export (FR-6.7). Pure Python, no system packages. Noto Sans (SIL OFL 1.1) is
+# bundled in app/assets/fonts because reportlab's own Vera family has only 283
+# glyphs and cannot render the rupee sign, Greek or Cyrillic.
+reportlab==4.2.5
 
 # --- TLS ---
 # Routes Python's certificate verification through the OS trust store so a

@@ -14,8 +14,13 @@ from typing import Sequence
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictException, ForbiddenException, NotFoundException
-from app.models.workflow import WorkflowStage, WorkflowTemplate
+from app.core.exceptions import (
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
+from app.models.workflow import WorkflowTemplate
 from app.repositories.workflow_repo import WorkflowStageRepository, WorkflowTemplateRepository
 from app.schemas.workflow_instances import (
     TemplateReviewResponse,
@@ -402,6 +407,15 @@ class TemplateService:
             self._assert_can_edit(tmpl, actor_id, is_admin)
 
         updates = req.model_dump(exclude_none=True)
+        # `stages` is handled separately: it is not a column on the template.
+        updates.pop("stages", None)
+        if req.stages is not None and self._stages_differ(tmpl.stages, req.stages):
+            raise UnprocessableEntityException(
+                "This workflow's stages cannot be changed yet. Saving them here "
+                "would break the record of approvals already made against the "
+                "current stages. Rename or re-describe the workflow here, or "
+                "duplicate it and edit the copy."
+            )
         if updates:
             # Bump version on any update. NOTE: in-flight instances are
             # unaffected — each one carries its own frozen
@@ -415,6 +429,45 @@ class TemplateService:
         await self.db.commit()
         tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
         return WorkflowTemplateResponse.model_validate(tmpl)
+
+    @staticmethod
+    def _stages_differ(stored: Sequence, incoming: Sequence) -> bool:
+        """True when `incoming` describes a different definition than `stored`.
+
+        Used by update() to tell "the client re-sent the stage list unchanged"
+        (safe: a no-op) from "the client wants the stages changed" (refused
+        until versioning exists, rather than silently dropped). Compares only
+        what actually defines behaviour, so re-ordering the JSON array or
+        changing letter case in a name is not mistaken for a real edit.
+        """
+        import json
+
+        def rules_of(stage) -> tuple:
+            return tuple(sorted(
+                (
+                    str(getattr(r, "rule_type", "")),
+                    json.dumps(getattr(r, "rule_value", None) or {},
+                               sort_keys=True, default=str),
+                )
+                for r in (getattr(stage, "approver_rules", None) or [])
+            ))
+
+        def fingerprint(stage) -> tuple:
+            return (
+                int(getattr(stage, "sequence_order", 0) or 0),
+                (getattr(stage, "name", "") or "").strip().casefold(),
+                str(getattr(stage, "stage_type", "sequential") or "sequential"),
+                int(getattr(stage, "min_approvals_required", 1) or 1),
+                getattr(stage, "sla_hours", None),
+                bool(getattr(stage, "reapproval_on_revision", False)),
+                bool(getattr(stage, "requires_signature", False)),
+                rules_of(stage),
+            )
+
+        return (
+            sorted(fingerprint(s) for s in (stored or []))
+            != sorted(fingerprint(s) for s in (incoming or []))
+        )
 
     async def set_active(
         self,

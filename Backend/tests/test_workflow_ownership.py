@@ -372,3 +372,73 @@ async def test_cannot_read_a_workflow_from_another_org(client, db_session, worke
         headers=auth_headers(outsider_token),
     )
     assert resp.status_code == 404
+
+
+# ── Defect: the builder's edit mode silently discarded stage edits ──────────
+# `WorkflowTemplateUpdate` had no `stages` field, so Pydantic dropped the stage
+# list the builder sends on every save and the server wrote none of it, with no
+# error — while the UI told the user a new version had been created. These two
+# tests pin the corrected behaviour: an unchanged list is a no-op, a CHANGED
+# list is refused with 422 rather than dropped. Replacing stages in place is
+# not an option until workflow versioning exists: `approval_steps.stage_id`
+# and `workflow_instances.current_stage_id` both reference `workflow_stages.id`
+# with no ON DELETE, so it would either violate those foreign keys or orphan
+# the audit trail of approvals already recorded against those stages.
+
+async def test_editing_stages_is_refused_not_silently_dropped(client, worker, admin):
+    _w, token = worker
+    approver, _ = admin
+    created = await _create(client, token, approver.id, name="Stage edit guard")
+    template_id = created.json()["id"]
+    original = created.json()["stages"]
+    assert len(original) == 1
+
+    # Ask for a genuinely different definition (an extra stage).
+    resp = await client.patch(
+        f"/api/v1/workflow-templates/{template_id}",
+        headers=auth_headers(token),
+        json={
+            "stages": [
+                _stage(approver.id, name="Review", order=1),
+                _stage(approver.id, name="Second opinion", order=2),
+            ]
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+    # ...and prove nothing changed on the server, which is the real point:
+    # the old behaviour returned 200 and also changed nothing.
+    after = await client.get(
+        f"/api/v1/workflow-templates/{template_id}",
+        headers=auth_headers(token),
+    )
+    assert after.status_code == 200
+    assert len(after.json()["stages"]) == 1
+    assert after.json()["stages"][0]["name"] == original[0]["name"]
+
+
+async def test_resending_identical_stages_is_a_noop_so_rename_still_works(
+    client, worker, admin
+):
+    """The builder always sends `stages`, even when only the name changed.
+    An identical list must therefore stay accepted, or renaming would 422."""
+    _w, token = worker
+    approver, _ = admin
+    created = await _create(client, token, approver.id, name="Rename me")
+    template_id = created.json()["id"]
+    stage = created.json()["stages"][0]
+
+    resp = await client.patch(
+        f"/api/v1/workflow-templates/{template_id}",
+        headers=auth_headers(token),
+        json={
+            "name": "Renamed",
+            # Same definition, re-sent the way the builder re-sends it.
+            "stages": [
+                _stage(approver.id, name=stage["name"], order=stage["sequence_order"])
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Renamed"
+    assert len(resp.json()["stages"]) == 1

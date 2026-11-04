@@ -24,10 +24,11 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import {
-  BarChart2, FileText, CheckCircle, XCircle, Clock, Activity,
+  FileText, CheckCircle, XCircle, Clock, Activity,
   AlertTriangle, Loader2, Info, Users, GitBranch, RotateCcw,
 } from 'lucide-react';
 import { analyticsApi, type ReportPeriod } from '@/lib/api/analytics';
+import { PageHeader } from '@/components/ui/PageHeader';
 
 const C = {
   card: 'var(--bg-elevated)',
@@ -248,107 +249,53 @@ export default function AnalyticsPage() {
   );
 
   return (
-    <div style={{ position: 'relative', minHeight: '100%', overflow: 'hidden' }}>
-      <div
-        style={{
-          position: 'absolute', bottom: -200, left: -150, width: 800, height: 800,
-          borderRadius: 9999,
-          background: 'radial-gradient(circle, rgba(37,99,235,0.16) 0%, transparent 68%)',
-          filter: 'blur(240px)', zIndex: 1, pointerEvents: 'none',
-        }}
-      />
-
-      <div
-        style={{
-          position: 'relative', zIndex: 10, padding: 32,
-          display: 'flex', flexDirection: 'column', gap: 22,
-        }}
-      >
+    <div className="page-content" style={{ paddingTop: 24, display: 'flex', flexDirection: 'column', gap: 22 }}>
         {/* Header */}
-        <div
-          style={{
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-            flexWrap: 'wrap', gap: 16,
-          }}
-        >
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-              <div
-                style={{
-                  width: 36, height: 36, borderRadius: 10,
-                  background: `color-mix(in srgb, ${C.primary400} 12%, transparent)`,
-                  border: `1px solid color-mix(in srgb, ${C.primary400} 25%, transparent)`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}
-              >
-                <BarChart2 size={18} color={C.primary400} />
+        <PageHeader
+          breadcrumbs={[{ label: 'Workspace' }, { label: 'Analytics' }]}
+          title="Analytics"
+          description={
+            data
+              ? `${SCOPE_LABEL[data.scope] ?? data.scope} · ${data.period_label} · times in ${data.timezone}`
+              : "Document workflow metrics from your organization's records"
+          }
+          actions={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {isFetching && <Loader2 size={15} color="var(--muted-foreground)" className="aspin" />}
+              <div style={{ display: 'flex', background: 'var(--muted)', border: '1px solid var(--border)', borderRadius: 'var(--radius-pill)', padding: 4, gap: 2 }}>
+                {(['monthly', 'yearly'] as ReportPeriod[]).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setPeriod(p)}
+                    style={{
+                      padding: '7px 16px', borderRadius: 'var(--radius-pill)', border: 'none', cursor: 'pointer',
+                      background: period === p ? 'var(--gradient-primary-btn)' : 'transparent',
+                      color: period === p ? 'var(--primary-foreground)' : 'var(--muted-foreground)',
+                      fontSize: 12.5, fontWeight: period === p ? 700 : 500,
+                      textTransform: 'capitalize', transition: 'all 0.15s',
+                    }}
+                  >
+                    {p}
+                  </button>
+                ))}
               </div>
-              <h1 style={{ fontSize: 26, fontWeight: 800, color: C.heading, margin: 0 }}>
-                Analytics
-              </h1>
-              {isFetching && <Loader2 size={15} color={C.muted} className="aspin" />}
-            </div>
-            <p style={{ color: C.muted, fontSize: 13.5, margin: 0 }}>
-              {data
-                ? `${SCOPE_LABEL[data.scope] ?? data.scope} · ${data.period_label} · times in ${data.timezone}`
-                : 'Document workflow metrics from your organization\'s records'}
-            </p>
-          </div>
 
-          {/* Period switcher (§9) */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <div
-              style={{
-                display: 'flex', background: C.surface,
-                border: `1px solid ${C.borderSubtle}`, borderRadius: 12, padding: 4, gap: 2,
-              }}
-            >
-              {(['monthly', 'yearly'] as ReportPeriod[]).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setPeriod(p)}
-                  style={{
-                    padding: '7px 16px', borderRadius: 9, border: 'none', cursor: 'pointer',
-                    background: period === p ? C.primary : 'transparent',
-                    color: period === p ? '#fff' : C.muted,
-                    fontSize: 12.5, fontWeight: period === p ? 700 : 500,
-                    textTransform: 'capitalize', transition: 'all 0.15s',
-                  }}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
+              {period === 'monthly' && (
+                <select className="input" value={month} onChange={(e) => setMonth(Number(e.target.value))} style={{ fontSize: 12.5, width: 'auto', padding: '8px 10px' }}>
+                  {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                    <option key={m} value={m}>{new Date(2000, m - 1, 1).toLocaleString(undefined, { month: 'long' })}</option>
+                  ))}
+                </select>
+              )}
 
-            {period === 'monthly' && (
-              <select
-                className="input"
-                value={month}
-                onChange={(e) => setMonth(Number(e.target.value))}
-                style={{ fontSize: 12.5, width: 'auto', padding: '8px 10px' }}
-              >
-                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                  <option key={m} value={m}>
-                    {new Date(2000, m - 1, 1).toLocaleString(undefined, { month: 'long' })}
-                  </option>
+              <select className="input" value={year} onChange={(e) => setYear(Number(e.target.value))} style={{ fontSize: 12.5, width: 'auto', padding: '8px 10px' }}>
+                {Array.from({ length: 6 }, (_, i) => now.getFullYear() - i).map((y) => (
+                  <option key={y} value={y}>{y}</option>
                 ))}
               </select>
-            )}
-
-            <select
-              className="input"
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-              style={{ fontSize: 12.5, width: 'auto', padding: '8px 10px' }}
-            >
-              {Array.from({ length: 6 }, (_, i) => now.getFullYear() - i).map((y) => (
-                <option key={y} value={y}>
-                  {y}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
+            </div>
+          }
+        />
 
         {/* States */}
         {isLoading ? (
@@ -602,7 +549,6 @@ export default function AnalyticsPage() {
             </div>
           </>
         )}
-      </div>
 
       <style>{`
         .aspin { animation: aspin 0.9s linear infinite; }

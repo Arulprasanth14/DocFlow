@@ -276,7 +276,7 @@ export default function ApprovalHistoryPanel({
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        position: 'fixed', inset: 0, background: 'var(--overlay-scrim)',
         zIndex: 1000, display: 'flex', justifyContent: 'flex-end',
       }}
     >

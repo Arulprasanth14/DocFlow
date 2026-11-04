@@ -7,7 +7,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useEffect } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 
 import { AuthProvider } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -36,7 +36,26 @@ import AdminLayout from '@/components/layout/AdminLayout';
 import DocumentListPage from '@/pages/documents/DocumentListPage';
 import DocumentCreatePage from '@/pages/documents/DocumentCreatePage';
 import DocumentDetailPage from '@/pages/documents/DocumentDetailPage';
+import BlankDocPage from '@/pages/documents/BlankDocPage';
+import StartFromTemplatePage from '@/pages/documents/StartFromTemplatePage';
+import SubmitWizard from '@/pages/documents/SubmitWizard';
+import TemplateStudioEntryPage from '@/pages/templates/TemplateStudioEntryPage';
+import MyTemplatesPage from '@/pages/templates/MyTemplatesPage';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
+
+// FR-6.8 / FR-15.5 — the TipTap editor is the heaviest thing in the app and is
+// needed by exactly three routes. Lazy-loading it keeps /documents and
+// /documents/new light; <Suspense> below shows the same spinner these pages
+// use while the chunk arrives.
+// Route-level split for the landing page: it owns the three.js/R3F chunk, which
+// must not ship in the initial bundle for authenticated routes (landing §10).
+const LandingPage = lazy(() => import('@/pages/landing/LandingPage'));
+const DocumentEditorPage = lazy(() => import('@/pages/documents/DocumentEditorPage'));
+const FormFillPage = lazy(() => import('@/pages/documents/FormFillPage'));
+const TemplateEditorPage = lazy(() => import('@/pages/templates/TemplateEditorPage'));
+// Lazy: the import review screen is only reached deliberately, and keeping it
+// out of the main bundle matters more than its first-paint speed (FR-6.8).
+const ImportTemplatePage = lazy(() => import('@/pages/templates/ImportTemplatePage'));
 
 // ── Approvals Page Imports (Milestone 5) ──────────────────────────────────────
 import ApprovalsPage from '@/pages/approvals/ApprovalsPage';
@@ -70,6 +89,19 @@ const queryClient = new QueryClient({
   },
 });
 
+/** Fallback for the lazily-loaded editor routes — matches their own spinner. */
+function LazyRoute({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={
+      <div className="page-content" style={{ paddingTop: 48, textAlign: 'center' }}>
+        <div className="spinner" style={{ width: 32, height: 32, margin: '0 auto' }} />
+      </div>
+    }>
+      {children}
+    </Suspense>
+  );
+}
+
 // ── Inner App (inside AuthProvider, so it can read auth context) ──────────────
 function AppInner() {
   const { isAuthenticated } = useAuth();
@@ -77,9 +109,12 @@ function AppInner() {
 
   useIdleTimeout(isAuthenticated);
 
-  // Apply theme
+  // Apply theme: Ice uses the `.dark` class (shadcn-canonical). We also keep the
+  // data-theme attribute in sync for any residual selectors during the migration.
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    root.setAttribute('data-theme', theme);
   }, [theme]);
 
   // NOTE: real-time push is handled by the two feature-specific hooks
@@ -92,34 +127,47 @@ function AppInner() {
 
   return (
     <Routes>
+      {/* ── Public Landing Route ─────────────────────────────────── */}
+      <Route
+        path="/"
+        element={
+          <Suspense
+            fallback={
+              <div
+                style={{ minHeight: '100svh', background: 'var(--background)' }}
+                aria-busy="true"
+              />
+            }
+          >
+            <LandingPage />
+          </Suspense>
+        }
+      />
+
       {/* ── Public Auth Routes ────────────────────────────────────── */}
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/register" element={<RegisterPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
 
-        {/* ── Onboarding (authenticated, but no org yet) ────────────── */}
-        <Route
-          path="/onboarding"
-          element={
-            <ProtectedRoute allowNoOrg>
-              <OnboardingPage />
-            </ProtectedRoute>
-          }
-        />
+      {/* ── Onboarding (authenticated, but no org yet) ────────────── */}
+      <Route
+        path="/onboarding"
+        element={
+          <ProtectedRoute allowNoOrg>
+            <OnboardingPage />
+          </ProtectedRoute>
+        }
+      />
 
-        {/* ── Protected App Routes (inside AppLayout) ───────────────── */}
-        <Route
-          path="/"
-          element={
-            <ProtectedRoute>
-              <AppLayout />
-            </ProtectedRoute>
-          }
-        >
-          {/* Default redirect */}
-          <Route index element={<Navigate to="/dashboard" replace />} />
-
-          {/* Dashboard */}
-          <Route path="dashboard" element={<DashboardPage />} />
+      {/* ── Protected App Routes (inside AppLayout) ───────────────── */}
+      <Route
+        element={
+          <ProtectedRoute>
+            <AppLayout />
+          </ProtectedRoute>
+        }
+      >
+        {/* Dashboard */}
+        <Route path="dashboard" element={<DashboardPage />} />
 
           {/* Profile / Settings */}
           <Route path="profile" element={<ProfilePage />} />
@@ -129,7 +177,19 @@ function AppInner() {
           {/* ── Milestone 4: Documents & Forms Routes ───────────────── */}
           <Route path="documents" element={<DocumentListPage />} />
           <Route path="documents/new" element={<DocumentCreatePage />} />
+          {/* Deep link: renders the hub with the upload modal open */}
+          <Route path="documents/new/upload" element={<DocumentCreatePage />} />
+          <Route path="documents/new/blank" element={<BlankDocPage />} />
+          <Route path="documents/new/from-template/:templateId" element={<StartFromTemplatePage />} />
+          {/* Template Studio (Phase 2) — static segments outrank documents/:id */}
+          <Route path="documents/templates/mine" element={<MyTemplatesPage />} />
+          <Route path="documents/templates/new" element={<TemplateStudioEntryPage />} />
+          <Route path="documents/templates/import" element={<LazyRoute><ImportTemplatePage /></LazyRoute>} />
+          <Route path="documents/templates/:id/edit" element={<LazyRoute><TemplateEditorPage /></LazyRoute>} />
           <Route path="documents/:id" element={<DocumentDetailPage />} />
+          <Route path="documents/:id/edit" element={<LazyRoute><DocumentEditorPage /></LazyRoute>} />
+          <Route path="documents/:id/fill" element={<LazyRoute><FormFillPage /></LazyRoute>} />
+          <Route path="documents/:id/submit" element={<SubmitWizard />} />
 
           {/* Feature routes */}
           <Route path="approvals/*" element={<ApprovalsPage />} />

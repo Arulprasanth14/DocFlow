@@ -24,7 +24,7 @@ import { useAuthStore } from '@/store/authStore';
 import { useLogout } from '@/hooks/useAuth';
 
 const PAGE_BG =
-  'radial-gradient(ellipse at 60% 0%, hsla(258, 90%, 18%, 0.5) 0%, transparent 60%), radial-gradient(ellipse at 0% 100%, hsla(217, 100%, 18%, 0.4) 0%, transparent 60%), var(--bg-base)';
+  'radial-gradient(ellipse at 60% 0%, color-mix(in srgb, var(--chart-3) 12%, transparent) 0%, transparent 60%), radial-gradient(ellipse at 0% 100%, color-mix(in srgb, var(--primary) 12%, transparent) 0%, transparent 60%), var(--bg-base)';
 
 /** Debounce a changing value so we don't fire a request per keystroke. */
 function useDebounced<T>(value: T, ms = 400): T {
@@ -99,7 +99,7 @@ function PendingScreen({ orgName }: { orgName: string }) {
         <div
           style={{
             width: '48px', height: '48px', borderRadius: '50%', margin: '0 auto 16px',
-            background: 'hsla(38, 92%, 50%, 0.12)', display: 'flex',
+            background: 'color-mix(in srgb, var(--status-pending) 14%, transparent)', display: 'flex',
             alignItems: 'center', justifyContent: 'center',
           }}
         >
@@ -232,7 +232,7 @@ export default function OnboardingPage() {
               style={{
                 flex: 1, padding: '10px 12px', borderRadius: 'var(--radius-md)',
                 border: orgMode === mode ? '1.5px solid var(--color-primary-400)' : '1px solid var(--border-subtle)',
-                background: orgMode === mode ? 'hsla(217, 100%, 50%, 0.1)' : 'transparent',
+                background: orgMode === mode ? 'color-mix(in srgb, var(--primary) 10%, transparent)' : 'transparent',
                 color: orgMode === mode ? 'var(--color-primary-300)' : 'var(--text-secondary)',
                 fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer',
               }}
@@ -300,7 +300,7 @@ export default function OnboardingPage() {
         {error && (
           <div style={{
             padding: '10px 14px', borderRadius: 'var(--radius-md)',
-            background: 'hsla(0, 82%, 55%, 0.1)', border: '1px solid hsla(0, 82%, 55%, 0.25)',
+            background: 'color-mix(in srgb, var(--destructive) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
             color: 'var(--color-error-400)', fontSize: '0.85rem',
           }}>
             {error}

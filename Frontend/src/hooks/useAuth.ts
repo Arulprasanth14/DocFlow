@@ -149,7 +149,12 @@ export function useLogout() {
     mutationFn: async () => {
       // Sign out of Firebase. AuthProvider clears Zustand and tokenStore.
       await firebaseSignOutUser();
-      
+
+      // Drop locally cached draft content so it can't leak to the next user
+      // signing in on this device.
+      const { clearAllDraftsLocal } = await import('@/lib/offline/draftCache');
+      await clearAllDraftsLocal();
+
       // Best effort backend logout to clear session row (if we had one)
       const { logout: backendLogout } = await import('@/lib/api/auth');
       await backendLogout().catch(() => {});
@@ -175,6 +180,8 @@ export function useLogoutAll() {
       const { logoutAll: backendLogoutAll } = await import('@/lib/api/auth');
       await backendLogoutAll().catch(() => {});
       await firebaseSignOutUser();
+      const { clearAllDraftsLocal } = await import('@/lib/offline/draftCache');
+      await clearAllDraftsLocal();
     },
     onSuccess: () => {
       queryClient.clear();

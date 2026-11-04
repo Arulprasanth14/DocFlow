@@ -5,9 +5,8 @@
  */
 
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { toast, Toaster } from 'sonner';
+import { toast } from 'sonner';
 import {
   GitBranch, Plus, Clock, CheckCircle,
   Filter, Search, AlertCircle,
@@ -18,6 +17,7 @@ import { useWorkflowTemplates } from '@/hooks/useWorkflows';
 import { workflowsApi } from '@/lib/api/workflows';
 import { useAuthStore } from '@/store/authStore';
 import WorkflowBuilderModal from '@/components/workflows/WorkflowBuilderModal';
+import { PageHeader } from '@/components/ui/PageHeader';
 
 // ── Design tokens (matching DashboardPage) ───────────────────────────────────
 const C = {
@@ -235,7 +235,7 @@ function WorkflowCard({
               <div style={{
                 position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 20,
                 background: C.card, border: `1px solid ${C.border}`, borderRadius: 12,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.4)', minWidth: 140, overflow: 'hidden',
+                boxShadow: 'var(--shadow-lg)', minWidth: 140, overflow: 'hidden',
               }}>
                 {/* Each item now performs a real action against the API.
                     They previously all just closed the menu. */}
@@ -316,7 +316,6 @@ function WorkflowCard({
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function WorkflowsPage() {
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const myUserId = useAuthStore((s) => s.user?.id);
   const [activeTab, setActiveTab] = useState<'all' | WFStatus>('all');
@@ -400,36 +399,18 @@ export default function WorkflowsPage() {
   };
 
   return (
-    <div style={{ position: 'relative', minHeight: '100%', overflow: 'hidden' }}>
-      {/* Ambient glows */}
-      <div style={{ position: 'absolute', bottom: -180, left: -160, width: 750, height: 750, borderRadius: 9999, background: 'radial-gradient(circle, rgba(37,99,235,0.18) 0%, transparent 68%)', filter: 'blur(240px)', zIndex: 1, pointerEvents: 'none' }} />
-      <div style={{ position: 'absolute', top: -160, right: -160, width: 700, height: 700, borderRadius: 9999, background: 'radial-gradient(circle, rgba(124,58,237,0.15) 0%, transparent 65%)', filter: 'blur(220px)', zIndex: 1, pointerEvents: 'none' }} />
-
-      <div style={{ position: 'relative', zIndex: 10, padding: 32, display: 'flex', flexDirection: 'column', gap: 24 }}>
+    <div className="page-content" style={{ paddingTop: 24, display: 'flex', flexDirection: 'column', gap: 24 }}>
         {/* Page Header */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-              <div style={{ width: 36, height: 36, borderRadius: 10, background: `color-mix(in srgb, ${C.purple} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${C.purple} 25%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <GitBranch size={18} color={C.purple} />
-              </div>
-              <h1 style={{ fontSize: 26, fontWeight: 800, color: C.heading, margin: 0 }}>Workflows</h1>
-            </div>
-            <p style={{ color: C.muted, fontSize: 14, margin: 0 }}>Manage and track document approval pipelines across your organization</p>
-          </div>
-          <button
-            onClick={() => setBuilderFor('')}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px',
-              background: `linear-gradient(135deg, ${C.primary}, var(--color-primary-600))`,
-              border: 'none', borderRadius: 12, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-              boxShadow: '0 0 20px hsla(217, 100%, 50%, 0.3)', transition: 'all 0.2s',
-            }}
-            className="new-wf-btn"
-          >
-            <Plus size={16} /> New Workflow
-          </button>
-        </div>
+        <PageHeader
+          breadcrumbs={[{ label: 'Workspace' }, { label: 'Workflows' }]}
+          title="Workflows"
+          description="Manage and track document approval pipelines across your organization"
+          actions={
+            <button className="btn btn-primary" onClick={() => setBuilderFor('')}>
+              <Plus size={16} /> New Workflow
+            </button>
+          }
+        />
 
         {/* Stats Row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
@@ -452,7 +433,7 @@ export default function WorkflowsPage() {
                   fontSize: 13, fontWeight: 600, transition: 'all 0.2s',
                   background: activeTab === tab.key ? C.card : 'transparent',
                   color: activeTab === tab.key ? tab.color : C.muted,
-                  boxShadow: activeTab === tab.key ? '0 2px 8px rgba(0,0,0,0.3)' : 'none',
+                  boxShadow: activeTab === tab.key ? 'var(--shadow-md)' : 'none',
                 }}
               >
                 {tab.label}
@@ -513,17 +494,16 @@ export default function WorkflowsPage() {
             ))}
           </div>
         )}
-      </div>
 
       <style>{`
         .wf-card:hover {
           transform: translateY(-3px);
           border-color: var(--border-strong) !important;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+          box-shadow: var(--shadow-lg);
         }
         .new-wf-btn:hover {
           transform: translateY(-1px);
-          box-shadow: 0 0 32px hsla(217, 100%, 50%, 0.5) !important;
+          box-shadow: 0 0 32px color-mix(in srgb, var(--primary) 50%, transparent) !important;
         }
         @keyframes pulse-ring {
           0%, 100% { opacity: 0.6; transform: scale(1); }
@@ -537,7 +517,6 @@ export default function WorkflowsPage() {
           onClose={() => setBuilderFor(null)}
         />
       )}
-      <Toaster position="top-right" theme="dark" />
     </div>
   );
 }

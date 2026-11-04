@@ -45,7 +45,7 @@ export function VersionHistoryModal({
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'hsla(220, 50%, 5%, 0.75)',
+              background: 'var(--overlay-scrim)',
               backdropFilter: 'blur(6px)',
               zIndex: 300,
             }}
@@ -70,7 +70,7 @@ export function VersionHistoryModal({
               flexDirection: 'column',
               borderRadius: 'var(--radius-xl)',
               overflow: 'hidden',
-              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.5)',
+              boxShadow: 'var(--shadow-lg)',
             }}
             className="glass-card"
           >
@@ -145,16 +145,27 @@ export function VersionHistoryModal({
                     return (
                       <div
                         key={ver.id}
+                        // Selecting a version was mouse-only: a keyboard user
+                        // could see the list and reach nothing in it.
+                        role="button"
+                        tabIndex={0}
+                        aria-pressed={selectedVersionId === ver.id}
                         onClick={() => setSelectedVersionId(ver.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setSelectedVersionId(ver.id);
+                          }
+                        }}
                         style={{
                           padding: '14px',
                           borderRadius: 'var(--radius-lg)',
                           cursor: 'pointer',
                           background: isSelected
-                            ? 'hsla(217, 100%, 50%, 0.12)'
+                            ? 'color-mix(in srgb, var(--primary) 12%, transparent)'
                             : 'var(--bg-overlay)',
                           border: isSelected
-                            ? '1px solid var(--color-primary-500)'
+                            ? '1px solid var(--primary)'
                             : '1px solid var(--border-subtle)',
                           transition: 'all var(--transition-fast)',
                         }}

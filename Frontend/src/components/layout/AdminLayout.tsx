@@ -19,21 +19,24 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '@/store/authStore';
 import { useLogout } from '@/hooks/useAuth';
+import { LivingBackground } from '@/components/ui/LivingBackground';
+import PageTransition from '@/components/layout/PageTransition';
 
-// ── Accent tokens (admin-specific, not using CSS vars to stay independent) ────
+// ── Admin accent tokens — Ice base + a distinct AMBER accent so the admin
+//    portal reads as "elevated/privileged" while staying theme-aware (light/dark).
 const A = {
-  bgBase:       'hsl(222, 20%, 6%)',
-  bgSurface:    'hsl(222, 22%, 9%)',
-  bgElevated:   'hsl(222, 24%, 12%)',
-  border:       'hsla(15, 60%, 40%, 0.18)',
-  borderStrong: 'hsla(15, 60%, 40%, 0.35)',
-  accent:       'hsl(28, 80%, 54%)',
-  accentDim:    'hsla(28, 80%, 54%, 0.12)',
-  red:          'hsl(10, 75%, 55%)',
-  textPrimary:  'hsl(215, 20%, 92%)',
-  textSecondary:'hsl(215, 15%, 62%)',
-  textMuted:    'hsl(215, 12%, 42%)',
-  textDisabled: 'hsl(215, 10%, 30%)',
+  bgBase:       'var(--background)',
+  bgSurface:    'var(--sidebar)',
+  bgElevated:   'var(--popover)',
+  border:       'var(--border)',
+  borderStrong: 'var(--border)',
+  accent:       'var(--chart-4)',
+  accentDim:    'color-mix(in srgb, var(--chart-4) 14%, transparent)',
+  red:          'var(--destructive)',
+  textPrimary:  'var(--foreground)',
+  textSecondary:'var(--muted-foreground)',
+  textMuted:    'var(--muted-foreground)',
+  textDisabled: 'var(--muted-foreground)',
 } as const;
 
 // ── Nav items ─────────────────────────────────────────────────────────────────
@@ -121,8 +124,8 @@ function AdminSidebarItem({ item, collapsed }: { item: AdminNavItem; collapsed: 
         fontSize: '0.875rem',
         fontWeight: isActive ? 600 : 500,
         color: isActive ? A.accent : hovered ? A.textPrimary : A.textSecondary,
-        background: isActive ? A.accentDim : hovered ? 'hsla(222, 24%, 14%, 0.8)' : 'transparent',
-        border: `1px solid ${isActive ? 'hsla(28, 80%, 54%, 0.25)' : hovered ? A.border : 'transparent'}`,
+        background: isActive ? A.accentDim : hovered ? 'color-mix(in srgb, var(--muted-foreground) 10%, transparent)' : 'transparent',
+        border: `1px solid ${isActive ? 'color-mix(in srgb, var(--chart-4) 30%, transparent)' : hovered ? A.border : 'transparent'}`,
         transition: 'all 0.2s ease',
         justifyContent: collapsed ? 'center' : 'flex-start',
         position: 'relative',
@@ -170,7 +173,7 @@ function AdminAvatar({ name, size = 32 }: { name: string | null; size?: number }
   return (
     <div style={{
       width: size, height: size, borderRadius: '50%',
-      background: 'linear-gradient(135deg, hsl(10,75%,42%), hsl(28,80%,52%))',
+      background: 'linear-gradient(135deg, var(--destructive), var(--chart-4))',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.38, fontWeight: 700, color: 'white', flexShrink: 0,
     }}>
@@ -211,13 +214,17 @@ export default function AdminLayout() {
   ];
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: A.bgBase }}>
+    <div style={{ display: 'flex', minHeight: '100vh', position: 'relative' }}>
+      {/* Living background (shared system) — amber accent lives in the chrome, not the aura */}
+      <LivingBackground />
 
       {/* ── Sidebar ──────────────────────────────────────────────────────── */}
       <aside style={{
         position: 'fixed', top: 0, left: 0, bottom: 0,
         width: sidebarW,
         background: A.bgSurface,
+        backdropFilter: 'blur(var(--glass-blur)) saturate(var(--glass-saturate))',
+        WebkitBackdropFilter: 'blur(var(--glass-blur)) saturate(var(--glass-saturate))',
         borderRight: `1px solid ${A.border}`,
         display: 'flex', flexDirection: 'column',
         transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -236,9 +243,9 @@ export default function AdminLayout() {
           {/* Shield icon */}
           <div style={{
             width: '34px', height: '34px', borderRadius: '10px', flexShrink: 0,
-            background: 'linear-gradient(135deg, hsl(10,75%,38%), hsl(28,80%,46%))',
+            background: 'linear-gradient(135deg, var(--destructive), var(--chart-4))',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 2px 10px hsla(10,75%,38%,0.4)',
+            boxShadow: '0 2px 10px color-mix(in srgb, var(--destructive) 40%, transparent)',
             color: 'white',
           }}>
             {Icons.shield}
@@ -337,8 +344,9 @@ export default function AdminLayout() {
         {/* Top bar */}
         <header style={{
           height: '64px', position: 'sticky', top: 0,
-          background: `${A.bgSurface}ee`,
-          backdropFilter: 'blur(16px)',
+          background: A.bgSurface,
+          backdropFilter: 'blur(var(--glass-blur)) saturate(var(--glass-saturate))',
+          WebkitBackdropFilter: 'blur(var(--glass-blur)) saturate(var(--glass-saturate))',
           borderBottom: `1px solid ${A.border}`,
           display: 'flex', alignItems: 'center',
           padding: '0 24px', gap: '16px', zIndex: 50,
@@ -347,7 +355,7 @@ export default function AdminLayout() {
           <div style={{
             display: 'flex', alignItems: 'center', gap: '8px',
             padding: '4px 12px',
-            background: 'hsla(10, 70%, 40%, 0.12)',
+            background: 'color-mix(in srgb, var(--destructive) 12%, transparent)',
             border: `1px solid ${A.borderStrong}`,
             borderRadius: '20px',
           }}>
@@ -415,7 +423,7 @@ export default function AdminLayout() {
                       background: A.bgElevated,
                       border: `1px solid ${A.border}`,
                       borderRadius: '12px',
-                      boxShadow: '0 8px 32px hsla(220, 40%, 4%, 0.6)',
+                      boxShadow: 'var(--shadow-lg)',
                       overflow: 'hidden',
                     }}
                   >
@@ -435,7 +443,7 @@ export default function AdminLayout() {
                           fontSize: '0.875rem', color: A.red, fontWeight: 500,
                           transition: 'background 0.15s',
                         }}
-                        onMouseEnter={e => e.currentTarget.style.background = 'hsla(10,70%,40%,0.1)'}
+                        onMouseEnter={e => e.currentTarget.style.background = 'color-mix(in srgb, var(--destructive) 10%, transparent)'}
                         onMouseLeave={e => e.currentTarget.style.background = 'none'}
                       >
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -453,9 +461,11 @@ export default function AdminLayout() {
           </div>
         </header>
 
-        {/* Page content */}
+        {/* Page content — only this transitions on navigation */}
         <div style={{ flex: 1, padding: '24px', color: A.textPrimary }}>
-          <Outlet />
+          <PageTransition>
+            <Outlet />
+          </PageTransition>
         </div>
       </main>
     </div>

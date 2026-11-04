@@ -3,7 +3,7 @@
  * Queries and mutations for document types, documents, versions, comments, and attachments.
  */
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import documentsApi, {
   type CreateDocumentTypePayload,
   type UpdateDocumentTypePayload,
@@ -26,6 +26,9 @@ export const documentKeys = {
   versions: (id: string) => ['documents', id, 'versions'] as const,
   comments: (id: string) => ['documents', id, 'comments'] as const,
   attachments: (id: string) => ['documents', id, 'attachments'] as const,
+  watchers: (id: string) => ['documents', id, 'watchers'] as const,
+  watcherCandidates: (id: string, q?: string) =>
+    ['documents', id, 'watcherCandidates', q ?? ''] as const,
 };
 
 // ── Document Types Queries & Mutations ────────────────────────────────────────
@@ -89,6 +92,23 @@ export function useDocuments(params?: DocumentFilterParams) {
     queryFn: () => documentsApi.listDocuments(params),
     enabled: isAuthenticated,
     staleTime: 1000 * 30,
+    // FR-1.3: keep the previous page's rows visible while the next query loads
+    // (no blank flash when filters/search/sort/page change).
+    placeholderData: keepPreviousData,
+  });
+}
+
+/**
+ * Status→count map for the current user's visible documents (cheap, server-side
+ * aggregate). Used for the list's status-tab counts instead of fetching all rows.
+ */
+export function useDocumentAnalytics() {
+  const isAuthenticated = useAuthStore((s) => !!s.user);
+  return useQuery({
+    queryKey: ['documents', 'analytics'],
+    queryFn: () => documentsApi.getAnalytics(),
+    enabled: isAuthenticated,
+    staleTime: 1000 * 30,
   });
 }
 
@@ -108,6 +128,7 @@ export function useCreateDocument() {
     mutationFn: (data: CreateDocumentPayload) => documentsApi.createDocument(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['documents', 'analytics'] });
     },
   });
 }
@@ -128,8 +149,11 @@ export function useUpdateDocument() {
 export function useSubmitDocument() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, payload }: { id: string; payload?: { change_reason?: string; workflow_template_id?: string } }) =>
-      documentsApi.submitDocument(id, payload),
+    mutationFn: ({ id, payload, idempotencyKey }: {
+      id: string;
+      payload?: { change_reason?: string; workflow_template_id?: string };
+      idempotencyKey?: string;
+    }) => documentsApi.submitDocument(id, payload, idempotencyKey),
     onSuccess: (updated, variables) => {
       queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
       queryClient.setQueryData(documentKeys.detail(variables.id), updated);
@@ -144,7 +168,71 @@ export function useDeleteDocument() {
     mutationFn: (id: string) => documentsApi.deleteDocument(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
+      queryClient.invalidateQueries({ queryKey: ['documents', 'analytics'] });
     },
+  });
+}
+
+// ── Document body (freeform editor / template answers) ────────────────────────
+export function useDocumentContent(docId: string | undefined) {
+  const isAuthenticated = useAuthStore((s) => !!s.user);
+  return useQuery({
+    queryKey: ['documents', docId, 'content'],
+    queryFn: () => documentsApi.getContent(docId as string),
+    enabled: isAuthenticated && Boolean(docId),
+    staleTime: 1000 * 15,
+  });
+}
+
+export function useSaveDocumentContent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, data }: {
+      docId: string;
+      data: { content?: Record<string, unknown>; answers?: Record<string, unknown> };
+    }) => documentsApi.saveContent(docId, data),
+    onSuccess: (saved, variables) => {
+      queryClient.setQueryData(['documents', variables.docId, 'content'], saved);
+      queryClient.invalidateQueries({ queryKey: ['documents', 'list'] });
+    },
+  });
+}
+
+/** Form Fill questions from the document's PINNED template version (FR-12.x / C9). */
+/**
+ * FR-12.1 — a template's questions, for the wizard that has not created a
+ * draft yet. Separate key space from the document schema: they are
+ * different resources and must not evict each other.
+ */
+export function useTemplateFillSchema(templateId: string | undefined) {
+  return useQuery({
+    queryKey: ['templates', templateId, 'fill-schema'],
+    queryFn: () => documentsApi.templateFillSchema(templateId!),
+    enabled: !!templateId,
+    staleTime: 60_000,
+  });
+}
+
+export function useDocumentFillSchema(docId: string | undefined) {
+  const isAuthenticated = useAuthStore((s) => !!s.user);
+  return useQuery({
+    queryKey: ['documents', docId, 'fill-schema'],
+    queryFn: () => documentsApi.getFillSchema(docId as string),
+    enabled: isAuthenticated && Boolean(docId),
+    // The pinned version never changes, so this is effectively immutable.
+    staleTime: 1000 * 60 * 10,
+  });
+}
+
+/** FR-5.4 — "Save as template" from a document. */
+export function useSaveDocumentAsTemplate() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, data }: {
+      docId: string;
+      data: { name?: string; description?: string | null; category?: string | null };
+    }) => documentsApi.saveAsTemplate(docId, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['templates', 'list'] }); },
   });
 }
 
@@ -272,6 +360,98 @@ export function useUploadFile() {
         size_bytes: file.size,
       });
       return file_asset_id;
+    },
+  });
+}
+
+
+/**
+ * FR-13.8 — poll the snapshot PDF while it renders.
+ *
+ * Polls only while the status is 'pending', so a ready or failed document
+ * costs nothing. Disabled entirely when the document has no snapshot (a
+ * draft) or the deployment lacks the migration.
+ */
+export function useDocumentPdf(docId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ['documents', docId, 'pdf'],
+    queryFn: () => documentsApi.getPdfState(docId!),
+    enabled: !!docId && enabled,
+    refetchInterval: (query) =>
+      query.state.data?.status === 'pending' ? 3000 : false,
+    staleTime: 0,
+  });
+}
+
+export function useRetryDocumentPdf() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (docId: string) => documentsApi.retryPdf(docId),
+    onSuccess: (_data, docId) => {
+      void qc.invalidateQueries({ queryKey: ['documents', docId, 'pdf'] });
+    },
+  });
+}
+
+
+// -- Watchers / CC (FR-13.4) --------------------------------------------------
+
+export function useWatchers(docId: string | undefined) {
+  const isAuthenticated = useAuthStore((st) => !!st.user);
+  return useQuery({
+    queryKey: documentKeys.watchers(docId ?? ''),
+    queryFn: () => documentsApi.listWatchers(docId!),
+    enabled: isAuthenticated && !!docId,
+    staleTime: 1000 * 30,
+  });
+}
+
+/**
+ * Colleagues who could be CC'd, filtered server-side.
+ *
+ * `enabled` is the caller's gate so the list is only fetched once the picker
+ * is actually open - this is org-member data and should not be pulled on
+ * every document page view.
+ */
+export function useWatcherCandidates(
+  docId: string | undefined,
+  q: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: documentKeys.watcherCandidates(docId ?? '', q),
+    queryFn: () => documentsApi.listWatcherCandidates(docId!, q || undefined),
+    enabled: enabled && !!docId,
+    staleTime: 1000 * 60,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useAddWatcher() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, userId }: { docId: string; userId: string }) =>
+      documentsApi.addWatcher(docId, userId),
+    onSuccess: (_data, { docId }) => {
+      void qc.invalidateQueries({ queryKey: documentKeys.watchers(docId) });
+      // The candidate list excludes people already watching, so it is stale
+      // the moment someone is added.
+      void qc.invalidateQueries({ queryKey: ['documents', docId, 'watcherCandidates'] });
+      // watcher_count lives on the document response.
+      void qc.invalidateQueries({ queryKey: documentKeys.detail(docId) });
+    },
+  });
+}
+
+export function useRemoveWatcher() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, userId }: { docId: string; userId: string }) =>
+      documentsApi.removeWatcher(docId, userId),
+    onSuccess: (_data, { docId }) => {
+      void qc.invalidateQueries({ queryKey: documentKeys.watchers(docId) });
+      void qc.invalidateQueries({ queryKey: ['documents', docId, 'watcherCandidates'] });
+      void qc.invalidateQueries({ queryKey: documentKeys.detail(docId) });
     },
   });
 }

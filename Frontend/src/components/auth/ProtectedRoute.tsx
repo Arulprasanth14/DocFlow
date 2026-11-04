@@ -143,8 +143,8 @@ function ForbiddenPage({ redirectTo = '/dashboard' }: { redirectTo?: string }) {
     }}>
       <div style={{
         width: '64px', height: '64px', borderRadius: '16px',
-        background: 'hsla(0, 82%, 55%, 0.1)',
-        border: '1px solid hsla(0, 82%, 55%, 0.25)',
+        background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-error-400)" strokeWidth="2">

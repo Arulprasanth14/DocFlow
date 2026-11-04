@@ -21,6 +21,9 @@ celery_app = Celery(
         "app.workers.sla_tasks",
         "app.workers.email_tasks",
         "app.workers.cleanup_tasks",
+        "app.workers.pdf_tasks",
+        "app.workers.reminder_tasks",
+        "app.workers.import_tasks",
     ],
 )
 
@@ -63,6 +66,26 @@ celery_app.conf.beat_schedule = {
     "cleanup-expired-documents": {
         "task": "app.workers.cleanup_tasks.cleanup_expired_documents",
         "schedule": crontab(hour=3, minute=0),
+        "options": {"queue": "default"},
+    },
+    # Empty-draft purge (FR-14.9) - hourly, because a draft row is created
+    # just by opening a template and they accumulate all day.
+    "purge-empty-drafts": {
+        "task": "app.workers.cleanup_tasks.purge_empty_drafts",
+        "schedule": crontab(minute=20),
+        "options": {"queue": "default"},
+    },
+    # Retention notice (FR-14.9) - daily, before the nightly purge at 03:00.
+    "send-retention-notices": {
+        "task": "app.workers.cleanup_tasks.send_retention_notices",
+        "schedule": crontab(hour=2, minute=30),
+        "options": {"queue": "default"},
+    },
+    # Expiry reminders — daily at 7am UTC, early enough to be in the
+    # morning inbox in IST/CET without being a 3am notification.
+    "send-expiry-reminders": {
+        "task": "app.workers.reminder_tasks.send_expiry_reminders",
+        "schedule": crontab(hour=7, minute=0),
         "options": {"queue": "default"},
     },
     # Stale embedding refresh — daily at 2am UTC

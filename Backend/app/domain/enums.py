@@ -153,6 +153,9 @@ class NotificationType(StrEnum):
     DOCUMENT_REJECTED = "document.rejected"
     DOCUMENT_CANCELLED = "document.cancelled"
     DOCUMENT_COMMENT = "document.comment"
+    # Documents module FR-13.4. `notifications.type` is VARCHAR(100), not a
+    # native enum, so adding values here needs no migration.
+    DOCUMENT_EXPIRING = "document.expiring"
     MENTION = "mention"
     SYSTEM = "system"
 

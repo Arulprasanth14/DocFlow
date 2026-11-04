@@ -154,8 +154,16 @@ async def _ensure_test_database() -> None:
 async def _setup_schema():
     await _ensure_test_database()
     async with test_engine.begin() as conn:
+        # Drop the SCHEMA, not the tables. Base.metadata.drop_all cannot sort
+        # documents / file_assets / template_versions: they have mutually
+        # dependent foreign keys (declared with use_alter), so SQLAlchemy
+        # raises CircularDependencyError ("Can't sort tables for DROP") the
+        # moment the database is NOT empty. That made the suite runnable
+        # exactly once per fresh database and every later run errored at
+        # setup. DROP SCHEMA sidesteps the table sort entirely.
+        await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
     await test_engine.dispose()

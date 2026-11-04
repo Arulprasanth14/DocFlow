@@ -14,6 +14,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useGoogleLogin, useMicrosoftLogin, useFirebaseEmailLogin } from '@/hooks/useAuth';
 import { sendFirebasePasswordReset } from '@/lib/auth/firebase';
 import { useAuth } from '@/contexts/AuthContext';
+import { LivingBackground } from '@/components/ui/LivingBackground';
+import { AuthBrandPanel } from '@/components/auth/AuthBrandPanel';
 
 // ── Zod schema ────────────────────────────────────────────────────────────────
 const loginSchema = z.object({
@@ -63,35 +65,6 @@ const EyeIcon = ({ open }: { open: boolean }) => (
     )}
   </svg>
 );
-
-// ── Floating particle component ────────────────────────────────────────────────
-function FloatingParticle({ delay, x, size }: { delay: number; x: number; size: number }) {
-  return (
-    <motion.div
-      style={{
-        position: 'absolute',
-        left: `${x}%`,
-        bottom: '-10px',
-        width: size,
-        height: size,
-        borderRadius: '50%',
-        background: `hsla(${217 + Math.random() * 40}, 90%, 65%, ${0.15 + Math.random() * 0.2})`,
-        pointerEvents: 'none',
-      }}
-      animate={{
-        y: [0, -600],
-        opacity: [0, 0.8, 0],
-        scale: [0.5, 1, 0.5],
-      }}
-      transition={{
-        duration: 8 + Math.random() * 4,
-        delay,
-        repeat: Infinity,
-        ease: 'easeInOut',
-      }}
-    />
-  );
-}
 
 // ── Main Login Page ────────────────────────────────────────────────────────────
 export default function LoginPage() {
@@ -184,38 +157,16 @@ export default function LoginPage() {
   const isLoading =
     googleLogin.isPending || microsoftLogin.isPending || emailLogin.isPending || isSubmitting;
 
-  const particles = Array.from({ length: 18 }, (_, i) => ({
-    delay: i * 0.5,
-    x: (i * 17 + 5) % 100,
-    size: 4 + (i % 4) * 3,
-  }));
-
   return (
-    <div
-      className="auth-container"
-      style={{
-        background: 'radial-gradient(ellipse at 60% 0%, hsla(258, 90%, 18%, 0.5) 0%, transparent 60%), radial-gradient(ellipse at 0% 100%, hsla(217, 100%, 18%, 0.4) 0%, transparent 60%), var(--bg-base)',
-      }}
-    >
-      {/* Fixed background layer (prevents absolute glow orbs from causing any scrollbar) */}
-      <div style={{ position: 'fixed', inset: 0, overflow: 'hidden', pointerEvents: 'none', zIndex: 0 }}>
-        {/* Floating particles */}
-        {particles.map((p, i) => <FloatingParticle key={i} {...p} />)}
+    <div className="auth-split">
+      {/* Living background (stronger auth variant), mounted once for the whole split */}
+      <LivingBackground variant="auth" />
 
-        {/* Ambient glow orbs */}
-        <div style={{
-          position: 'absolute', top: '-10%', right: '-5%',
-          width: '500px', height: '500px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(258, 90%, 50%, 0.08) 0%, transparent 70%)',
-        }} />
-        <div style={{
-          position: 'absolute', bottom: '-10%', left: '-5%',
-          width: '600px', height: '600px', borderRadius: '50%',
-          background: 'radial-gradient(circle, hsla(217, 100%, 50%, 0.07) 0%, transparent 70%)',
-        }} />
-      </div>
+      {/* Left brand panel (hidden on narrow screens) */}
+      <AuthBrandPanel />
 
-      {/* Login card */}
+      {/* Right form column */}
+      <div className="auth-form-col">
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -234,9 +185,9 @@ export default function LoginPage() {
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
               <div style={{
                 width: '42px', height: '42px', borderRadius: '12px',
-                background: 'linear-gradient(135deg, var(--color-primary-500), var(--color-accent-500))',
+                background: 'var(--gradient-brand)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 4px 16px hsla(217, 100%, 50%, 0.3)',
+                boxShadow: 'var(--shadow-glow)',
               }}>
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -270,8 +221,8 @@ export default function LoginPage() {
                 <div style={{
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(38, 92%, 50%, 0.1)',
-                  border: '1px solid hsla(38, 92%, 50%, 0.25)',
+                  background: 'color-mix(in srgb, var(--status-pending) 12%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--status-pending) 25%, transparent)',
                   color: 'var(--color-warning-400)',
                   fontSize: '0.875rem',
                   display: 'flex',
@@ -452,8 +403,8 @@ export default function LoginPage() {
                   marginTop: '16px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(0, 82%, 55%, 0.1)',
-                  border: '1px solid hsla(0, 82%, 55%, 0.25)',
+                  background: 'color-mix(in srgb, var(--destructive) 10%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--destructive) 25%, transparent)',
                   color: 'var(--color-error-400)',
                   fontSize: '0.875rem',
                   display: 'flex',
@@ -480,8 +431,8 @@ export default function LoginPage() {
                   marginTop: '16px',
                   padding: '12px 16px',
                   borderRadius: 'var(--radius-md)',
-                  background: 'hsla(145, 70%, 45%, 0.1)',
-                  border: '1px solid hsla(145, 70%, 45%, 0.25)',
+                  background: 'color-mix(in srgb, var(--status-approved) 12%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--status-approved) 25%, transparent)',
                   color: 'var(--color-success-400)',
                   fontSize: '0.875rem',
                 }}
@@ -497,7 +448,7 @@ export default function LoginPage() {
             <Link
               to="/register"
               id="link-register"
-              style={{ color: 'var(--color-primary-400)', fontWeight: 600, textDecoration: 'none' }}
+              style={{ color: 'var(--color-primary-400)', fontWeight: 600, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', minHeight: 24 }}
             >
               Create one
             </Link>
@@ -509,6 +460,7 @@ export default function LoginPage() {
           Enterprise Document Workflow & Approval Platform
         </p>
       </motion.div>
+      </div>
     </div>
   );
 }
