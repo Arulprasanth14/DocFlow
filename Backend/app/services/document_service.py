@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
@@ -96,20 +97,102 @@ async def get_user_departments(db: AsyncSession, user_id: UUID, org_id: UUID) ->
     return [d for d in result.scalars() if d is not None]
 
 
+async def _is_run_participant(
+    db: AsyncSession, document_id: UUID, user_id: UUID
+) -> bool:
+    """Is this user an approver on the document's workflow run?
+
+    Covers both the per-approver record and the stage instance's resolved
+    approver, and deliberately includes approvers from EARLIER stages: having
+    approved something is a reason to be able to look at it again.
+    """
+    from app.models.workflow import ApprovalStep, StageInstance, WorkflowInstance
+
+    step = await db.execute(
+        select(ApprovalStep.id)
+        .join(WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id)
+        .where(
+            WorkflowInstance.document_id == document_id,
+            ApprovalStep.approver_id == user_id,
+        )
+        .limit(1)
+    )
+    if step.scalar_one_or_none() is not None:
+        return True
+
+    si = await db.execute(
+        select(StageInstance.id)
+        .join(WorkflowInstance, WorkflowInstance.id == StageInstance.instance_id)
+        .where(
+            WorkflowInstance.document_id == document_id,
+            StageInstance.resolved_approver_id == user_id,
+        )
+        .limit(1)
+    )
+    return si.scalar_one_or_none() is not None
+
+
+async def _has_live_run(db: AsyncSession, document_id: UUID) -> bool:
+    """Is this document currently moving through an approval workflow?"""
+    from app.domain.enums import WorkflowInstanceStatus
+    from app.models.workflow import WorkflowInstance
+
+    terminal = [
+        str(s) for s in (
+            WorkflowInstanceStatus.APPROVED,
+            WorkflowInstanceStatus.REJECTED,
+            WorkflowInstanceStatus.CANCELLED,
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FINALIZED,
+        )
+    ]
+    result = await db.execute(
+        select(WorkflowInstance.id)
+        .where(
+            WorkflowInstance.document_id == document_id,
+            WorkflowInstance.status.notin_(terminal),
+            WorkflowInstance.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def can_user_access_document(db: AsyncSession, user: AuthUser, doc: Document) -> bool:
-    """Visibility Rule for Documents."""
+    """Visibility Rule for Documents.
+
+    Workflow module §7.3 is explicit that for a document under review the
+    "Other user" column is a cross. The departmental rule below is the
+    documents module's own default and stays for everything else, but it was
+    also applied to documents in approval, so any worker sharing the
+    submitter's department could read a document under review (defect 10,
+    AP-DET-03, T17, T39).
+
+    While a run is live, access is therefore limited to the owner, org
+    admins / HR, and the people actually involved in the approval. That also
+    FIXES the opposite error: an approver in a different department than the
+    document previously failed the departmental check and could not open the
+    document they were required to approve.
+    """
     if user.id == doc.submitted_by:
         return True
     if "admin" in user.roles or "hr" in user.roles:
         return True
 
+    if await _has_live_run(db, doc.id):
+        return await _is_run_participant(db, doc.id, user.id)
+
     if "worker" in user.roles:
         if doc.dept_id is None:
-            return True
+            # A document with no department is not thereby public. Without
+            # this, every worker in the org could read any department-less
+            # document, which is broader than the departmental rule it is
+            # meant to be the fallback for.
+            return False
         user_depts = await get_user_departments(db, user.id, doc.org_id)
         if doc.dept_id in user_depts:
             return True
-            
+
     return False
 
 

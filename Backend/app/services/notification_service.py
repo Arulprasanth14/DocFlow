@@ -142,6 +142,7 @@ class NotificationService:
         push_realtime: bool = True,
         email_kind: str = "generic",
         email_context: dict | None = None,
+        dedupe_key: str | None = None,
     ) -> None:
         """
         Create a Notification row in PostgreSQL, then optionally push to the
@@ -149,7 +150,16 @@ class NotificationService:
 
         Channel gating: skips DB persist if in_app=False for the org;
         skips Redis push if push=False for the org.
+
+        `dedupe_key` (section 7.1) makes the whole call idempotent - row,
+        push and e-mail alike. The outbox delivers with one key per recipient
+        per event, so a retried delivery, a re-run SLA sweep or a doubly
+        driven drain stops here instead of notifying the same person twice.
         """
+        if dedupe_key and await self.repo.dedupe_key_exists(dedupe_key):
+            logger.debug("notification_deduped", key=dedupe_key, type=str(type))
+            return
+
         flags = await self._get_org_channel_flags(org_id)
 
         if not flags["in_app"]:
@@ -169,6 +179,7 @@ class NotificationService:
             deep_link=deep_link,
             instance_id=instance_id,
             metadata=metadata or {},
+            dedupe_key=dedupe_key,
         )
 
         if push_realtime and flags["push"]:

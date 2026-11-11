@@ -24,6 +24,7 @@ from app.database import get_db
 from app.dependencies import CurrentUser
 from app.core.exceptions import ForbiddenException
 from app.schemas.workflow_instances import (
+    PreflightResponse,
     TemplateReviewResponse,
     WorkflowShareCreate,
     WorkflowShareResponse,
@@ -35,6 +36,7 @@ from app.schemas.workflow_instances import (
     WorkflowVersionSummary,
 )
 from app.services.template_service import TemplateService
+from app.services.workflow_service import WorkflowService
 
 router = APIRouter(tags=["Workflow Templates"])
 
@@ -285,6 +287,43 @@ async def get_workflow_template_review(
         raise ForbiddenException("No organization context")
     svc = TemplateService(db)
     return await svc.get_review(template_id=template_id, org_id=current_user.org_id)
+
+
+@router.post(
+    "/workflow-templates/{template_id}/preflight",
+    response_model=PreflightResponse,
+    status_code=200,
+    summary="Can I submit through this workflow? Resolved approvers and blockers",
+)
+async def preflight_workflow_template(
+    template_id: uuid.UUID,
+    current_user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> PreflightResponse:
+    """WF-SUB-02 / WF-SEL-06 / E1 / E2 — resolve every stage for the caller.
+
+    Distinct from `/review`, which describes the workflow in general terms.
+    This answers the question for THIS person: who would actually approve,
+    and what stops them submitting at all.
+
+    The static check in `document_validation.py` cannot answer that — it
+    inspects the approver RULES, so it passes a `manager_of_requester` rule
+    without knowing that this submitter has no manager on record and their
+    department has no head. The run was then created with no approval steps:
+    the document sat in PENDING, nobody was notified, and nobody could act.
+
+    `can_submit` is the same verdict the submit transaction reaches, because
+    both run this identical pass. It can still go stale in between — an
+    approver deactivated in the meantime — which is why submit re-runs it
+    rather than trusting this answer (WF-SUB-02).
+    """
+    if not current_user.org_id:
+        raise ForbiddenException("No organization context")
+    return await WorkflowService(db).preflight(
+        template_id=template_id,
+        requester_id=current_user.id,
+        org_id=current_user.org_id,
+    )
 
 
 # ── Versioning, lifecycle and sharing (Workflow module §4.4, §5.1, §5.7) ─────

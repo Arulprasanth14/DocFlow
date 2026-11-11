@@ -53,7 +53,20 @@ async def _make_pending_step(db_session, org, submitter_id, approver_id):
         org_id=org.id,
         document_id=doc.id,
         template_id=template.id,
-        template_version_snapshot={},
+        # The frozen definition this run is pinned to (DM-02). Since P2-2
+        # the engine routes by this snapshot rather than by re-reading the
+        # live template, so a run with an empty one has no route.
+        template_version_snapshot={
+            "id": str(template.id),
+            "stages": [
+                {
+                    "id": str(stage.id),
+                    "name": stage.name,
+                    "sequence_order": stage.sequence_order,
+                    "approver_rules": [],
+                }
+            ],
+        },
         current_stage_id=stage.id,
     )
     db_session.add(instance)

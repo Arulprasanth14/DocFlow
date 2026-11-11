@@ -1,9 +1,9 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ChevronLeft, ChevronRight, Check, X, MoreHorizontal, FileText,
-  Plus, Search, ChevronDown,
-  ArrowUpDown, AlignJustify, UserPlus, History
+  Plus, Search,
+  ArrowUpDown, UserPlus, History
 } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
@@ -15,6 +15,8 @@ import type { ApprovalStep } from "@/lib/api/approvals";
 import { ApiClientError } from "@/lib/api/client";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ApprovalHistoryPanel from "@/components/approvals/ApprovalHistoryPanel";
+import { useWorkflowTemplates } from "@/hooks/useWorkflows";
+import { useDepartments } from "@/hooks/useOrg";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { IconChip } from "@/components/ui/IconChip";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -25,6 +27,13 @@ import { Skeleton } from "@/components/ui/Skeleton";
 
 type Status = "pending" | "approved" | "rejected";
 type TabKey  = "pending" | "approved" | "rejected" | "all";
+
+type Urgency = "overdue" | "due_soon" | "normal" | "none";
+
+type SortKey =
+  | "due_at" | "-due_at"
+  | "submitted_at" | "-submitted_at"
+  | "title" | "-title";
 
 interface Approval {
   id: string;
@@ -38,6 +47,13 @@ interface Approval {
   stageSub: string;
   requestedAt: string;
   status: Status;
+  // AP-DSH-06 — the SERVER decides what counts as late. BR-13 / AP-SLA-07
+  // make the deadline server-owned, so comparing `due_at` against the
+  // browser's clock would let a skewed client paint its own idea of overdue.
+  urgency: Urgency;
+  dueAt: string | null;
+  hoursUntilDue: number | null;
+  stageInstanceId?: string | null;
 }
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
@@ -117,6 +133,10 @@ function mapStepToApproval(step: ApprovalStep): Approval {
     type,
     stage,
     stageSub,
+    urgency: (step.urgency ?? "none") as Urgency,
+    dueAt: step.due_at ?? null,
+    hoursUntilDue: step.hours_until_due ?? null,
+    stageInstanceId: step.stage_instance_id ?? null,
     requestedAt,
     status,
   };
@@ -146,10 +166,50 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "all",      label: "All"      },
 ];
 
-const PER_PAGE = 6;
+const PER_PAGE = 10;
+
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: "due_at",         label: "Due soonest"   },
+  { key: "-due_at",        label: "Due latest"    },
+  { key: "-submitted_at",  label: "Newest first"  },
+  { key: "submitted_at",   label: "Oldest first"  },
+  { key: "title",          label: "Title A-Z"     },
+  { key: "-title",         label: "Title Z-A"     },
+];
+
+const URGENCY: Record<Urgency, { label: string; color: string; bg: string } | null> = {
+  overdue:  { label: "Overdue",  color: "var(--danger)",  bg: "var(--danger-subtle, rgba(220,38,38,0.12))" },
+  due_soon: { label: "Due soon", color: "var(--warning)", bg: "var(--warning-subtle, rgba(217,119,6,0.12))" },
+  normal:   null,
+  none:     null,
+};
+
+/** Hours -> "in 3h" / "5h overdue", for the urgency chip's tooltip. */
+function dueLabel(hours: number | null): string {
+  if (hours == null) return "No deadline";
+  const abs = Math.abs(hours);
+  const unit = abs >= 48 ? `${Math.round(abs / 24)}d` : `${Math.round(abs)}h`;
+  return hours < 0 ? `${unit} overdue` : `Due in ${unit}`;
+}
 
 // Grid template for table columns
 const GRID_COLS = "40px minmax(240px,1fr) 120px 200px 110px 110px 90px";
+
+// Shared look for the toolbar's real selects, so the filters and the sort
+// match the chips they replaced.
+const selectStyle: React.CSSProperties = {
+  padding: "7px 10px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 10,
+  color: "var(--text-muted)",
+  background: "var(--bg-overlay)",
+  cursor: "pointer",
+  fontSize: 12,
+  fontWeight: 500,
+  fontFamily: "'Inter', sans-serif",
+  outline: "none",
+  maxWidth: 190,
+};
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
@@ -158,6 +218,9 @@ export default function ApprovalsPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("pending");
   const [selected, setSelected]   = useState<Set<string>>(new Set());
   const [search, setSearch]       = useState("");
+  const [sort, setSort]           = useState<SortKey>("due_at");
+  const [templateFilter, setTemplateFilter] = useState("");
+  const [deptFilter, setDeptFilter]         = useState("");
   const [page, setPage]           = useState(1);
   const [hovered, setHovered]     = useState<string | null>(null);
   // NOTE: nothing currently calls a setter for this — the row-exit animation
@@ -177,43 +240,96 @@ export default function ApprovalsPage() {
   const membersQ = useMessageableMembers();
   const delegateM = useDelegateStep();
 
-  const myQueueQ = useMyApprovalQueue();
+  // Debounced, because this is now a request rather than an array filter:
+  // one per keystroke would be a request per keystroke (AP-DSH-04).
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Every filter, the sort and the page are SERVER parameters (AP-DSH-02..07).
+  // They used to be applied in the browser over a single page of rows, so the
+  // search searched only what had already been downloaded and "page 2" paged
+  // an array the server had already sent in full.
+  const myQueueQ = useMyApprovalQueue({
+    status: activeTab,
+    q: debouncedSearch || undefined,
+    template_id: templateFilter || undefined,
+    department_id: deptFilter || undefined,
+    sort,
+    page,
+    limit: PER_PAGE,
+  });
   const approveM = useApproveStep();
   const rejectM = useRejectStep();
 
-  const approvals = useMemo(() => {
-    return (myQueueQ.data?.items || []).map(mapStepToApproval);
-  }, [myQueueQ.data]);
+  const templatesQ = useWorkflowTemplates();
+  const deptsQ = useDepartments(true);
 
-  const counts = useMemo(() => {
-    const pendCount = (myQueueQ.data?.items || []).length;
-    return {
-      pending:  pendCount,
-      approved: 0,
-      rejected: 0,
-      all:      pendCount,
-    };
-  }, [myQueueQ.data]);
+  // AP-DSH-09: the queue auto-refreshes, but it must not reorder under the
+  // cursor. While the approver has rows selected or a dialog open, incoming
+  // data is HELD and announced with a prompt instead of being swapped in
+  // underneath them. With nothing selected there is nothing to disturb, so it
+  // applies straight away.
+  const holding = selected.size > 0 || actionModal.open || delegateModal.open;
+  const [shown, setShown] = useState<typeof myQueueQ.data>(undefined);
+  const [hasNewer, setHasNewer] = useState(false);
+  const latest = useRef<typeof myQueueQ.data>(undefined);
 
-  const filtered = useMemo(() => {
-    let list = activeTab === "all" ? approvals : approvals.filter(a => a.status === activeTab);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(a =>
-        a.title.toLowerCase().includes(q) ||
-        a.requester.toLowerCase().includes(q) ||
-        a.type.toLowerCase().includes(q)
-      );
+  useEffect(() => {
+    latest.current = myQueueQ.data;
+    if (!myQueueQ.data) return;
+    if (!holding) {
+      setShown(myQueueQ.data);
+      setHasNewer(false);
+      return;
     }
-    return list;
-  }, [approvals, activeTab, search]);
+    // Only prompt when the data genuinely moved on — a refetch that returns
+    // the same rows must not light up a banner.
+    const current = shown;
+    const changed =
+      !current ||
+      current.total !== myQueueQ.data.total ||
+      current.items.length !== myQueueQ.data.items.length ||
+      current.items.some((it, i) => it.id !== myQueueQ.data!.items[i]?.id);
+    if (changed) setHasNewer(true);
+  }, [myQueueQ.data, holding, shown]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
+  function applyNewer() {
+    if (latest.current) setShown(latest.current);
+    setHasNewer(false);
+    setSelected(new Set());
+  }
+
+  const data = shown;
+  const approvals = useMemo(
+    () => (data?.items || []).map(mapStepToApproval),
+    [data],
+  );
+
+  // Real counts, straight from the database (AP-DSH-02). These used to be
+  // hard-coded `approved: 0, rejected: 0` with `all` set to the pending
+  // count, because the client only ever held one tab's worth of rows.
+  const counts: Record<TabKey, number> = useMemo(() => ({
+    pending:  data?.counts?.pending  ?? 0,
+    approved: data?.counts?.approved ?? 0,
+    rejected: data?.counts?.rejected ?? 0,
+    all:      data?.counts?.all      ?? 0,
+  }), [data]);
+
+  const summary = data?.summary;
+  const total      = data?.total ?? 0;
+  const totalPages = Math.max(1, data?.pages ?? 1);
   const safePage   = Math.min(page, totalPages);
-  const paged      = filtered.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+  const paged      = approvals;
 
   function switchTab(tab: TabKey) {
     setActiveTab(tab); setSelected(new Set()); setPage(1);
+  }
+
+  function resetToFirstPage() {
+    setPage(1); setSelected(new Set());
   }
 
   function toggleRow(id: string, e: React.MouseEvent) {
@@ -265,6 +381,20 @@ export default function ApprovalsPage() {
     const isApprove = type === "approved";
     const m = isApprove ? approveM : rejectM;
 
+    // AP-REJ-02: a rejection is terminal, so the server requires a real
+    // reason (>= 10 meaningful characters). Checked here too — not instead
+    // of the server, but so the approver sees the problem before any request
+    // is sent, and a bulk reject does not fire one doomed call per row.
+    if (!isApprove) {
+      const meaningful = (note ?? "").replace(/[^\p{L}\p{N}]/gu, "");
+      if (meaningful.length < 10) {
+        toast.error(
+          "Please give a reason of at least 10 characters so the owner knows what to fix.",
+        );
+        return;
+      }
+    }
+
     if (!bulk && id) {
       try {
         const signature = signatureNeeded && signatureName.trim()
@@ -289,11 +419,61 @@ export default function ApprovalsPage() {
         return;
       }
     } else if (bulk) {
+      // D4: bulk goes through the SAME server-side decision logic as a
+      // single decision — every authorization check and the signing gate
+      // apply identically. A stage that requires a signature is skipped with
+      // a reported reason and never auto-signed, so no signature is attached
+      // here on purpose.
+      //
+      // Outcomes are counted per item. The previous loop swallowed every
+      // error and then reported the full selection as done, which told the
+      // approver that documents the server had refused were approved.
+      const needsSignature: string[] = [];
+      const failed: string[] = [];
+      const done: string[] = [];
+
       for (const selId of selected) {
-         try { await m.mutateAsync({ stepId: selId, note: note || undefined }); } catch {}
+        try {
+          await m.mutateAsync({ stepId: selId, note: note || undefined });
+          done.push(selId);
+        } catch (err) {
+          const isSigning =
+            err instanceof ApiClientError &&
+            err.status === 422 &&
+            err.detail.toLowerCase().includes("signature");
+          if (isSigning) needsSignature.push(selId);
+          else failed.push(selId);
+        }
       }
-      toast[isApprove ? "success" : "error"](`${selected.size} items ${type}`);
-      setSelected(new Set());
+
+      if (done.length > 0) {
+        toast[isApprove ? "success" : "error"](
+          `${done.length} ${done.length === 1 ? "item" : "items"} ${type}`,
+        );
+      }
+      if (needsSignature.length > 0) {
+        toast.warning(
+          `${needsSignature.length} skipped — ${
+            needsSignature.length === 1 ? "it requires" : "they require"
+          } a signature. Approve those one at a time to sign.`,
+          { duration: 8000 },
+        );
+      }
+      if (failed.length > 0) {
+        toast.error(
+          `${failed.length} could not be ${type}. ${
+            failed.length === 1 ? "It stays" : "They stay"
+          } selected so you can retry.`,
+          { duration: 8000 },
+        );
+      }
+      if (done.length === 0 && needsSignature.length === 0 && failed.length === 0) {
+        toast.info("Nothing was selected.");
+      }
+
+      // Keep whatever did not go through selected, so a retry does not mean
+      // finding those rows again.
+      setSelected(new Set([...needsSignature, ...failed]));
     }
     setActionModal({ open: false, type: "approved" });
     setSignatureNeeded(false);
@@ -390,50 +570,117 @@ export default function ApprovalsPage() {
               />
             </div>
 
-            {/* Filter chips */}
+            {/* Filters — real server filters (AP-DSH-05). These were four
+                chips labelled Requester / Type / Department / Date that did
+                nothing at all when clicked, which UX-INT-01 forbids. */}
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              {["Requester", "Type", "Department", "Date"].map(f => (
+              <select
+                value={templateFilter}
+                onChange={e => { setTemplateFilter(e.target.value); resetToFirstPage(); }}
+                aria-label="Filter by workflow"
+                style={selectStyle}
+              >
+                <option value="">All workflows</option>
+                {(templatesQ.data ?? []).map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+
+              <select
+                value={deptFilter}
+                onChange={e => { setDeptFilter(e.target.value); resetToFirstPage(); }}
+                aria-label="Filter by department"
+                style={selectStyle}
+              >
+                <option value="">All departments</option>
+                {(deptsQ.data ?? []).map(d => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </select>
+
+              {(templateFilter || deptFilter || debouncedSearch) && (
                 <button
-                  key={f}
+                  onClick={() => {
+                    setTemplateFilter(""); setDeptFilter(""); setSearch("");
+                    resetToFirstPage();
+                  }}
                   style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "7px 12px",
-                    border: `1px solid ${C.border}`,
-                    borderRadius: 10, color: C.muted,
+                    padding: "7px 12px", borderRadius: 10,
+                    border: `1px solid ${C.border}`, color: C.muted,
                     background: "transparent", cursor: "pointer",
                     fontSize: 12, fontWeight: 500,
                     fontFamily: "'Inter', sans-serif",
                   }}
                 >
-                  {f}
-                  <ChevronDown size={11} />
+                  Clear filters
                 </button>
-              ))}
+              )}
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
-              <button style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 12px",
-                border: `1px solid ${C.border}`,
-                borderRadius: 10, color: C.muted,
-                background: "transparent", cursor: "pointer",
-                fontSize: 12, fontWeight: 500,
-                fontFamily: "'Inter', sans-serif",
-              }}>
-                <ArrowUpDown size={13} />
-                Newest first
-              </button>
-              <button style={{
-                width: 34, height: 34, borderRadius: 10,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                border: `1px solid ${C.border}`, color: C.muted,
-                background: "transparent", cursor: "pointer",
-              }}>
-                <AlignJustify size={15} />
-              </button>
+              {/* Was a button reading "Newest first" that sorted nothing. */}
+              <ArrowUpDown size={13} style={{ color: C.muted }} />
+              <select
+                value={sort}
+                onChange={e => { setSort(e.target.value as SortKey); resetToFirstPage(); }}
+                aria-label="Sort approvals"
+                style={selectStyle}
+              >
+                {SORTS.map(s => (
+                  <option key={s.key} value={s.key}>{s.label}</option>
+                ))}
+              </select>
             </div>
           </div>
+
+          {/* ── Summary strip (AP-DSH-08) — the whole pending workload, not
+                the current filter, so it does not change as you type. ── */}
+          {summary && summary.pending > 0 && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 20,
+              padding: "10px 24px",
+              borderBottom: `1px solid ${C.border}`,
+              fontSize: 12, fontFamily: "'Inter', sans-serif",
+            }}>
+              <span style={{ color: C.muted }}>
+                <strong style={{ color: C.text }}>{summary.pending}</strong> awaiting you
+              </span>
+              {summary.overdue > 0 && (
+                <span style={{ color: "var(--danger)", fontWeight: 600 }}>
+                  {summary.overdue} overdue
+                </span>
+              )}
+              {summary.due_today > 0 && (
+                <span style={{ color: "var(--warning)", fontWeight: 600 }}>
+                  {summary.due_today} due today
+                </span>
+              )}
+              {summary.due_this_week > 0 && (
+                <span style={{ color: C.muted }}>
+                  {summary.due_this_week} due this week
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* ── AP-DSH-09: new items are announced, not swapped in under the
+                cursor while the approver is working through a selection. ── */}
+          {hasNewer && (
+            <button
+              onClick={applyNewer}
+              style={{
+                width: "100%", textAlign: "left",
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "10px 24px",
+                border: "none", borderBottom: `1px solid ${C.border}`,
+                background: C.hover, color: C.accent,
+                cursor: "pointer", fontSize: 13, fontWeight: 600,
+                fontFamily: "'Inter', sans-serif",
+              }}
+            >
+              Your queue has changed - show the latest
+            </button>
+          )}
 
           {/* ── Bulk action bar ── */}
           <AnimatePresence>
@@ -591,7 +838,16 @@ export default function ApprovalsPage() {
                         }}
                         onMouseEnter={() => setHovered(item.id)}
                         onMouseLeave={() => setHovered(null)}
-                        onClick={() => item.documentId && navigate(`/documents/${item.documentId}`)}
+                        onClick={() => {
+                          // AP-DET-01: the approver's own screen for this
+                          // step. This used to open /documents/{id}, which is
+                          // the OWNER's view - it shows the document but not
+                          // the stage, what it requires, or what was decided
+                          // before. Runs predating stage instances have no id
+                          // to link to, so those still fall back.
+                          if (item.stageInstanceId) navigate(`/approvals/${item.stageInstanceId}`);
+                          else if (item.documentId) navigate(`/documents/${item.documentId}`);
+                        }}
                       >
                         {/* Checkbox */}
                         <div onClick={e => toggleRow(item.id, e)}>
@@ -616,6 +872,27 @@ export default function ApprovalsPage() {
                             }}>
                               {item.title}
                             </p>
+                            {/* AP-DSH-06 — rendered from the server's verdict,
+                                never from a client-side clock comparison. */}
+                            {URGENCY[item.urgency] && (
+                              <span
+                                title={dueLabel(item.hoursUntilDue)}
+                                style={{
+                                  alignSelf: "flex-start",
+                                  marginTop: 4,
+                                  padding: "2px 8px",
+                                  borderRadius: 999,
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  letterSpacing: "0.03em",
+                                  textTransform: "uppercase",
+                                  color: URGENCY[item.urgency]!.color,
+                                  background: URGENCY[item.urgency]!.bg,
+                                }}
+                              >
+                                {URGENCY[item.urgency]!.label}
+                              </span>
+                            )}
                             <p style={{
                               fontSize: 12, color: C.muted, margin: "3px 0 0",
                               display: "flex", alignItems: "center", gap: 6,
@@ -738,14 +1015,14 @@ export default function ApprovalsPage() {
           </div>
 
           {/* ── Pagination ── */}
-          {filtered.length > PER_PAGE && (
+          {totalPages > 1 && (
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
               padding: "16px 24px",
               borderTop: `1px solid ${C.border}`,
             }}>
               <span style={{ fontSize: 14, color: C.muted }}>
-                Showing {(safePage - 1) * PER_PAGE + 1}–{Math.min(safePage * PER_PAGE, filtered.length)} of {filtered.length}
+                Showing {total === 0 ? 0 : (safePage - 1) * PER_PAGE + 1}–{Math.min(safePage * PER_PAGE, total)} of {total}
               </span>
 
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

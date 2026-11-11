@@ -57,10 +57,27 @@ from app.models.workflow import (  # noqa: F401
     ApprovalStep,
     ESignature,
     Delegation,
+    # Definition versions + sharing (Workflow module, task P1-1)
+    WorkflowTemplateVersion,
+    WorkflowVersionStage,
+    WorkflowShare,
+    # Runtime layer (Workflow module, task P2-1)
+    StageInstance,
+    ReviewRound,
+    Decision,
     # Legacy (preserved for backward compatibility)
     WorkflowStepInstance,
     ApprovalDecisionRecord,
 )
+
+# ── Transactional outbox + durable idempotency (task P2-1) ────────────────────
+from app.models.outbox import IdempotencyKey, OutboxEvent  # noqa: F401
+
+# ── Annotations (section 6.5, task P3-2) ──────────────────────────────────────
+from app.models.annotation import Annotation, AnnotationReply  # noqa: F401
+
+# ── AI summaries (section 6.4.3, task P4-1) ───────────────────────────────────
+from app.models.summary import DocumentSummary  # noqa: F401
 
 # ── Messaging & Chat ───────────────────────────────────────────────────────────
 from app.models.chat import (  # noqa: F401

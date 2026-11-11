@@ -18,6 +18,10 @@ from app.core.firebase import initialize_firebase
 from app.core.redis import close_redis
 from app.core.websocket import ws_manager
 from app.middleware.logging import RequestLoggingMiddleware, configure_logging
+from app.middleware.security import (
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
 from app.routers import (
     admin,
     agent,
@@ -39,6 +43,7 @@ from app.routers import (
     workflows,
     ws_chat,
     ws_notifications,
+    observability,
 )
 
 logger = structlog.get_logger(__name__)
@@ -143,7 +148,15 @@ def create_app() -> FastAPI:
     )
 
     # ── Custom Middleware ─────────────────────────────────────────────────────
+    #
+    # Starlette runs these in REVERSE registration order, so the last one
+    # added is the outermost. Registered so that the order on the way in is:
+    # security headers, then rate limit, then logging. The limiter sits
+    # inside the header middleware so a 429 still carries them, and outside
+    # logging so a rejected request is still logged.
     app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # ── Exception Handlers ─────────────────────────────────────────────────────
     @app.exception_handler(DocFlowException)
@@ -216,6 +229,9 @@ def create_app() -> FastAPI:
 
     # Admin Management & Audit Logs
     app.include_router(admin.router, prefix=f"{API_PREFIX}")
+    # Section 11 Observability (task P4-9): backlog counts an external
+    # monitor can poll and alert on.
+    app.include_router(observability.router, prefix=f"{API_PREFIX}")
 
     return app
 

@@ -5,3 +5,8 @@ module doc/
 scripts/
 .ruff_cache/
 graphify-out/
+
+# AUDIT folder - ignore everything except CLAUDE.md
+AUDIT/*
+!AUDIT/CLAUDE.md
+

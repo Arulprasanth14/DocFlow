@@ -146,6 +146,18 @@ class Settings(BaseSettings):
     EMPTY_DRAFT_RETENTION_HOURS: int = 24
 
     EXPIRY_REMINDERS_ENABLED: bool = True
+    # Workflow module section 11 (Maintainability), task P4-10.
+    #
+    # Off switch for the review layer added in Phases 3-4: the viewer, the
+    # annotation endpoints, summaries and the comparison. When false those
+    # endpoints return 404, exactly as they did before they existed, so a
+    # problem in review can be shut off without rolling back the migrations
+    # or touching submission and approval, which Phase 2 shipped separately.
+    #
+    # It deliberately does NOT gate decisions, notifications or the SLA
+    # sweep: turning review off must not strand a document that is already
+    # in flight.
+    WORKFLOW_MODULE_V2_ENABLED: bool = True
     # Log what would be sent without sending it. Useful on first rollout,
     # when a batch of imported documents may all come due at once.
     EXPIRY_REMINDERS_DRY_RUN: bool = False
@@ -236,6 +248,10 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:5173"
 
     # ── Rate Limiting ─────────────────────────────────────────────────────────
+    # Section 11 Security, task P4-8. Off in the test suite: the whole suite
+    # calls the API from one address, so a per-address limit would make
+    # unrelated tests fail with 429 depending on how many ran before them.
+    RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_GLOBAL: str = "120/minute"
     RATE_LIMIT_AUTH: str = "10/minute"
     RATE_LIMIT_AI_CHAT: str = "100/hour"

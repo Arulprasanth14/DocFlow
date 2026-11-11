@@ -25,6 +25,10 @@ import { useReviseAndResume, useCancelWorkflow } from '@/hooks/useWorkflows';
 import documentsApi from '@/lib/api/documents';
 import { useDepartments } from '@/hooks/useOrg';
 import { useAuthStore } from '@/store/authStore';
+import { FeedbackPanel } from '@/components/documents/FeedbackPanel';
+import { ProgressTimeline } from '@/components/documents/ProgressTimeline';
+import { ApiClientError } from '@/lib/api/client';
+import { useDocumentFeedback } from '@/hooks/useFeedback';
 import DynamicFormRenderer, { validateFormSchema } from '@/components/documents/DynamicFormRenderer';
 import CommentDrawer from '@/components/documents/CommentDrawer';
 import VersionHistoryModal from '@/components/documents/VersionHistoryModal';
@@ -83,6 +87,10 @@ export default function DocumentDetailPage() {
   const cancelWorkflow = useCancelWorkflow();
   const saveAsTemplate = useSaveDocumentAsTemplate();
   const currentUserId = useAuthStore((s) => s.user?.id);
+  // WF-REV-03: the approver's published comments. Fetched here as well as
+  // inside the panel so the section header can carry the outstanding count
+  // without the panel having to be open — react-query dedupes the request.
+  const feedbackQ = useDocumentFeedback(id);
 
   // UI state
   const [isEditing, setIsEditing] = useState(false);
@@ -239,10 +247,7 @@ export default function DocumentDetailPage() {
         const versions = await documentsApi.listVersions(doc.id);
         const latest = versions[0];
         if (latest) {
-          await reviseAndResume.mutateAsync({
-            documentId: doc.id,
-            payload: { new_version_id: latest.id, note: 'Revised and resubmitted' },
-          });
+          await resubmit(latest.id, {});
         }
       }
 
@@ -270,6 +275,47 @@ export default function DocumentDetailPage() {
       payload: { change_reason: 'Submitted for approval', workflow_template_id: workflowTemplateId },
     });
     setSubmitModalOpen(false);
+  };
+
+  /**
+   * WF-REV-10 / WF-REV-11. The server refuses a resubmission twice over,
+   * each for a reason the owner has to answer personally: the file is
+   * byte-identical to the one sent back (409), or reviewer comments are
+   * still open (422). Each refusal becomes a question, and only a yes
+   * retries with the matching flag — neither is ever sent pre-ticked.
+   */
+  const resubmit = async (
+    versionId: string,
+    flags: { confirm_identical?: boolean; addressed_confirmed?: boolean },
+  ): Promise<void> => {
+    try {
+      await reviseAndResume.mutateAsync({
+        documentId: doc.id,
+        payload: { new_version_id: versionId, note: 'Revised and resubmitted', ...flags },
+      });
+    } catch (err) {
+      if (!(err instanceof ApiClientError)) throw err;
+      const identical = err.status === 409 && err.detail.toLowerCase().includes('identical');
+      const openComments = err.status === 422 && err.detail.toLowerCase().includes('still open');
+      if (!identical && !openComments) throw err;
+      setConfirmState({
+        open: true,
+        title: identical ? 'Nothing has changed' : 'Comments still open',
+        message: identical
+          ? 'This file is identical to the version that was sent back. Resubmit it unchanged anyway?'
+          : 'Some reviewer comments are still open. Confirm that you have addressed the requested changes.',
+        confirmLabel: identical ? 'Resubmit unchanged' : 'I have addressed them',
+        onConfirm: () => {
+          setConfirmState((prev) => ({ ...prev, open: false }));
+          resubmit(versionId, {
+            ...flags,
+            ...(identical ? { confirm_identical: true } : { addressed_confirmed: true }),
+          }).catch((e: unknown) => {
+            setGeneralError(e instanceof Error ? e.message : 'Could not resubmit the document');
+          });
+        },
+      });
+    }
   };
 
   const handleCancelWorkflow = async () => {
@@ -597,6 +643,45 @@ export default function DocumentDetailPage() {
           )}
         </div>
       </div>
+
+      {/* WF-REV-01/02 — where the document is and who has it. Renders
+          nothing when there is no run to show. */}
+      <ProgressTimeline documentId={id!} />
+
+      {/* ── Review feedback (WF-REV-03..06, task P3-10) ──────────────────
+          Shown whenever an approver has commented, not only while the
+          document is sent back: after resubmitting, the owner still needs to
+          see what was asked and what they answered. */}
+      {(feedbackQ.data?.total_count ?? 0) > 0 && (
+        <div className="glass-card" style={{ padding: '20px 24px', marginBottom: 20 }}>
+          <h3 style={{
+            margin: '0 0 4px', fontSize: 15, fontWeight: 600,
+            color: 'var(--text-primary)', display: 'flex',
+            alignItems: 'center', gap: 8, flexWrap: 'wrap',
+          }}>
+            Reviewer feedback
+            {(feedbackQ.data?.open_count ?? 0) > 0 && (
+              <span style={{
+                fontSize: 11, fontWeight: 700, padding: '2px 8px',
+                borderRadius: 999, color: 'var(--warning)',
+                background: 'var(--warning-subtle, rgba(217,119,6,0.12))',
+              }}>
+                {feedbackQ.data?.open_count} outstanding
+              </span>
+            )}
+          </h3>
+          <p style={{
+            margin: '0 0 16px', fontSize: 12.5, color: 'var(--text-muted)',
+          }}>
+            Comments an approver left on this document, grouped by page.
+          </p>
+          <FeedbackPanel
+            documentId={id!}
+            currentUserId={currentUserId ?? ''}
+            isOwner={doc.submitted_by === currentUserId}
+          />
+        </div>
+      )}
 
       {savedAsTemplate && (
         <div role="status" style={{

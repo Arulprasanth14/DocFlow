@@ -60,6 +60,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
+            # X-NOT-01: side effects queued by this request were deliberately
+            # NOT sent while it was still in flight. Now that it has
+            # committed, deliver them here so the bell lights up immediately
+            # rather than on the next sweep. Best-effort and never raises -
+            # the Celery sweep is what makes delivery durable.
+            from app.services.outbox_service import drain_after_commit
+            await drain_after_commit(session)
         except Exception:
             await session.rollback()
             raise

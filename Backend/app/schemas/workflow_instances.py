@@ -202,6 +202,13 @@ class ReviseAndResumeRequest(BaseModel):
         ..., description="UUID of the already-uploaded new DocumentVersion"
     )
     note: str | None = Field(None, description="Note explaining what was changed")
+    # WF-REV-11 / E16: a revision whose bytes match the version it replaces
+    # is almost always the wrong file. The first attempt is refused with 409;
+    # sending this flag is the owner saying "yes, I mean it".
+    confirm_identical: bool = False
+    # WF-REV-10: required when reviewer comments are still open, so a
+    # resubmission cannot happen without the owner acknowledging them.
+    addressed_confirmed: bool = False
 
 
 class ApprovalStepSummary(BaseModel):
@@ -244,6 +251,197 @@ class WorkflowInstanceSummary(BaseModel):
 
 class CancelWorkflowRequest(BaseModel):
     reason: str | None = None
+
+
+class ProgressStage(BaseModel):
+    """One step on the owner's progress timeline (WF-REV-01)."""
+
+    position: int
+    stage_name: str
+    status: str
+    approver_name: str | None = None
+    due_at: datetime | None = None
+    activated_at: datetime | None = None
+    completed_at: datetime | None = None
+    round_count: int = 1
+    signing_required: bool = False
+    blocked_reason: str | None = None
+    is_current: bool = False
+
+
+class DocumentProgressResponse(BaseModel):
+    """WF-REV-01/02 — where the owner's document is, step by step.
+
+    `locked` and `locked_reason` state BR-15 in words: the file cannot be
+    changed while it is under review, and the owner should be told that
+    rather than discover it from a refused save.
+    """
+
+    document_id: uuid.UUID
+    instance_id: uuid.UUID | None = None
+    run_status: str | None = None
+    workflow_name: str | None = None
+    cycle: int = 1
+    previous_run_id: uuid.UUID | None = None
+    stages: list[ProgressStage] = Field(default_factory=list)
+    locked: bool = False
+    locked_reason: str | None = None
+
+
+class VersionFileResponse(BaseModel):
+    """AP-VWR-04 — what the review viewer loads.
+
+    `status` is what the client switches on:
+      'ready'   — `url` is a short-lived inline URL
+      'pending' — a review copy is being prepared; poll
+      'failed'  — it could not be prepared; `message` says why, in words the
+                  document's owner can act on
+    """
+
+    document_version_id: uuid.UUID
+    status: str
+    url: str | None = None
+    mime_type: str | None = None
+    filename: str | None = None
+    page_count: int | None = None
+    # Seconds the URL is good for, so the client can re-request before it
+    # lapses instead of discovering the expiry as a broken frame.
+    expires_in: int | None = None
+    message: str | None = None
+    version_num: int | None = None
+
+
+class StageDecisionSummary(BaseModel):
+    """One decision already recorded on this run, for the detail timeline."""
+
+    step_id: uuid.UUID
+    position: int | None = None
+    stage_name: str | None = None
+    approver_id: uuid.UUID
+    approver_name: str | None = None
+    decision: str
+    decided_at: datetime | None = None
+    note: str | None = None
+    round_number: int = 1
+    is_counted: bool = True
+
+
+class StageInstanceDetailResponse(BaseModel):
+    """AP-DET-01..05 — everything the approval screen needs in one call.
+
+    `can_act` is computed on the server from stored state (section 7.3
+    CRITICAL: never from anything the client sends), and
+    `cannot_act_reason` is populated whenever it is false so the UI can
+    explain itself instead of rendering a disabled button with no
+    explanation (UX-INT-01).
+    """
+
+    id: uuid.UUID
+    instance_id: uuid.UUID
+    position: int
+    total_stages: int
+    stage_name: str
+    status: str
+    cycle: int = 1
+    round_count: int = 1
+
+    signing_required: bool = False
+    signing_reason: str | None = None
+
+    due_at: datetime | None = None
+    urgency: str = "none"
+    hours_until_due: float | None = None
+    activated_at: datetime | None = None
+    timer_paused_at: datetime | None = None
+    blocked_reason: str | None = None
+
+    document_id: uuid.UUID | None = None
+    document_public_id: str | None = None
+    document_title: str | None = None
+    document_version_id: uuid.UUID | None = None
+    document_version_num: int | None = None
+    # AP-RES-03: the version this one replaced, so the approval screen can
+    # offer a comparison. Null on a first submission, which is why the
+    # comparison tab is conditional rather than always present.
+    previous_version_id: uuid.UUID | None = None
+    previous_version_num: int | None = None
+    submitted_by: uuid.UUID | None = None
+    submitter_name: str | None = None
+    submitted_at: datetime | None = None
+
+    template_id: uuid.UUID | None = None
+    workflow_name: str | None = None
+    run_status: str | None = None
+
+    resolved_approver_id: uuid.UUID | None = None
+    resolved_approver_name: str | None = None
+
+    # The ApprovalStep a decision is posted to. Null when the caller is not
+    # the approver, so a viewer cannot be handed an id to act on.
+    my_step_id: uuid.UUID | None = None
+    can_act: bool = False
+    cannot_act_reason: str | None = None
+    # AP-DET-02 — what the approvers before this one decided.
+    history: list[StageDecisionSummary] = Field(default_factory=list)
+
+
+class PreflightStage(BaseModel):
+    """One stage, as it would resolve for the caller right now."""
+
+    position: int
+    stage_id: uuid.UUID
+    name: str
+    approver_ids: list[uuid.UUID] = Field(default_factory=list)
+    approver_names: list[str] = Field(default_factory=list)
+    approver_summary: str = ""
+    requires_signature: bool = False
+    signing_reason: str | None = None
+    sla_hours: int | None = None
+    # Populated only when this stage is the problem, so the UI can mark the
+    # offending stage rather than show one message for the whole workflow.
+    blocker: str | None = None
+
+
+class PreflightResponse(BaseModel):
+    """WF-SUB-02 / WF-SEL-06 — can this person submit through this workflow?
+
+    `can_submit` is the same verdict the submit transaction will reach,
+    because both run the identical resolution pass. It can still go stale
+    between the two - an approver deactivated in the meantime - which is
+    exactly why submit re-runs it rather than trusting this answer.
+    """
+
+    template_id: uuid.UUID
+    workflow_name: str
+    can_submit: bool
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    stages: list[PreflightStage] = Field(default_factory=list)
+
+
+class SubmitAsNewRequest(BaseModel):
+    """WF-SUB-06 - start a fresh run after a terminal one.
+
+    `template_id` is optional: the usual case is "try again through the same
+    workflow", so leaving it out reuses the previous run's template. Passing
+    one lets the owner route a rejected document somewhere else, which is
+    often the actual answer to a rejection.
+    """
+
+    template_id: uuid.UUID | None = None
+    version_id: uuid.UUID | None = None
+
+
+class ReassignStageRequest(BaseModel):
+    """AP-SLA-06 / P2-17 - hand a blocked or stuck stage to another approver.
+
+    The reason is required, not optional. This overrides an approver chain
+    the workflow's owner defined, so the audit entry has to say why, and both
+    the outgoing and incoming approver are shown it.
+    """
+
+    new_approver_id: uuid.UUID
+    reason: str = Field(min_length=5, max_length=1000)
 
 
 # ── Approval Step ─────────────────────────────────────────────────────────────
@@ -343,13 +541,51 @@ class ApprovalStepResponse(BaseModel):
     revoked_at: datetime | None = None
     revocation_reason: str | None = None
     superseded_at: datetime | None = None
+    # AP-DSH-06 urgency. Computed on the server from `due_at`, because the
+    # client must not decide what counts as late: BR-13 / AP-SLA-07 make the
+    # deadline server-owned, and a browser with a wrong clock would otherwise
+    # render its own idea of overdue.
+    #   'overdue'  — past due_at
+    #   'due_soon' — within 24 hours
+    #   'normal'   — further out
+    #   'none'     — no deadline on this stage
+    urgency: str = "none"
+    hours_until_due: float | None = None
+    # The stage instance this step belongs to, so a dashboard row can link to
+    # the approval screen (AP-DET-01) instead of to the OWNER's document
+    # page. Resolved per row rather than read from
+    # `approval_steps.stage_instance_id`, which is nullable and is not
+    # populated for runs created before P2-1.
+    stage_instance_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
 
+class ApprovalQueueSummary(BaseModel):
+    """AP-DSH-08 summary strip — the whole pending workload, unfiltered."""
+
+    pending: int = 0
+    overdue: int = 0
+    due_today: int = 0
+    due_this_week: int = 0
+
+
 class MyApprovalsResponse(BaseModel):
+    """AP-DSH-01..08.
+
+    `total`/`page`/`limit`/`pages` describe the filtered set, matching the
+    documents list convention. `counts` is per tab so each tab can carry a
+    badge without fetching that tab (AP-DSH-02), and `summary` is the
+    unfiltered urgency strip.
+    """
+
     items: list[ApprovalStepResponse]
     total: int
+    page: int = 1
+    limit: int = 25
+    pages: int = 1
+    counts: dict[str, int] = Field(default_factory=dict)
+    summary: ApprovalQueueSummary = Field(default_factory=ApprovalQueueSummary)
 
 
 # ── SSE Event Types ────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +45,12 @@ class Notification(BaseModel):
     deep_link: Mapped[str | None] = mapped_column(Text)
     metadata_: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}", name="metadata")
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # §7.1: every notification in the N1-N15 catalogue carries a dedupe key
+    # (e.g. run + stage + round + kind) so a retried delivery, a re-run SLA
+    # sweep or a double-submitted decision cannot notify the same person
+    # twice for the same event. Uniqueness is enforced below, not in Python,
+    # because the sweep and the request path can race.
+    dedupe_key: Mapped[str | None] = mapped_column(String(255))
 
     # Relationships
     workflow_instance: Mapped["WorkflowInstance | None"] = relationship(  # type: ignore[name-defined]
@@ -58,3 +64,12 @@ class Notification(BaseModel):
     @property
     def is_read(self) -> bool:
         return self.read_at is not None
+
+    __table_args__ = (
+        # Partial: rows without a dedupe key are unconstrained, and a
+        # soft-deleted notification must not block re-notifying later.
+        Index(
+            "uq_notification_dedupe", "dedupe_key", unique=True,
+            postgresql_where=text("dedupe_key IS NOT NULL AND deleted_at IS NULL"),
+        ),
+    )

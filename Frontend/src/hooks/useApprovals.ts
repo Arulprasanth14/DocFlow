@@ -9,7 +9,12 @@
  * - Handles the 422 "signature required" error from requires_signature stages
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import approvalsApi, { type ApprovalFilters, type DecisionPayload, type DelegatePayload } from '@/lib/api/approvals';
+import approvalsApi, {
+  type ApprovalFilters,
+  type DecisionPayload,
+  type DelegatePayload,
+  type ReassignStagePayload,
+} from '@/lib/api/approvals';
 import chatApi from '@/lib/api/chat';
 import { useAuthStore } from '@/store/authStore';
 
@@ -32,6 +37,7 @@ export const approvalKeys = {
   all: ['approvals'] as const,
   myQueue: (params?: ApprovalFilters) => ['approvals', 'queue', params] as const,
   step: (stepId: string) => ['approvals', 'step', stepId] as const,
+  stageInstance: (id: string) => ['approvals', 'stage-instance', id] as const,
 };
 
 /**
@@ -75,6 +81,39 @@ export function useDecide() {
       queryClient.invalidateQueries({ queryKey: approvalKeys.all });
       queryClient.invalidateQueries({ queryKey: ['documents'] });
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
+    },
+  });
+}
+
+/**
+ * AP-DET-01..05 — the approval screen's data for one stage of one run.
+ *
+ * A 404 here means "not yours or not there", deliberately indistinguishable
+ * (section 9.4, E28), so the page renders one not-found state for both and
+ * must not retry its way to a different answer.
+ */
+export function useStageInstance(stageInstanceId: string | undefined) {
+  const isAuthenticated = useAuthStore((s) => !!s.user);
+  return useQuery({
+    queryKey: approvalKeys.stageInstance(stageInstanceId ?? 'none'),
+    queryFn: () => approvalsApi.getStageInstance(stageInstanceId!),
+    enabled: isAuthenticated && !!stageInstanceId,
+    staleTime: 1000 * 15,
+    retry: false,
+  });
+}
+
+/** AP-SLA-06 — Org Admin reassigns a blocked or stuck stage. */
+export function useReassignStage() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ stageInstanceId, payload }: {
+      stageInstanceId: string;
+      payload: ReassignStagePayload;
+    }) => approvalsApi.reassignStage(stageInstanceId, payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: approvalKeys.all });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
     },
   });
 }

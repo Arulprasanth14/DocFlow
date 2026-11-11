@@ -59,9 +59,12 @@ const ImportTemplatePage = lazy(() => import('@/pages/templates/ImportTemplatePa
 
 // ── Approvals Page Imports (Milestone 5) ──────────────────────────────────────
 import ApprovalsPage from '@/pages/approvals/ApprovalsPage';
+import ApprovalDetailPage from '@/pages/approvals/ApprovalDetailPage';
 
 // ── New Feature Pages ─────────────────────────────────────────────────────────
 import WorkflowsPage from '@/pages/workflows/WorkflowsPage';
+import WorkflowBuilderPage from '@/pages/workflows/WorkflowBuilderPage';
+import WorkflowDetailPage from '@/pages/workflows/WorkflowDetailPage';
 import SearchPage from '@/pages/search/SearchPage';
 import AnalyticsPage from '@/pages/analytics/AnalyticsPage';
 import ChatPage from '@/pages/chat/ChatPage';
@@ -192,8 +195,19 @@ function AppInner() {
           <Route path="documents/:id/submit" element={<SubmitWizard />} />
 
           {/* Feature routes */}
-          <Route path="approvals/*" element={<ApprovalsPage />} />
-          <Route path="workflows/*" element={<WorkflowsPage />} />
+          {/* Workflow module section 6.3 (AP-DET-01..05): the approver's own
+              screen for one stage of one run. Was a catch-all "approvals/*",
+              which left no room for a detail route. */}
+          <Route path="approvals" element={<ApprovalsPage />} />
+          <Route path="approvals/:stageInstanceId" element={<ApprovalDetailPage />} />
+          {/* Workflow module section 5.3: the builder is a full page, not a
+              modal - it needs room for ten stage cards plus the preview.
+              Declared BEFORE the catch-all so /workflows/new is not swallowed
+              by the :id route. */}
+          <Route path="workflows" element={<WorkflowsPage />} />
+          <Route path="workflows/new" element={<WorkflowBuilderPage />} />
+          <Route path="workflows/:id" element={<WorkflowDetailPage />} />
+          <Route path="workflows/:id/edit" element={<WorkflowBuilderPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="analytics/*" element={<AnalyticsPage />} />
           <Route path="chat" element={<ChatPage />} />

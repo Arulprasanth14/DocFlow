@@ -6,17 +6,19 @@ All methods are async and accept an AsyncSession.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.domain.enums import WorkflowInstanceStatus
 from app.models.workflow import (
     ApprovalStep,
     Delegation,
     ESignature,
+    StageInstance,
     WorkflowInstance,
     WorkflowShare,
     WorkflowStage,
@@ -61,7 +63,15 @@ class WorkflowTemplateRepository:
     async def get_by_id(self, template_id: uuid.UUID, org_id: uuid.UUID) -> WorkflowTemplate | None:
         result = await self.db.execute(
             select(WorkflowTemplate)
-            .options(selectinload(WorkflowTemplate.stages).selectinload(WorkflowStage.approver_rules))
+            .options(
+                # Retired stages are excluded for the same reason as in
+                # WorkflowStageRepository.list_for_template: this is the
+                # LIVE definition, and a soft-deleted row left in it
+                # showed the owner duplicated stages after an edit.
+                selectinload(
+                    WorkflowTemplate.stages.and_(WorkflowStage.deleted_at.is_(None))
+                ).selectinload(WorkflowStage.approver_rules)
+            )
             .where(
                 WorkflowTemplate.id == template_id,
                 WorkflowTemplate.org_id == org_id,
@@ -181,14 +191,55 @@ class WorkflowStageRepository:
         return stage
 
     async def list_for_template(self, template_id: uuid.UUID) -> Sequence[WorkflowStage]:
+        """The template's LIVE stage definition.
+
+        Retired rows are excluded. `_replace_legacy_stages()` soft-deletes a
+        stage row that an in-flight run still references (it cannot be
+        deleted: `approval_steps.stage_id` and
+        `workflow_instances.current_stage_id` reference it with no ON DELETE)
+        and inserts the new definition alongside it. There is no global
+        soft-delete filter in this codebase, so without the predicate below
+        this method returned the retired rows AND the new ones together, and
+        the caller saw a definition with duplicated stages.
+
+        A run that was submitted against a retired stage still has to resolve
+        it; that is done by id through `list_by_ids()`, not here.
+        """
         result = await self.db.execute(
             select(WorkflowStage)
             .options(
                 selectinload(WorkflowStage.approver_rules),
                 selectinload(WorkflowStage.conditions),
             )
-            .where(WorkflowStage.template_id == template_id)
+            .where(
+                WorkflowStage.template_id == template_id,
+                WorkflowStage.deleted_at.is_(None),
+            )
             .order_by(WorkflowStage.sequence_order)
+        )
+        return result.scalars().all()
+
+    async def list_by_ids(
+        self, stage_ids: Sequence[uuid.UUID]
+    ) -> Sequence[WorkflowStage]:
+        """Specific stages by id, INCLUDING soft-deleted ones.
+
+        This is how a run is routed by the definition it was pinned to
+        (DM-02): a stage retired from the live template must still resolve
+        for a run that was already in flight when the owner edited it.
+        `approver_rules` is eagerly loaded because the model declares it
+        lazy="noload" — a bare get() yields zero approver rules and the
+        caller would silently create no ApprovalStep at all.
+        """
+        if not stage_ids:
+            return []
+        result = await self.db.execute(
+            select(WorkflowStage)
+            .options(
+                selectinload(WorkflowStage.approver_rules),
+                selectinload(WorkflowStage.conditions),
+            )
+            .where(WorkflowStage.id.in_(list(stage_ids)))
         )
         return result.scalars().all()
 
@@ -323,25 +374,95 @@ class ApprovalStepRepository:
         await self.db.flush()
         return step
 
-    async def get_by_id(self, step_id: uuid.UUID) -> ApprovalStep | None:
+    async def get_by_id(
+        self, step_id: uuid.UUID, *, for_update: bool = False
+    ) -> ApprovalStep | None:
+        """One approval step.
+
+        `for_update` takes a row lock, which a decision needs (X-INT-03, E9,
+        T25). The "has this step already been decided?" guard reads
+        `step.decision`, so without a lock two approvals arriving together
+        both read `pending`, both pass the guard and both record a decision —
+        advancing the run twice and notifying the next approver twice. With
+        the lock the second waits, then sees the first decision and is
+        correctly refused with a conflict.
+        """
+        if for_update:
+            result = await self.db.execute(
+                select(ApprovalStep)
+                .where(ApprovalStep.id == step_id)
+                .with_for_update()
+            )
+            return result.scalar_one_or_none()
         return await self.db.get(ApprovalStep, step_id)
 
     async def get_pending_for_approver(
         self,
         approver_id: uuid.UUID,
         org_id: uuid.UUID | None = None,
+        decisions: Sequence[str] | None = None,
     ) -> Sequence[ApprovalStep]:
-        """Get all pending approval steps assigned to a user."""
-        q = (
-            select(ApprovalStep)
-            .where(
-                ApprovalStep.approver_id == approver_id,
-                ApprovalStep.decision == "pending",
+        """Approval steps assigned to a user.
+
+        `decisions` selects which outcomes to return; the default keeps the
+        original pending-only behaviour, so existing callers are unchanged.
+        The dashboard needs the decided ones too (AP-DSH-01): its Approved /
+        Rejected / All tabs were rendered but could never contain a row,
+        because this query filtered on `decision == 'pending'` unconditionally
+        (defect 7).
+
+        Decided steps are ordered newest-first — for history the useful end is
+        the recent one, whereas pending work is ordered by what is due soonest.
+        """
+        wanted = list(decisions) if decisions else ["pending"]
+        pending_only = wanted == ["pending"]
+
+        q = select(ApprovalStep).where(
+            ApprovalStep.approver_id == approver_id,
+            ApprovalStep.decision.in_(wanted),
+        )
+
+        if pending_only:
+            # A step is only actionable while its run is. Without this, work
+            # from a run that has already ended stayed in the approver's
+            # queue with live Approve / Reject buttons (UX-INT-01):
+            #
+            #   * the owner withdrew the document (WF-WD-02) - the step was
+            #     left pending, so it kept its place in the list; and
+            #   * a stage needing two approvals where one approver rejected -
+            #     the run is terminal, but the other approver's step is still
+            #     pending and still offered to them.
+            #
+            # A superseded step is excluded for the same reason: it has no
+            # decision, but it is no longer anybody's to make.
+            q = q.join(
+                WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id
+            ).where(
+                ApprovalStep.superseded_at.is_(None),
+                WorkflowInstance.status.notin_(
+                    [
+                        str(st) for st in (
+                            WorkflowInstanceStatus.APPROVED,
+                            WorkflowInstanceStatus.REJECTED,
+                            WorkflowInstanceStatus.CANCELLED,
+                            WorkflowInstanceStatus.COMPLETED,
+                            WorkflowInstanceStatus.FINALIZED,
+                        )
+                    ]
+                ),
+                WorkflowInstance.deleted_at.is_(None),
             )
-            .order_by(ApprovalStep.due_at.asc().nullslast())
+        q = q.order_by(
+            ApprovalStep.due_at.asc().nullslast() if pending_only
+            else ApprovalStep.decided_at.desc().nullslast()
         )
         if org_id:
-            q = q.join(WorkflowInstance).where(WorkflowInstance.org_id == org_id)
+            # The pending branch above has already joined WorkflowInstance;
+            # joining it a second time is a duplicate-alias error, so only
+            # add the join where it is not there yet.
+            if not pending_only:
+                q = q.join(WorkflowInstance)
+            q = q.where(WorkflowInstance.org_id == org_id)
         result = await self.db.execute(q)
         return result.scalars().all()
 
@@ -409,16 +530,305 @@ class ApprovalStepRepository:
         await self.db.flush()
         return step
 
+    # ── Dashboard query (AP-DSH-02..07, task P2-18) ────────────────────
+
+    # Statuses in which a run is finished; its steps are history, not work.
+    _DEAD_RUN_STATUSES = (
+        WorkflowInstanceStatus.APPROVED,
+        WorkflowInstanceStatus.REJECTED,
+        WorkflowInstanceStatus.CANCELLED,
+        WorkflowInstanceStatus.COMPLETED,
+        WorkflowInstanceStatus.FINALIZED,
+    )
+
+    DASHBOARD_SORTS = (
+        "due_at", "-due_at", "submitted_at", "-submitted_at", "title", "-title",
+    )
+
+    def _dashboard_query(
+        self,
+        approver_id: uuid.UUID,
+        org_id: uuid.UUID | None,
+        decisions: Sequence[str],
+        *,
+        q: str | None = None,
+        template_id: uuid.UUID | None = None,
+        department_id: uuid.UUID | None = None,
+    ):
+        """The shared FROM/WHERE for the dashboard, so the rows and the
+        counts can never disagree about what belongs in a tab.
+
+        Joined rather than looked up per row: the search and the department
+        filter are both over the DOCUMENT, which is two hops from the step
+        (step -> instance -> document), and that is a join, not an N+1.
+        """
+        from app.models.document import Document
+
+        wanted = list(decisions)
+        pending_only = wanted == ["pending"]
+
+        query = (
+            select(ApprovalStep)
+            .join(WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id)
+            .join(Document, Document.id == WorkflowInstance.document_id)
+            .where(
+                ApprovalStep.approver_id == approver_id,
+                ApprovalStep.decision.in_(wanted),
+                WorkflowInstance.deleted_at.is_(None),
+                Document.deleted_at.is_(None),
+            )
+        )
+        if org_id is not None:
+            query = query.where(WorkflowInstance.org_id == org_id)
+
+        if pending_only:
+            # Still-to-do work only: a pending step on a run that has ended
+            # is not actionable (see get_pending_for_approver).
+            query = query.where(
+                ApprovalStep.superseded_at.is_(None),
+                WorkflowInstance.status.notin_(
+                    [str(s) for s in self._DEAD_RUN_STATUSES]
+                ),
+            )
+
+        if template_id is not None:
+            query = query.where(WorkflowInstance.template_id == template_id)
+        if department_id is not None:
+            query = query.where(Document.dept_id == department_id)
+        if q:
+            # Trailing-wildcard only on purpose: a leading `%` cannot use an
+            # index, and this list is the one screen an approver reloads all
+            # day. Title and the human-facing document id are what people
+            # actually search by.
+            like = f"%{q.strip()}%"
+            prefix = f"{q.strip()}%"
+            query = query.where(
+                or_(
+                    Document.title.ilike(like),
+                    Document.public_id.ilike(prefix),
+                )
+            )
+        return query
+
+    async def query_dashboard(
+        self,
+        approver_id: uuid.UUID,
+        org_id: uuid.UUID | None = None,
+        *,
+        decisions: Sequence[str] = ("pending",),
+        q: str | None = None,
+        template_id: uuid.UUID | None = None,
+        department_id: uuid.UUID | None = None,
+        sort: str = "due_at",
+        page: int = 1,
+        limit: int = 25,
+    ) -> tuple[Sequence[ApprovalStep], int]:
+        """One page of the approver's queue, and the size of the whole set."""
+        base = self._dashboard_query(
+            approver_id, org_id, decisions,
+            q=q, template_id=template_id, department_id=department_id,
+        )
+
+        total = (
+            await self.db.execute(
+                select(func.count()).select_from(base.subquery())
+            )
+        ).scalar() or 0
+
+        from app.models.document import Document
+
+        column = {
+            "due_at": ApprovalStep.due_at,
+            "submitted_at": WorkflowInstance.submitted_at,
+            "title": Document.title,
+        }[sort.lstrip("-")]
+        descending = sort.startswith("-")
+        order = column.desc() if descending else column.asc()
+        # NULLs last either way: a step with no deadline is not the most
+        # urgent thing on the list, and it is not the least recent either.
+        order = order.nullslast()
+
+        rows = (
+            await self.db.execute(
+                base.order_by(order, ApprovalStep.created_at.desc())
+                .offset(max(0, (page - 1)) * limit)
+                .limit(limit)
+            )
+        ).scalars().all()
+        return rows, total
+
+    async def dashboard_counts(
+        self,
+        approver_id: uuid.UUID,
+        org_id: uuid.UUID | None = None,
+        *,
+        tabs: dict[str, Sequence[str]],
+        q: str | None = None,
+        template_id: uuid.UUID | None = None,
+        department_id: uuid.UUID | None = None,
+    ) -> dict[str, int]:
+        """A count per tab (AP-DSH-02).
+
+        The counts honour the active filters, so a tab badge never promises
+        rows that the current search would hide — a count that disagrees with
+        what the tab then shows is worse than no count.
+        """
+        counts: dict[str, int] = {}
+        for tab, decisions in tabs.items():
+            base = self._dashboard_query(
+                approver_id, org_id, decisions,
+                q=q, template_id=template_id, department_id=department_id,
+            )
+            counts[tab] = (
+                await self.db.execute(
+                    select(func.count()).select_from(base.subquery())
+                )
+            ).scalar() or 0
+        return counts
+
+    async def dashboard_urgency_summary(
+        self,
+        approver_id: uuid.UUID,
+        org_id: uuid.UUID | None = None,
+        *,
+        as_of: datetime | None = None,
+    ) -> dict[str, int]:
+        """Overdue / due-today / due-this-week across the whole pending queue.
+
+        Deliberately NOT filtered by the current search or tab: this is the
+        summary strip (AP-DSH-08), and its job is to say what is on fire
+        overall. A strip that changed every time somebody typed in the search
+        box would be telling them about their filter, not their workload.
+        """
+        now = as_of or datetime.now(timezone.utc)
+        base = self._dashboard_query(approver_id, org_id, ["pending"])
+        sub = base.subquery()
+
+        async def _count(*conditions) -> int:
+            return (
+                await self.db.execute(
+                    select(func.count()).select_from(sub).where(*conditions)
+                )
+            ).scalar() or 0
+
+        return {
+            "pending": await _count(),
+            "overdue": await _count(
+                sub.c.due_at.isnot(None), sub.c.due_at < now
+            ),
+            "due_today": await _count(
+                sub.c.due_at.isnot(None),
+                sub.c.due_at >= now,
+                sub.c.due_at < now + timedelta(days=1),
+            ),
+            "due_this_week": await _count(
+                sub.c.due_at.isnot(None),
+                sub.c.due_at >= now,
+                sub.c.due_at < now + timedelta(days=7),
+            ),
+        }
+
     async def get_overdue_pending(self, as_of: datetime | None = None) -> Sequence[ApprovalStep]:
-        """Return pending steps past their due_at (for SLA worker)."""
+        """Pending steps past their due_at, for the SLA worker.
+
+        Excludes runs whose clock is not running (§6.10, AP-SLA-03, defect 6).
+        The timer stops while the document is back with its owner for changes,
+        or while the stage is blocked awaiting reassignment: the approver is
+        not sitting on it, so it must not accrue toward their breach. This
+        previously filtered on `decision == pending` alone, so a document sent
+        back for corrections kept counting down and the approver was escalated
+        on for work that was not theirs to do.
+
+        A terminal run is excluded for the same reason — its steps are history.
+        """
         if as_of is None:
             as_of = datetime.now(timezone.utc)
+
+        # Statuses in which the approver's clock is NOT running.
+        paused_or_done = [
+            WorkflowInstanceStatus.CHANGES_REQUESTED,
+            WorkflowInstanceStatus.APPROVED,
+            WorkflowInstanceStatus.REJECTED,
+            WorkflowInstanceStatus.CANCELLED,
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FINALIZED,
+        ]
         result = await self.db.execute(
-            select(ApprovalStep).where(
+            select(ApprovalStep)
+            .join(WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id)
+            .where(
                 ApprovalStep.decision == "pending",
                 ApprovalStep.due_at < as_of,
                 ApprovalStep.escalated_at.is_(None),
+                WorkflowInstance.status.notin_([str(s) for s in paused_or_done]),
+                WorkflowInstance.deleted_at.is_(None),
+                # A stage explicitly paused or blocked is never overdue
+                # (§6.10): no stage instance at all means an older run, which
+                # keeps its previous behaviour.
+                ~select(StageInstance.id)
+                .where(
+                    StageInstance.instance_id == ApprovalStep.instance_id,
+                    StageInstance.legacy_stage_id == ApprovalStep.stage_id,
+                    StageInstance.deleted_at.is_(None),
+                    or_(
+                        StageInstance.timer_paused_at.isnot(None),
+                        StageInstance.status.in_(("blocked", "changes_requested")),
+                    ),
+                )
+                .exists(),
             )
+        )
+        return result.scalars().all()
+
+    async def get_sla_candidates(
+        self, as_of: datetime | None = None
+    ) -> Sequence[ApprovalStep]:
+        """Pending steps with a live deadline, for the SLA sweep.
+
+        Deliberately NOT filtered on `due_at < now`: the 75% reminder fires
+        BEFORE the deadline (AP-SLA-02a), so a query that only returns
+        overdue rows cannot send it. The sweep classifies each candidate
+        itself.
+
+        The exclusions match `get_overdue_pending` - a paused or blocked
+        stage, and a terminal run, have no running clock (section 6.10,
+        AP-SLA-03), so nothing about them is due.
+        """
+        if as_of is None:
+            as_of = datetime.now(timezone.utc)
+
+        paused_or_done = [
+            WorkflowInstanceStatus.CHANGES_REQUESTED,
+            WorkflowInstanceStatus.APPROVED,
+            WorkflowInstanceStatus.REJECTED,
+            WorkflowInstanceStatus.CANCELLED,
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FINALIZED,
+        ]
+        result = await self.db.execute(
+            select(ApprovalStep)
+            .join(WorkflowInstance, WorkflowInstance.id == ApprovalStep.instance_id)
+            .where(
+                ApprovalStep.decision == "pending",
+                ApprovalStep.due_at.isnot(None),
+                ApprovalStep.superseded_at.is_(None),
+                WorkflowInstance.status.notin_([str(s) for s in paused_or_done]),
+                WorkflowInstance.deleted_at.is_(None),
+                ~select(StageInstance.id)
+                .where(
+                    StageInstance.instance_id == ApprovalStep.instance_id,
+                    StageInstance.legacy_stage_id == ApprovalStep.stage_id,
+                    StageInstance.deleted_at.is_(None),
+                    or_(
+                        StageInstance.timer_paused_at.isnot(None),
+                        StageInstance.status.in_(
+                            ("blocked", "changes_requested", "superseded")
+                        ),
+                    ),
+                )
+                .exists(),
+            )
+            .order_by(ApprovalStep.due_at.asc())
         )
         return result.scalars().all()
 

@@ -1,522 +1,589 @@
 /**
- * DocFlow Frontend — Workflows Page
- * Full workflow management UI: pipeline visualization, stats, filters, workflow cards.
- * Updated Phase 2: replaces mockWorkflows with live data from GET /workflow-templates.
+ * DocFlow Frontend — Workflows page (Workflow module §5.2, WF-LIST-01..07)
+ *
+ * Two tabs with count badges — My Workflows and Shared with me — and
+ * "Archived" as a FILTER within My Workflows rather than a tab of its own,
+ * which is what WF-LIST-01 specifies.
+ *
+ * Every action on a row is real and reaches the server (UX-INT-01): the page
+ * it replaced showed a decorative drag handle, a hardcoded three-step
+ * pipeline and trend arrows over data it did not have. Row actions are hidden
+ * when unavailable, and the server still enforces them (WF-LIST-03).
+ *
+ * Delete is offered but the server refuses it while runs are in flight
+ * (WF-LC-04); the error says so and points at Archive, which is exactly the
+ * route WF-LIST-07 asks for.
  */
-
-import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  GitBranch, Plus, Clock, CheckCircle,
-  Filter, Search, AlertCircle,
-  TrendingUp, Zap, MoreVertical, ChevronRight,
-  FileText
+  Archive,
+  ArchiveRestore,
+  Copy,
+  Eye,
+  GitBranch,
+  MoreVertical,
+  Pencil,
+  Plus,
+  Search,
+  Share2,
+  Trash2,
+  Users,
 } from 'lucide-react';
-import { useWorkflowTemplates } from '@/hooks/useWorkflows';
-import { workflowsApi } from '@/lib/api/workflows';
-import { useAuthStore } from '@/store/authStore';
-import WorkflowBuilderModal from '@/components/workflows/WorkflowBuilderModal';
-import { PageHeader } from '@/components/ui/PageHeader';
 
-// ── Design tokens (matching DashboardPage) ───────────────────────────────────
+import { PageHeader } from '@/components/ui/PageHeader';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { Skeleton } from '@/components/ui/Skeleton';
+import TabCountBadge from '@/components/ui/TabCountBadge';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import ShareWorkflowDialog from '@/components/workflows/ShareWorkflowDialog';
+import { ApiClientError } from '@/lib/api/client';
+import { workflowsApi, type WorkflowTemplateSummary } from '@/lib/api/workflows';
+import {
+  useSetWorkflowArchived,
+  useWorkflowsByScope,
+  workflowKeys,
+} from '@/hooks/useWorkflows';
+import { useAuthStore } from '@/store/authStore';
+
 const C = {
-  bg: 'var(--bg-base)',
   card: 'var(--bg-elevated)',
-  surface: 'var(--bg-surface)',
   overlay: 'var(--bg-overlay)',
   border: 'var(--border-default)',
   borderSubtle: 'var(--border-subtle)',
-  primary: 'var(--color-primary-500)',
-  primary400: 'var(--color-primary-400)',
+  primary: 'var(--color-primary-400)',
   success: 'var(--color-success-400)',
-  danger: 'var(--color-error-400)',
   warning: 'var(--color-warning-400)',
-  purple: 'var(--color-accent-400)',
+  danger: 'var(--color-error-400)',
   heading: 'var(--text-primary)',
   body: 'var(--text-secondary)',
   muted: 'var(--text-muted)',
-  disabled: 'var(--text-disabled)',
 };
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-type WFStatus = 'active' | 'completed' | 'archived' | 'paused';
+type Tab = 'mine' | 'shared';
 
-interface WorkflowStep {
-  label: string;
-  status: 'done' | 'active' | 'pending';
-  color: string;
-}
-
-interface Workflow {
-  id: string;
-  name: string;
-  document: string;
-  docType: string;
-  status: WFStatus;
-  steps: WorkflowStep[];
-  currentStep: string;
-  progress: number;
-  assignees: string[];
-  createdAt: string;
-  sla: 'on-time' | 'warning' | 'breached';
-  slaText: string;
-  priority: 'low' | 'normal' | 'high' | 'urgent';
-}
-
-// Note: mockWorkflows removed — replaced with live API data below (useWorkflowTemplates).
-// The UI below adapts workflow templates into the WFStatus display model.
-
-
-const tabFilters: { key: 'all' | WFStatus; label: string; color: string }[] = [
-  { key: 'all', label: 'All', color: C.primary400 },
-  { key: 'active', label: 'Active', color: C.warning },
-  { key: 'completed', label: 'Completed', color: C.success },
-  { key: 'paused', label: 'Paused', color: C.muted },
-  { key: 'archived', label: 'Archived', color: C.disabled },
-];
-
-const priorityColor: Record<string, string> = {
-  low: C.muted, normal: C.body, high: C.warning, urgent: C.danger,
-};
-
-const slaColor: Record<string, string> = {
-  'on-time': C.success, warning: C.warning, breached: C.danger,
-};
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function Avatar({ initials, size = 28, color = C.primary400 }: { initials: string; size?: number; color?: string }) {
+function Chip({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 'muted' | 'primary' | 'warning' | 'success' }) {
+  const color =
+    tone === 'primary' ? C.primary : tone === 'warning' ? C.warning : tone === 'success' ? C.success : C.muted;
   return (
-    <div style={{
-      width: size, height: size, borderRadius: '50%', flexShrink: 0,
-      background: `color-mix(in srgb, ${color} 15%, transparent)`,
-      border: `1px solid color-mix(in srgb, ${color} 25%, transparent)`,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <span style={{ fontSize: size * 0.34, color, fontWeight: 700 }}>{initials}</span>
-    </div>
-  );
-}
-
-function StatCard({ icon: Icon, label, value, sub, color }: {
-  icon: React.ElementType; label: string; value: string; sub: string; color: string;
-}) {
-  return (
-    <div style={{
-      background: C.card, border: `1px solid ${C.border}`, borderRadius: 20,
-      padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: 12,
-      flex: 1, minWidth: 0,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ width: 40, height: 40, background: `color-mix(in srgb, ${color} 12%, transparent)`, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Icon size={20} color={color} />
-        </div>
-        <TrendingUp size={14} color={C.success} />
-      </div>
-      <div>
-        <div style={{ color: C.heading, fontSize: 28, fontWeight: 700, lineHeight: 1 }}>{value}</div>
-        <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>{label}</div>
-        <div style={{ color: C.success, fontSize: 11, marginTop: 2, fontWeight: 600 }}>{sub}</div>
-      </div>
-    </div>
-  );
-}
-
-function PipelineMini({ steps }: { steps: WorkflowStep[] }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 0, width: '100%' }}>
-      {steps.map((step, i) => (
-        <div key={step.label} style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: 8,
-              background: step.status === 'pending' ? `color-mix(in srgb, ${step.color} 5%, transparent)` : `color-mix(in srgb, ${step.color} 15%, transparent)`,
-              border: `${step.status === 'active' ? 2 : 1}px solid ${step.status === 'pending' ? `color-mix(in srgb, ${step.color} 15%, transparent)` : `color-mix(in srgb, ${step.color} 40%, transparent)`}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              position: 'relative',
-            }}>
-              {step.status === 'done' && <CheckCircle size={14} color={step.color} />}
-              {step.status === 'active' && (
-                <>
-                  <div style={{ width: 8, height: 8, borderRadius: '50%', background: step.color, boxShadow: `0 0 6px ${step.color}` }} />
-                  <div style={{ position: 'absolute', inset: -4, borderRadius: 12, border: `2px solid color-mix(in srgb, ${step.color} 30%, transparent)`, animation: 'pulse-ring 2s ease infinite' }} />
-                </>
-              )}
-              {step.status === 'pending' && <div style={{ width: 6, height: 6, borderRadius: '50%', background: C.disabled }} />}
-            </div>
-            <span style={{ fontSize: 9, color: step.status === 'pending' ? C.disabled : step.color, fontWeight: step.status === 'active' ? 700 : 500, whiteSpace: 'nowrap' }}>
-              {step.label}
-            </span>
-          </div>
-          {i < steps.length - 1 && (
-            <div style={{ width: 16, height: 1, background: C.borderSubtle, flexShrink: 0, margin: '0 -8px', marginBottom: 12 }} />
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ProgressBar({ value, color = C.primary400 }: { value: number; color?: string }) {
-  return (
-    <div style={{ background: C.overlay, borderRadius: 99, height: 5, overflow: 'hidden' }}>
-      <div style={{ width: `${value}%`, height: '100%', background: `linear-gradient(90deg, ${color}, color-mix(in srgb, ${color} 60%, transparent))`, borderRadius: 99, transition: 'width 0.7s ease' }} />
-    </div>
-  );
-}
-
-function WorkflowCard({
-  wf,
-  onView,
-  onEdit,
-  onDuplicate,
-  onToggleActive,
-  onDelete,
-}: {
-  wf: Workflow;
-  onView: (id: string) => void;
-  onEdit: (id: string) => void;
-  onDuplicate: (id: string) => void;
-  onToggleActive: (id: string, next: boolean) => void;
-  onDelete: (id: string) => void;
-}) {
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  const statusColors: Record<WFStatus, string> = {
-    active: C.primary400, completed: C.success, archived: C.disabled, paused: C.warning,
-  };
-  const statusBgs: Record<WFStatus, string> = {
-    active: `color-mix(in srgb, ${C.primary400} 10%, transparent)`,
-    completed: `color-mix(in srgb, ${C.success} 10%, transparent)`,
-    archived: `color-mix(in srgb, ${C.disabled} 10%, transparent)`,
-    paused: `color-mix(in srgb, ${C.warning} 10%, transparent)`,
-  };
-
-  return (
-    <div
-      className="wf-card"
+    <span
       style={{
-        background: C.card, border: `1px solid ${C.border}`, borderRadius: 20,
-        padding: 22, display: 'flex', flexDirection: 'column', gap: 16,
-        transition: 'all 0.2s',
+        fontSize: 11,
+        color,
+        background: `color-mix(in srgb, ${color} 10%, transparent)`,
+        border: `1px solid color-mix(in srgb, ${color} 22%, transparent)`,
+        borderRadius: 999,
+        padding: '2px 8px',
+        whiteSpace: 'nowrap',
       }}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 99, background: statusBgs[wf.status], color: statusColors[wf.status], border: `1px solid color-mix(in srgb, ${statusColors[wf.status]} 20%, transparent)`, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-              {wf.status}
-            </span>
-            <span style={{ fontSize: 11, fontWeight: 600, color: priorityColor[wf.priority] }}>
-              ● {wf.priority}
-            </span>
-          </div>
-          <div style={{ color: C.heading, fontWeight: 700, fontSize: 15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {wf.name}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-            <FileText size={12} color={C.muted} />
-            <span style={{ color: C.muted, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{wf.document}</span>
-            <span style={{ fontSize: 11, padding: '1px 6px', background: C.overlay, border: `1px solid ${C.borderSubtle}`, borderRadius: 4, color: C.disabled, flexShrink: 0 }}>{wf.docType}</span>
-          </div>
-        </div>
-        <div style={{ position: 'relative', flexShrink: 0 }}>
-          <button
-            onClick={() => setMenuOpen(!menuOpen)}
-            style={{ background: 'transparent', border: 'none', color: C.muted, cursor: 'pointer', padding: 4, borderRadius: 8, display: 'flex' }}
-          >
-            <MoreVertical size={16} />
-          </button>
-          {menuOpen && (
-            <>
-              <div style={{ position: 'fixed', inset: 0, zIndex: 10 }} onClick={() => setMenuOpen(false)} />
-              <div style={{
-                position: 'absolute', right: 0, top: '100%', marginTop: 4, zIndex: 20,
-                background: C.card, border: `1px solid ${C.border}`, borderRadius: 12,
-                boxShadow: 'var(--shadow-lg)', minWidth: 140, overflow: 'hidden',
-              }}>
-                {/* Each item now performs a real action against the API.
-                    They previously all just closed the menu. */}
-                {([
-                  { label: 'Edit workflow', run: () => onEdit(wf.id) },
-                  { label: 'Duplicate', run: () => onDuplicate(wf.id) },
-                  {
-                    label: wf.status === 'active' ? 'Disable' : 'Enable',
-                    run: () => onToggleActive(wf.id, wf.status !== 'active'),
-                  },
-                  { label: 'Delete', run: () => onDelete(wf.id), danger: true },
-                ] as { label: string; run: () => void; danger?: boolean }[]).map(action => (
-                  <button
-                    key={action.label}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      action.run();
-                    }}
-                    style={{ width: '100%', background: 'none', border: 'none', padding: '9px 14px', color: action.danger ? C.danger : C.body, fontSize: 13, cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = C.overlay)}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                  >
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
+      {children}
+    </span>
+  );
+}
 
-      {/* Pipeline */}
-      <PipelineMini steps={wf.steps} />
-
-      {/* Progress */}
-      <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-          <span style={{ color: C.muted, fontSize: 12 }}>Current: <span style={{ color: C.body, fontWeight: 600 }}>{wf.currentStep}</span></span>
-          <span style={{ color: wf.progress === 100 ? C.success : C.primary400, fontSize: 12, fontWeight: 700 }}>{wf.progress}%</span>
-        </div>
-        <ProgressBar value={wf.progress} color={wf.progress === 100 ? C.success : C.primary400} />
-      </div>
-
-      {/* Footer */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ display: 'flex' }}>
-            {wf.assignees.map((a, i) => (
-              <div key={a} style={{ marginLeft: i > 0 ? -8 : 0, zIndex: wf.assignees.length - i }}>
-                <Avatar initials={a} size={24} color={C.primary400} />
-              </div>
-            ))}
-          </div>
-          <span style={{ color: C.disabled, fontSize: 11 }}>{wf.createdAt}</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <Clock size={11} color={slaColor[wf.sla]} />
-            <span style={{ color: slaColor[wf.sla], fontSize: 11, fontWeight: 600 }}>{wf.slaText}</span>
-          </div>
-          <button
-            onClick={() => onView(wf.id)}
+function RowMenu({ items }: { items: { label: string; icon: React.ElementType; run: () => void; danger?: boolean }[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Workflow actions"
+        aria-expanded={open}
+        style={{
+          width: 44,
+          height: 44,
+          display: 'grid',
+          placeItems: 'center',
+          background: 'transparent',
+          border: `1px solid ${C.borderSubtle}`,
+          borderRadius: 9,
+          color: C.muted,
+          cursor: 'pointer',
+        }}
+      >
+        <MoreVertical size={15} aria-hidden />
+      </button>
+      {open ? (
+        <>
+          <div
+            role="presentation"
+            onClick={() => setOpen(false)}
+            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+          />
+          <div
+            role="menu"
             style={{
-              display: 'flex', alignItems: 'center', gap: 4, padding: '5px 12px',
-              background: `color-mix(in srgb, ${C.primary400} 10%, transparent)`,
-              border: `1px solid color-mix(in srgb, ${C.primary400} 20%, transparent)`,
-              borderRadius: 8, color: C.primary400, fontSize: 12, fontWeight: 600, cursor: 'pointer',
-              transition: 'all 0.15s',
+              position: 'absolute',
+              right: 0,
+              top: 48,
+              zIndex: 41,
+              minWidth: 184,
+              background: 'var(--popover, var(--bg-elevated))',
+              border: `1px solid ${C.border}`,
+              borderRadius: 11,
+              boxShadow: 'var(--shadow-lg)',
+              overflow: 'hidden',
             }}
           >
-            View <ChevronRight size={12} />
-          </button>
-        </div>
-      </div>
+            {items.map((it) => (
+              <button
+                key={it.label}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  it.run();
+                }}
+                style={{
+                  width: '100%',
+                  minHeight: 44,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 9,
+                  padding: '0 13px',
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: 13,
+                  textAlign: 'left',
+                  color: it.danger ? C.danger : C.body,
+                }}
+              >
+                <it.icon size={14} aria-hidden /> {it.label}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
 export default function WorkflowsPage() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const myUserId = useAuthStore((s) => s.user?.id);
-  const [activeTab, setActiveTab] = useState<'all' | WFStatus>('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  // §7 builder — null = closed, '' = creating new, id = editing that one.
-  const [builderFor, setBuilderFor] = useState<string | null | ''>(null);
+  const myUserId = useAuthStore((s) => s.user?.id) ?? null;
 
-  // ── Live Data: pull workflow templates from the API ───────────────────────
-  const { data: templatesData } = useWorkflowTemplates({ active_only: false });
+  const [tab, setTab] = useState<Tab>('mine');
+  const [showArchived, setShowArchived] = useState(false);
+  const [search, setSearch] = useState('');
+  const [shareFor, setShareFor] = useState<WorkflowTemplateSummary | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<WorkflowTemplateSummary | null>(null);
 
-  const refreshWorkflows = () => {
-    queryClient.invalidateQueries({ queryKey: ['workflowTemplates'] });
-    queryClient.invalidateQueries({ queryKey: ['workflow-templates'] });
-  };
+  // Archived rows are only fetched when the filter asks for them, so the
+  // default list is the active set (WF-LIST-01).
+  const mine = useWorkflowsByScope('mine', { activeOnly: !showArchived });
+  const shared = useWorkflowsByScope('shared', { activeOnly: false });
 
-  // §7: enable/disable and delete a workflow I own (backend enforces that
-  // only the owner or an org admin may do either).
-  const setActiveM = useMutation({
-    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
-      workflowsApi.setWorkflowActive(id, isActive),
-    onSuccess: () => {
-      toast.success('Workflow updated');
-      refreshWorkflows();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
+  const archiveM = useSetWorkflowArchived();
   const duplicateM = useMutation({
     mutationFn: (id: string) => workflowsApi.duplicateWorkflow(id),
     onSuccess: () => {
       toast.success('Workflow duplicated — the copy is private to you');
-      refreshWorkflows();
+      queryClient.invalidateQueries({ queryKey: workflowKeys.all });
     },
     onError: (e: Error) => toast.error(e.message),
   });
-
   const deleteM = useMutation({
     mutationFn: (id: string) => workflowsApi.deleteWorkflow(id),
     onSuccess: () => {
       toast.success('Workflow deleted');
-      refreshWorkflows();
+      queryClient.invalidateQueries({ queryKey: workflowKeys.all });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (err: unknown) => {
+      // WF-LC-04 / WF-LIST-07: the server explains that in-flight runs block
+      // this and that archiving is the way through. Show its words.
+      toast.error(
+        err instanceof ApiClientError ? err.detail : 'Could not delete this workflow',
+      );
+    },
   });
 
-  // Adapt WorkflowTemplateSummary[] to the local display shape.
-  //
-  // NOTE: the summary endpoint intentionally doesn't return stages, so the
-  // per-card "pipeline" this used to render (a hardcoded Draft → Review →
-  // Approve with progress: 0) was pure decoration unrelated to the actual
-  // workflow. It's replaced with the real metadata we do have; the full
-  // stage definition is loaded on demand when the builder opens.
-  const liveWorkflows: Workflow[] = (templatesData ?? []).map((t) => ({
-    id: t.id,
-    name: t.name,
-    document: t.description || 'No description',
-    docType: t.visibility === 'private' ? 'Private' : 'Shared',
-    status: t.is_active ? 'active' : 'archived',
-    steps: [],
-    currentStep: t.created_by === myUserId ? 'Created by you' : 'Organization workflow',
-    progress: 0,
-    assignees: [],
-    createdAt: new Date(t.created_at).toLocaleDateString(),
-    sla: 'on-time',
-    slaText: `v${t.version}`,
-    priority: 'normal',
-  }));
+  const rows = useMemo(() => {
+    const list = (tab === 'mine' ? mine.data : shared.data) ?? [];
+    const q = search.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (w) =>
+        w.name.toLowerCase().includes(q) ||
+        (w.description ?? '').toLowerCase().includes(q),
+    );
+  }, [tab, mine.data, shared.data, search]);
 
-  const filtered = liveWorkflows.filter(wf => {
-    const matchesTab = activeTab === 'all' || wf.status === activeTab;
-    const matchesSearch = wf.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      wf.document.toLowerCase().includes(searchQuery.toLowerCase());
-    return matchesTab && matchesSearch;
-  });
+  const loading = tab === 'mine' ? mine.isLoading : shared.isLoading;
+  const error = tab === 'mine' ? mine.error : shared.error;
 
-  const stats = {
-    total: liveWorkflows.length,
-    active: liveWorkflows.filter(w => w.status === 'active').length,
-    completed: liveWorkflows.filter(w => w.status === 'completed').length,
-    breached: liveWorkflows.filter(w => w.sla === 'breached').length,
-  };
+  function onDelete(wf: WorkflowTemplateSummary) {
+    setConfirmDelete(wf);
+  }
+
+  const tabs = (
+    <div style={{ display: 'flex', gap: 6 }}>
+      {(
+        [
+          ['mine', 'My Workflows', mine.data?.length ?? 0],
+          ['shared', 'Shared with me', shared.data?.length ?? 0],
+        ] as const
+      ).map(([key, label, count]) => {
+        const active = tab === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            aria-current={active ? 'page' : undefined}
+            style={{
+              minHeight: 44,
+              padding: '0 14px',
+              borderRadius: 10,
+              border: 'none',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 700,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              color: active ? C.heading : C.muted,
+              background: active ? C.card : 'transparent',
+              boxShadow: active ? 'var(--shadow-md)' : 'none',
+            }}
+          >
+            {label}
+            <TabCountBadge count={count} active={active} />
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
-    <div className="page-content" style={{ paddingTop: 24, display: 'flex', flexDirection: 'column', gap: 24 }}>
-        {/* Page Header */}
-        <PageHeader
-          breadcrumbs={[{ label: 'Workspace' }, { label: 'Workflows' }]}
-          title="Workflows"
-          description="Manage and track document approval pipelines across your organization"
-          actions={
-            <button className="btn btn-primary" onClick={() => setBuilderFor('')}>
-              <Plus size={16} /> New Workflow
+    <div>
+      <PageHeader
+        title="Workflows"
+        description="Reusable approval routes for your documents."
+        tabs={tabs}
+        actions={
+          <button
+            type="button"
+            onClick={() => navigate('/workflows/new')}
+            style={{
+              minHeight: 44,
+              padding: '0 16px',
+              borderRadius: 10,
+              border: 'none',
+              background: C.primary,
+              color: 'var(--color-primary-foreground, #fff)',
+              fontWeight: 700,
+              fontSize: 13.5,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 7,
+            }}
+          >
+            <Plus size={15} aria-hidden /> New Workflow
+          </button>
+        }
+      />
+
+      {/* Search + archived filter — WF-LIST-04 / WF-LIST-01 */}
+      <div
+        style={{
+          display: 'flex',
+          gap: 10,
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          marginBottom: 16,
+        }}
+      >
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flex: '1 1 240px',
+            background: C.card,
+            border: `1px solid ${C.border}`,
+            borderRadius: 10,
+            padding: '0 12px',
+            minHeight: 44,
+          }}
+        >
+          <Search size={15} color={C.muted} aria-hidden />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search workflows"
+            aria-label="Search workflows"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: 'transparent',
+              border: 'none',
+              outline: 'none',
+              color: C.heading,
+              fontSize: 13.5,
+            }}
+          />
+        </label>
+
+        {tab === 'mine' ? (
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              minHeight: 44,
+              fontSize: 13,
+              color: C.body,
+              cursor: 'pointer',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            Show archived
+          </label>
+        ) : null}
+      </div>
+
+      {/* States — WF-LIST-06 */}
+      {loading ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} style={{ height: 86, borderRadius: 14 }} />
+          ))}
+        </div>
+      ) : error ? (
+        <EmptyState
+          art="workflow"
+          title="Could not load workflows"
+          description={
+            error instanceof ApiClientError ? error.detail : 'Something went wrong.'
+          }
+          action={
+            <button
+              type="button"
+              onClick={() =>
+                queryClient.invalidateQueries({ queryKey: workflowKeys.all })
+              }
+              style={{
+                minHeight: 44,
+                padding: '0 16px',
+                borderRadius: 10,
+                border: `1px solid ${C.border}`,
+                background: C.overlay,
+                color: C.heading,
+                cursor: 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              Retry
             </button>
           }
         />
+      ) : rows.length === 0 ? (
+        tab === 'mine' ? (
+          <EmptyState
+            art="workflow"
+            title={search ? 'No workflows match that search' : 'Create your first workflow'}
+            description={
+              search
+                ? 'Try a different name.'
+                : 'A workflow is the ordered list of people who approve your documents.'
+            }
+            action={
+              search ? undefined : (
+                <button
+                  type="button"
+                  onClick={() => navigate('/workflows/new')}
+                  style={{
+                    minHeight: 44,
+                    padding: '0 16px',
+                    borderRadius: 10,
+                    border: 'none',
+                    background: C.primary,
+                    color: 'var(--color-primary-foreground, #fff)',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  New Workflow
+                </button>
+              )
+            }
+          />
+        ) : (
+          <EmptyState
+            art="people"
+            title="Nothing shared with you yet"
+            description="Workflows shared with you will appear here."
+          />
+        )
+      ) : (
+        <ul style={{ display: 'grid', gap: 10, margin: 0, padding: 0, listStyle: 'none' }}>
+          {rows.map((wf) => {
+            const isOwner = wf.created_by === myUserId;
+            const archived = !wf.is_active;
+            const menu: { label: string; icon: React.ElementType; run: () => void; danger?: boolean }[] = [
+              { label: 'View', icon: Eye, run: () => navigate(`/workflows/${wf.id}`) },
+            ];
+            if (isOwner) {
+              menu.push({
+                label: 'Edit',
+                icon: Pencil,
+                run: () => navigate(`/workflows/${wf.id}/edit`),
+              });
+            }
+            menu.push({
+              label: 'Duplicate',
+              icon: Copy,
+              run: () => duplicateM.mutate(wf.id),
+            });
+            if (isOwner) {
+              menu.push({
+                label: 'Share',
+                icon: Share2,
+                run: () => setShareFor(wf),
+              });
+              menu.push({
+                label: archived ? 'Restore' : 'Archive',
+                icon: archived ? ArchiveRestore : Archive,
+                run: () =>
+                  archiveM.mutate(
+                    { templateId: wf.id, archived: !archived },
+                    {
+                      onSuccess: () =>
+                        toast.success(archived ? 'Workflow restored' : 'Workflow archived'),
+                      onError: (e: Error) => toast.error(e.message),
+                    },
+                  ),
+              });
+              menu.push({
+                label: 'Delete',
+                icon: Trash2,
+                run: () => onDelete(wf),
+                danger: true,
+              });
+            }
 
-        {/* Stats Row */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
-          <StatCard icon={GitBranch} label="Total Workflows" value={stats.total.toString()} sub="+3 this month" color={C.primary400} />
-          <StatCard icon={Zap} label="Active" value={stats.active.toString()} sub="Currently in progress" color={C.warning} />
-          <StatCard icon={CheckCircle} label="Completed" value={stats.completed.toString()} sub="This month" color={C.success} />
-          <StatCard icon={AlertCircle} label="SLA Breached" value={stats.breached.toString()} sub="Needs attention" color={C.danger} />
-        </div>
-
-        {/* Filters */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          {/* Tabs */}
-          <div style={{ display: 'flex', background: C.surface, border: `1px solid ${C.borderSubtle}`, borderRadius: 12, padding: 4, gap: 2 }}>
-            {tabFilters.map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
+            return (
+              <li
+                key={wf.id}
                 style={{
-                  padding: '6px 14px', borderRadius: 9, border: 'none', cursor: 'pointer',
-                  fontSize: 13, fontWeight: 600, transition: 'all 0.2s',
-                  background: activeTab === tab.key ? C.card : 'transparent',
-                  color: activeTab === tab.key ? tab.color : C.muted,
-                  boxShadow: activeTab === tab.key ? 'var(--shadow-md)' : 'none',
+                  background: C.card,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 14,
+                  padding: 15,
+                  display: 'flex',
+                  gap: 13,
+                  alignItems: 'flex-start',
                 }}
               >
-                {tab.label}
-                {tab.key !== 'all' && (
-                  <span style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>
-                    {tab.key === 'active' ? stats.active : tab.key === 'completed' ? stats.completed : ''}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+                <span
+                  aria-hidden
+                  style={{
+                    width: 38,
+                    height: 38,
+                    flexShrink: 0,
+                    borderRadius: 11,
+                    display: 'grid',
+                    placeItems: 'center',
+                    background: `color-mix(in srgb, ${C.primary} 12%, transparent)`,
+                  }}
+                >
+                  <GitBranch size={17} color={C.primary} />
+                </span>
 
-          {/* Search */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '8px 14px', flex: 1, maxWidth: 320 }}>
-            <Search size={14} color={C.muted} />
-            <input
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search workflows..."
-              style={{ background: 'none', border: 'none', outline: 'none', color: C.heading, fontSize: 13, flex: 1 }}
-            />
-          </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/workflows/${wf.id}`)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      padding: 0,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 14.5,
+                      fontWeight: 700,
+                      color: C.heading,
+                      overflowWrap: 'anywhere',
+                    }}
+                  >
+                    {wf.name}
+                  </button>
 
-          <button style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px', background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, color: C.body, fontSize: 13, cursor: 'pointer' }}>
-            <Filter size={14} /> Filters
-          </button>
-        </div>
+                  {wf.description ? (
+                    <p
+                      title={wf.description}
+                      style={{
+                        margin: '4px 0 0',
+                        fontSize: 12.5,
+                        color: C.muted,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {wf.description}
+                    </p>
+                  ) : null}
 
-        {/* Workflow Grid */}
-        {filtered.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '80px 32px', gap: 16 }}>
-            <div style={{ width: 64, height: 64, borderRadius: 16, background: `color-mix(in srgb, ${C.purple} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${C.purple} 20%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <GitBranch size={28} color={C.purple} />
-            </div>
-            <div style={{ color: C.heading, fontSize: 18, fontWeight: 700 }}>No workflows found</div>
-            <div style={{ color: C.muted, fontSize: 14, textAlign: 'center', maxWidth: 320 }}>
-              {searchQuery ? 'Try adjusting your search query' : 'Start by creating a new workflow to automate your document approvals'}
-            </div>
-            <button
-              onClick={() => setBuilderFor('')}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: C.primary, border: 'none', borderRadius: 12, color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
-            >
-              <Plus size={16} /> Create Workflow
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))', gap: 16 }}>
-            {filtered.map(wf => (
-              <WorkflowCard
-                key={wf.id}
-                wf={wf}
-                onView={(id) => setBuilderFor(id)}
-                onEdit={(id) => setBuilderFor(id)}
-                onDuplicate={(id) => duplicateM.mutate(id)}
-                onToggleActive={(id, next) => setActiveM.mutate({ id, isActive: next })}
-                onDelete={(id) => deleteM.mutate(id)}
-              />
-            ))}
-          </div>
-        )}
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9 }}>
+                    <Chip tone={archived ? 'muted' : 'success'}>
+                      {archived ? 'Archived' : 'Active'}
+                    </Chip>
+                    <Chip tone={wf.visibility === 'private' ? 'muted' : 'primary'}>
+                      {wf.visibility === 'private' ? 'Private' : 'Organization'}
+                    </Chip>
+                    <Chip>v{wf.version}</Chip>
+                    {tab === 'shared' ? (
+                      <Chip tone="primary">
+                        <Users size={10} aria-hidden style={{ verticalAlign: -1 }} /> Shared
+                        with you
+                      </Chip>
+                    ) : null}
+                  </div>
+                </div>
 
-      <style>{`
-        .wf-card:hover {
-          transform: translateY(-3px);
-          border-color: var(--border-strong) !important;
-          box-shadow: var(--shadow-lg);
-        }
-        .new-wf-btn:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 0 32px color-mix(in srgb, var(--primary) 50%, transparent) !important;
-        }
-        @keyframes pulse-ring {
-          0%, 100% { opacity: 0.6; transform: scale(1); }
-          50% { opacity: 0.2; transform: scale(1.15); }
-        }
-      `}</style>
-
-      {builderFor !== null && (
-        <WorkflowBuilderModal
-          templateId={builderFor || null}
-          onClose={() => setBuilderFor(null)}
-        />
+                <RowMenu items={menu} />
+              </li>
+            );
+          })}
+        </ul>
       )}
+
+      {shareFor ? (
+        <ShareWorkflowDialog
+          templateId={shareFor.id}
+          workflowName={shareFor.name}
+          ownerId={shareFor.created_by}
+          onClose={() => setShareFor(null)}
+        />
+      ) : null}
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete this workflow?"
+        message={
+          confirmDelete
+            ? `“${confirmDelete.name}” will be removed from your list and anyone it is shared with loses access. Documents already approved keep their history. If any document is still in approval the server will refuse — archive it instead.`
+            : ''
+        }
+        confirmLabel="Delete"
+        onConfirm={() => {
+          if (confirmDelete) deleteM.mutate(confirmDelete.id);
+          setConfirmDelete(null);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

@@ -157,13 +157,44 @@ def generate_presigned_upload_url(
         raise ServiceUnavailableException("Storage") from exc
 
 
+# AP-VWR-04. A URL that renders a document inside the approval screen is a
+# different thing from a download link: it is handed to an <iframe>/viewer
+# rather than clicked, it is re-minted on every page load, and it must not
+# survive being pasted into a chat. Five minutes is the ceiling the spec
+# gives; the one-hour default below stays for ordinary downloads.
+MAX_INLINE_URL_SECONDS = 300
+
+
 def generate_presigned_download_url(
     bucket: str,
     storage_key: str,
     filename: str,
     expires_in_seconds: int = 3600,  # 1 hour
+    *,
+    inline: bool = False,
 ) -> str:
-    """Generate a presigned S3 GET URL for temporary file access."""
+    """Generate a presigned S3 GET URL for temporary file access.
+
+    `inline=True` (AP-VWR-04, defect 11) serves the object for display in the
+    page instead of forcing a download, and caps the lifetime at
+    MAX_INLINE_URL_SECONDS. Both parts matter:
+
+      * `attachment` makes a browser download the file rather than render it,
+        so a PDF viewer cannot use the URL at all; and
+      * an hour is far too long for a link that grants unauthenticated read
+        access to a document under review — it outlives the page that
+        minted it, the session, and in practice the reviewer's attention.
+
+    The cap is applied here rather than left to callers, so a caller cannot
+    ask for an inline URL that lasts an hour.
+    """
+    disposition = "inline" if inline else "attachment"
+    if inline:
+        expires_in_seconds = min(expires_in_seconds, MAX_INLINE_URL_SECONDS)
+    # Quote the filename: a document title can contain a double quote, which
+    # would otherwise terminate the header value early and let the rest of the
+    # title be read as further header parameters.
+    safe_filename = filename.replace("\\", "").replace('"', "")
     try:
         client = _get_s3_client()
         url = client.generate_presigned_url(
@@ -171,7 +202,9 @@ def generate_presigned_download_url(
             Params={
                 "Bucket": bucket,
                 "Key": storage_key,
-                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                "ResponseContentDisposition": (
+                    f'{disposition}; filename="{safe_filename}"'
+                ),
             },
             ExpiresIn=expires_in_seconds,
         )

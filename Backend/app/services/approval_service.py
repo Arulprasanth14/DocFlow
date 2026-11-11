@@ -21,11 +21,16 @@ import uuid
 from datetime import datetime, timezone
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.events import EventBus
-from app.core.exceptions import ConflictException, ForbiddenException, NotFoundException
+from app.core.exceptions import (
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from app.domain.enums import (
     AuditAction,
     ApprovalDecision,
@@ -34,9 +39,15 @@ from app.domain.enums import (
     WorkflowInstanceStatus,
 )
 from app.domain.permissions import AuthUser
-from app.models.document import Document, DocumentStatus
+from app.models.document import Document, DocumentStatus, DocumentVersion
 from app.models.organization import Organization
-from app.models.workflow import ApprovalStep, WorkflowInstance, WorkflowStage
+from app.models.workflow import (
+    ApprovalStep,
+    StageInstance,
+    WorkflowInstance,
+    WorkflowStage,
+    WorkflowTemplate,
+)
 from app.repositories.chat_repo import ConversationRepository
 from app.repositories.org_repo import OrgMemberRepository
 from app.repositories.workflow_repo import (
@@ -45,14 +56,75 @@ from app.repositories.workflow_repo import (
     WorkflowInstanceRepository,
 )
 from app.schemas.workflow_instances import (
+    ApprovalQueueSummary,
+    ApprovalStepResponse,
     DecisionRequest,
     DelegateRequest,
-    ApprovalStepResponse,
+    DocumentProgressResponse,
+    MyApprovalsResponse,
+    ProgressStage,
+    StageDecisionSummary,
+    StageInstanceDetailResponse,
+    VersionFileResponse,
 )
+from app.schemas.annotations import PageDiffResponse, VersionDiffResponse
+from app.domain import notifications as notif_catalogue
 from app.services.notification_service import NotificationService
+from app.services.outbox_service import OutboxService
 from app.services.workflow_service import WorkflowService
 
 logger = structlog.get_logger(__name__)
+
+# Run statuses in which no new decision may be recorded (WF-WD-03, BR-07,
+# BR-14). An explicit set rather than "anything but in_progress", so that a
+# status the workflow module does not own - RECALL_REQUESTED, which section
+# 6.5 requires to stay OPEN while a recall is outstanding, or ESCALATED,
+# which is still very much awaiting a decision - is not frozen out by
+# accident.
+_CLOSED_TO_DECISIONS = frozenset({
+    WorkflowInstanceStatus.APPROVED,
+    WorkflowInstanceStatus.REJECTED,
+    WorkflowInstanceStatus.CANCELLED,
+    WorkflowInstanceStatus.COMPLETED,
+    WorkflowInstanceStatus.FINALIZED,
+    WorkflowInstanceStatus.CHANGES_REQUESTED,
+})
+
+def _urgency_for(
+    due_at: datetime | None, *, paused: bool = False
+) -> tuple[str, float | None]:
+    """AP-DSH-06 / AP-DET-01 urgency, decided on the server.
+
+    BR-13 and AP-SLA-07 make the deadline server-owned, so a client must not
+    compare `due_at` against its own clock - a skewed browser would paint its
+    own idea of overdue. A paused or finished stage is never urgent: its
+    deadline is not running (section 6.10).
+    """
+    if due_at is None or paused:
+        return "none", None
+    due = due_at if due_at.tzinfo else due_at.replace(tzinfo=timezone.utc)
+    hours = (due - datetime.now(timezone.utc)).total_seconds() / 3600
+    if hours < 0:
+        return "overdue", round(hours, 2)
+    if hours <= 24:
+        return "due_soon", round(hours, 2)
+    return "normal", round(hours, 2)
+
+
+_DECISION_CONFLICT_MESSAGES = {
+    WorkflowInstanceStatus.CANCELLED: (
+        "The owner withdrew this document while you were reviewing it, so no "
+        "decision can be recorded. Nothing you wrote has been lost."
+    ),
+    WorkflowInstanceStatus.CHANGES_REQUESTED: (
+        "This document has gone back to its owner for changes. You will be "
+        "notified when the revised version arrives."
+    ),
+    WorkflowInstanceStatus.REJECTED: (
+        "This document has already been rejected, which is final. No further "
+        "decision can be recorded."
+    ),
+}
 
 
 class ApprovalService:
@@ -64,6 +136,9 @@ class ApprovalService:
         self.delegation_repo = DelegationRepository(db)
         self.notif_svc = NotificationService(db)
         self.workflow_svc = WorkflowService(db)
+        # X-NOT-01 — see OutboxService. A decision that rolls back must not
+        # have told anyone it happened.
+        self.outbox = OutboxService(db)
 
     # ── List My Pending Approvals ───────────────────────────────────────────────
 
@@ -71,6 +146,7 @@ class ApprovalService:
         self,
         approver_id: uuid.UUID,
         org_id: uuid.UUID,
+        decisions: list[str] | None = None,
     ) -> list[ApprovalStepResponse]:
         """
         NOTE: stage_name/approver_name/approver_email/document context were all
@@ -79,7 +155,16 @@ class ApprovalService:
         had nothing to show per row except raw UUIDs. Batch-fetched below (one
         query per related table, not one per step) rather than N+1 per field.
         """
-        steps = await self.step_repo.get_pending_for_approver(approver_id, org_id)
+        steps = await self.step_repo.get_pending_for_approver(
+            approver_id, org_id, decisions=decisions
+        )
+        return await self._decorate_steps(steps)
+
+    async def _decorate_steps(self, steps) -> list[ApprovalStepResponse]:
+        """Fill in the names and document context a row needs to be readable.
+
+        Batch-fetched (one query per related table, not one per step).
+        """
         if not steps:
             return []
 
@@ -87,6 +172,23 @@ class ApprovalService:
 
         stage_ids = {s.stage_id for s in steps}
         instance_ids = {s.instance_id for s in steps}
+
+        # One query for every row's stage instance, keyed by (run, stage).
+        # Ordered ascending so the LAST write wins, i.e. the newest cycle -
+        # the one a resubmission reopened.
+        si_rows = (
+            await self.db.execute(
+                select(StageInstance)
+                .where(
+                    StageInstance.instance_id.in_(instance_ids),
+                    StageInstance.deleted_at.is_(None),
+                )
+                .order_by(StageInstance.cycle.asc())
+            )
+        ).scalars().all()
+        si_by_run_stage = {
+            (si.instance_id, si.legacy_stage_id): si for si in si_rows
+        }
 
         stages_by_id = {
             st.id: st for st in
@@ -117,6 +219,8 @@ class ApprovalService:
             submitter = users_by_id.get(doc.submitted_by) if doc else None
 
             resp = ApprovalStepResponse.model_validate(s)
+            si = si_by_run_stage.get((s.instance_id, s.stage_id))
+            resp.stage_instance_id = si.id if si else None
             resp.stage_name = stage.name if stage else None
             resp.approver_name = approver.name if approver else None
             resp.approver_email = approver.email if approver else None
@@ -125,8 +229,545 @@ class ApprovalService:
             resp.document_public_id = doc.public_id if doc else None
             resp.submitted_by = doc.submitted_by if doc else None
             resp.submitter_name = submitter.name if submitter else None
+
+            # AP-DSH-06. Decided here, not in the browser: BR-13 and
+            # AP-SLA-07 make the deadline server-owned, and a client with a
+            # skewed clock would otherwise paint its own idea of "overdue".
+            # Only still-pending work can be urgent — a decided step's
+            # deadline is history.
+            if s.due_at is None or s.decision != ApprovalDecision.PENDING:
+                resp.urgency = "none"
+                resp.hours_until_due = None
+            else:
+                due = s.due_at
+                if due.tzinfo is None:
+                    due = due.replace(tzinfo=timezone.utc)
+                remaining = (due - datetime.now(timezone.utc)).total_seconds() / 3600
+                resp.hours_until_due = round(remaining, 2)
+                if remaining < 0:
+                    resp.urgency = "overdue"
+                elif remaining <= 24:
+                    resp.urgency = "due_soon"
+                else:
+                    resp.urgency = "normal"
+
             responses.append(resp)
         return responses
+
+    # ── Dashboard (AP-DSH-01..08, task P2-18) ──────────────────────────────
+
+    # Which decisions each tab shows. The map lives here rather than in the
+    # router so the counts and the rows are driven by one definition.
+    DASHBOARD_TABS: dict[str, list[str]] = {
+        "pending": ["pending"],
+        "approved": ["approved"],
+        "rejected": ["rejected"],
+        "changes_requested": ["changes_requested"],
+        "all": [
+            "pending", "approved", "rejected", "changes_requested",
+            "delegated", "abstained",
+        ],
+    }
+
+    async def approval_dashboard(
+        self,
+        approver_id: uuid.UUID,
+        org_id: uuid.UUID,
+        *,
+        tab: str = "pending",
+        q: str | None = None,
+        template_id: uuid.UUID | None = None,
+        department_id: uuid.UUID | None = None,
+        sort: str | None = None,
+        page: int = 1,
+        limit: int = 25,
+    ) -> MyApprovalsResponse:
+        """One page of the approver's queue, with tab counts and urgency.
+
+        AP-DSH-02..08. The filtering, sorting and paging are all server-side:
+        the page used to fetch every pending step and then filter the array
+        in the browser, so the search box searched only what had already been
+        downloaded and the tab counts could not be computed at all.
+        """
+        decisions = self.DASHBOARD_TABS.get(tab.lower())
+        if decisions is None:
+            raise UnprocessableEntityException(
+                f"Unknown tab '{tab}'. Use one of: "
+                + ", ".join(sorted(self.DASHBOARD_TABS))
+            )
+
+        # Pending work reads best by what is due soonest; a decided list
+        # reads best newest-first, because history is consulted from the
+        # recent end.
+        if not sort:
+            sort = "due_at" if decisions == ["pending"] else "-submitted_at"
+        if sort not in self.step_repo.DASHBOARD_SORTS:
+            raise UnprocessableEntityException(
+                f"Unknown sort '{sort}'. Use one of: "
+                + ", ".join(self.step_repo.DASHBOARD_SORTS)
+            )
+
+        limit = max(1, min(limit, 100))
+        page = max(1, page)
+
+        rows, total = await self.step_repo.query_dashboard(
+            approver_id, org_id,
+            decisions=decisions, q=q, template_id=template_id,
+            department_id=department_id, sort=sort, page=page, limit=limit,
+        )
+        counts = await self.step_repo.dashboard_counts(
+            approver_id, org_id,
+            tabs=self.DASHBOARD_TABS, q=q, template_id=template_id,
+            department_id=department_id,
+        )
+        summary = await self.step_repo.dashboard_urgency_summary(
+            approver_id, org_id
+        )
+
+        items = await self._decorate_steps(rows)
+        return MyApprovalsResponse(
+            items=items,
+            total=total,
+            page=page,
+            limit=limit,
+            pages=max(1, -(-total // limit)),
+            counts=counts,
+            summary=ApprovalQueueSummary(**summary),
+        )
+
+    # ── Approval details (AP-DET-01..05, task P2-19) ───────────────────────
+
+    async def stage_instance_detail(
+        self,
+        stage_instance_id: uuid.UUID,
+        actor: AuthUser,
+    ) -> StageInstanceDetailResponse:
+        """The approval screen's data, for one stage of one run.
+
+        **404, never 403, for anyone not entitled to it** (AP-DET-03, T17,
+        T39, E28, section 9.4). A 403 would confirm that the id names a real
+        stage, which is exactly what must not leak: the difference between
+        "no such thing" and "not yours" is itself information about another
+        department's documents.
+        """
+        not_found = NotFoundException("Approval not found")
+
+        si = await self.db.get(StageInstance, stage_instance_id)
+        if (
+            si is None
+            or si.deleted_at is not None
+            or not actor.org_id
+            or si.org_id != actor.org_id
+        ):
+            raise not_found
+
+        instance = await self.db.get(WorkflowInstance, si.instance_id)
+        if instance is None or instance.deleted_at is not None:
+            raise not_found
+        doc = await self.db.get(Document, instance.document_id)
+        if doc is None or doc.deleted_at is not None:
+            raise not_found
+
+        # Who may look. Everyone else gets the same answer a stranger gets.
+        is_admin = actor.is_superadmin or "admin" in actor.roles or "hr" in actor.roles
+        is_owner = doc.submitted_by == actor.id
+        my_step = await self._my_step_for_stage(si, actor.id)
+        is_approver = si.resolved_approver_id == actor.id or my_step is not None
+        if not (is_admin or is_owner or is_approver):
+            raise not_found
+
+        # Whether they may ACT, from stored state only.
+        can_act = True
+        reason: str | None = None
+        if my_step is None or my_step.decision != ApprovalDecision.PENDING:
+            can_act = False
+            reason = (
+                "You have already recorded a decision on this step."
+                if my_step is not None
+                else "This stage is not assigned to you."
+            )
+        elif instance.status in _CLOSED_TO_DECISIONS:
+            can_act = False
+            reason = _DECISION_CONFLICT_MESSAGES.get(
+                instance.status,
+                f"This workflow is no longer awaiting a decision "
+                f"(status: '{instance.status}').",
+            )
+        elif si.status == "blocked":
+            can_act = False
+            reason = (
+                f"This stage is blocked and needs an administrator to "
+                f"reassign it - {si.blocked_reason or 'no approver available'}."
+            )
+        elif si.status not in ("active", "awaiting_signature"):
+            can_act = False
+            reason = f"This stage is '{si.status}', not awaiting a decision."
+
+        total_stages = (
+            await self.db.execute(
+                select(func.count())
+                .select_from(StageInstance)
+                .where(
+                    StageInstance.instance_id == si.instance_id,
+                    StageInstance.cycle == si.cycle,
+                    StageInstance.deleted_at.is_(None),
+                )
+            )
+        ).scalar() or si.position
+
+        from app.models.user import User
+
+        approver = (
+            await self.db.get(User, si.resolved_approver_id)
+            if si.resolved_approver_id else None
+        )
+        submitter = await self.db.get(User, doc.submitted_by)
+        template = (
+            await self.db.get(WorkflowTemplate, instance.template_id)
+            if instance.template_id else None
+        )
+        version = (
+            await self.db.get(DocumentVersion, doc.current_version_id)
+            if doc.current_version_id else None
+        )
+
+        urgency, hours = _urgency_for(
+            si.due_at, paused=si.timer_paused_at is not None or not can_act
+        )
+
+        # The version immediately before the one under review, by version
+        # number rather than by `supersedes_version_id`: that column is not
+        # always populated on older rows, and "the one before this" is what
+        # the comparison needs.
+        previous = None
+        if version is not None:
+            previous = (
+                await self.db.execute(
+                    select(DocumentVersion)
+                    .where(
+                        DocumentVersion.document_id == doc.id,
+                        DocumentVersion.version_num < version.version_num,
+                        DocumentVersion.deleted_at.is_(None),
+                    )
+                    .order_by(DocumentVersion.version_num.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+
+        return StageInstanceDetailResponse(
+            id=si.id,
+            instance_id=si.instance_id,
+            position=si.position,
+            total_stages=total_stages,
+            stage_name=si.stage_name,
+            status=si.status,
+            cycle=si.cycle,
+            round_count=si.round_count,
+            signing_required=si.signing_required,
+            signing_reason=si.signing_reason,
+            due_at=si.due_at,
+            urgency=urgency,
+            hours_until_due=hours,
+            activated_at=si.activated_at,
+            timer_paused_at=si.timer_paused_at,
+            blocked_reason=si.blocked_reason,
+            document_id=doc.id,
+            document_public_id=doc.public_id,
+            document_title=doc.title,
+            document_version_id=version.id if version else None,
+            document_version_num=version.version_num if version else None,
+            previous_version_id=previous.id if previous else None,
+            previous_version_num=previous.version_num if previous else None,
+            submitted_by=doc.submitted_by,
+            submitter_name=submitter.name if submitter else None,
+            submitted_at=instance.submitted_at,
+            template_id=instance.template_id,
+            workflow_name=template.name if template else None,
+            run_status=instance.status,
+            resolved_approver_id=si.resolved_approver_id,
+            resolved_approver_name=approver.name if approver else None,
+            my_step_id=my_step.id if (my_step and can_act) else None,
+            can_act=can_act,
+            cannot_act_reason=reason,
+            history=await self._run_history(si.instance_id),
+        )
+
+    async def version_file_for_viewer(
+        self,
+        version_id: uuid.UUID,
+        actor: AuthUser,
+    ) -> VersionFileResponse:
+        """AP-VWR-04 — the inline, short-lived URL the review viewer renders.
+
+        **404, not 403**, for anyone not entitled, exactly as
+        `stage_instance_detail` does: if this endpoint answered 403 it would
+        become the way to confirm a document exists, which is what the
+        detail endpoint's 404 is there to prevent (section 9.4, E28).
+
+        Entitlement is the DOCUMENT's, not the stage's: an approver on any
+        stage of a live run needs to read the document, the owner always
+        does, and admin/HR do. That is what `can_user_access_document`
+        decides, narrowed in P2-20 for documents under review.
+        """
+        from app.services.document_service import can_user_access_document
+        from app.services.rendition_service import presign_for_viewer
+
+        not_found = NotFoundException("Document version not found")
+
+        version = await self.db.get(DocumentVersion, version_id)
+        if version is None or version.deleted_at is not None:
+            raise not_found
+        doc = await self.db.get(Document, version.document_id)
+        if (
+            doc is None
+            or doc.deleted_at is not None
+            or not actor.org_id
+            or doc.org_id != actor.org_id
+        ):
+            raise not_found
+        if not await can_user_access_document(self.db, actor, doc):
+            # Same exception a missing id gets.
+            raise not_found
+
+        filename = f"{doc.title or 'document'}.pdf"
+        url, expires_in, state, message = await presign_for_viewer(
+            self.db, version, filename=filename,
+        )
+        return VersionFileResponse(
+            document_version_id=version.id,
+            status=state,
+            url=url,
+            mime_type="application/pdf" if url else None,
+            filename=filename,
+            page_count=version.rendition_page_count,
+            expires_in=expires_in,
+            message=message,
+            version_num=version.version_num,
+        )
+
+    async def document_progress(
+        self, document_id: uuid.UUID, actor: AuthUser
+    ) -> DocumentProgressResponse:
+        """WF-REV-01/02 — the owner's step-by-step view of their document.
+
+        Built from stage instances, which carry the stored approver, the
+        clock and the status. Superseded cycles are left out: after a full
+        re-approval the owner needs the run as it stands, and the earlier
+        cycle is in the audit history.
+        """
+        from app.models.user import User
+        from app.services.document_service import can_user_access_document
+
+        not_found = NotFoundException("Document not found")
+        doc = await self.db.get(Document, document_id)
+        if (
+            doc is None or doc.deleted_at is not None
+            or not actor.org_id or doc.org_id != actor.org_id
+        ):
+            raise not_found
+        if not await can_user_access_document(self.db, actor, doc):
+            raise not_found
+
+        instance = await self.instance_repo.get_by_document(document_id)
+        if instance is None:
+            return DocumentProgressResponse(document_id=doc.id)
+
+        rows = (
+            await self.db.execute(
+                select(StageInstance)
+                .where(
+                    StageInstance.instance_id == instance.id,
+                    StageInstance.cycle == instance.current_cycle,
+                    StageInstance.deleted_at.is_(None),
+                )
+                .order_by(StageInstance.position)
+            )
+        ).scalars().all()
+        approver_ids = {r.resolved_approver_id for r in rows if r.resolved_approver_id}
+        names = {
+            u.id: (u.name or u.email) for u in (
+                await self.db.execute(select(User).where(User.id.in_(approver_ids)))
+            ).scalars().all()
+        } if approver_ids else {}
+        template = (
+            await self.db.get(WorkflowTemplate, instance.template_id)
+            if instance.template_id else None
+        )
+
+        under_review = instance.status in (
+            WorkflowInstanceStatus.PENDING,
+            WorkflowInstanceStatus.IN_PROGRESS,
+            WorkflowInstanceStatus.ESCALATED,
+        )
+        return DocumentProgressResponse(
+            document_id=doc.id,
+            instance_id=instance.id,
+            run_status=instance.status,
+            workflow_name=template.name if template else None,
+            cycle=instance.current_cycle or 1,
+            previous_run_id=instance.previous_run_id,
+            stages=[
+                ProgressStage(
+                    position=r.position,
+                    stage_name=r.stage_name,
+                    status=r.status,
+                    approver_name=names.get(r.resolved_approver_id),
+                    due_at=r.due_at,
+                    activated_at=r.activated_at,
+                    completed_at=r.completed_at,
+                    round_count=r.round_count,
+                    signing_required=r.signing_required,
+                    blocked_reason=r.blocked_reason,
+                    is_current=r.legacy_stage_id == instance.current_stage_id
+                    and r.status not in ("approved", "superseded"),
+                )
+                for r in rows
+            ],
+            locked=under_review,
+            locked_reason=(
+                "This document is under review, so its file cannot be changed. "
+                "Withdraw it first, or wait for the approver to respond."
+                if under_review else None
+            ),
+        )
+
+    async def compare_versions(
+        self,
+        *,
+        from_version_id: uuid.UUID,
+        to_version_id: uuid.UUID,
+        actor: AuthUser,
+    ) -> VersionDiffResponse:
+        """AP-RES-03 - page-aware text comparison of two versions."""
+        from app.domain.textdiff import diff_pages
+        from app.services.annotation_carryover import extract_pages
+        from app.services.document_service import can_user_access_document
+
+        not_found = NotFoundException("Document version not found")
+        older = await self.db.get(DocumentVersion, from_version_id)
+        newer = await self.db.get(DocumentVersion, to_version_id)
+        if (
+            older is None or newer is None
+            or older.deleted_at is not None or newer.deleted_at is not None
+            # Comparing across documents is meaningless and would be a way to
+            # read one document's text while holding a version id from
+            # another.
+            or older.document_id != newer.document_id
+        ):
+            raise not_found
+
+        doc = await self.db.get(Document, newer.document_id)
+        if (
+            doc is None or doc.deleted_at is not None
+            or not actor.org_id or doc.org_id != actor.org_id
+        ):
+            raise not_found
+        if not await can_user_access_document(self.db, actor, doc):
+            raise not_found
+
+        before = await extract_pages(self.db, older)
+        after = await extract_pages(self.db, newer)
+        result = diff_pages(before, after)
+
+        return VersionDiffResponse(
+            from_version_id=older.id,
+            to_version_id=newer.id,
+            from_version_num=older.version_num,
+            to_version_num=newer.version_num,
+            available=result.available,
+            reason=result.reason,
+            changed_pages=result.changed_pages,
+            added_pages=result.added_pages,
+            removed_pages=result.removed_pages,
+            pages=[
+                PageDiffResponse(
+                    page_number=p.page_number, status=p.status,
+                    added=p.added, removed=p.removed,
+                    similarity=p.similarity, truncated=p.truncated,
+                )
+                for p in result.pages
+            ],
+        )
+
+    async def _my_step_for_stage(self, si: StageInstance, user_id: uuid.UUID):
+        """This caller's live ApprovalStep on this stage, newest round first."""
+        if si.legacy_stage_id is None:
+            return None
+        return (
+            await self.db.execute(
+                select(ApprovalStep)
+                .where(
+                    ApprovalStep.instance_id == si.instance_id,
+                    ApprovalStep.stage_id == si.legacy_stage_id,
+                    ApprovalStep.approver_id == user_id,
+                    ApprovalStep.superseded_at.is_(None),
+                )
+                .order_by(ApprovalStep.round_number.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+
+    async def _run_history(
+        self, instance_id: uuid.UUID
+    ) -> list[StageDecisionSummary]:
+        """Decisions already recorded on this run (AP-DET-02).
+
+        Revoked and superseded rows are included and flagged rather than
+        hidden: section 6.5 keeps them for audit, and an approver deciding
+        now needs to know that an earlier approval no longer counts.
+        """
+        steps = (
+            await self.db.execute(
+                select(ApprovalStep)
+                .where(
+                    ApprovalStep.instance_id == instance_id,
+                    ApprovalStep.decision != ApprovalDecision.PENDING,
+                )
+                .order_by(ApprovalStep.decided_at.asc().nullslast())
+            )
+        ).scalars().all()
+        if not steps:
+            return []
+
+        from app.models.user import User
+
+        stage_ids = {s.stage_id for s in steps}
+        stages = {
+            st.id: st for st in (
+                await self.db.execute(
+                    select(WorkflowStage).where(WorkflowStage.id.in_(stage_ids))
+                )
+            ).scalars().all()
+        }
+        user_ids = {s.approver_id for s in steps}
+        users = {
+            u.id: u for u in (
+                await self.db.execute(
+                    select(User).where(User.id.in_(user_ids))
+                )
+            ).scalars().all()
+        }
+        out = []
+        for s in steps:
+            stage = stages.get(s.stage_id)
+            out.append(
+                StageDecisionSummary(
+                    step_id=s.id,
+                    position=stage.sequence_order if stage else None,
+                    stage_name=stage.name if stage else None,
+                    approver_id=s.approver_id,
+                    approver_name=(
+                        users[s.approver_id].name
+                        if s.approver_id in users else None
+                    ),
+                    decision=s.decision,
+                    decided_at=s.decided_at,
+                    note=s.decision_note,
+                    round_number=s.round_number,
+                    is_counted=s.is_counted,
+                )
+            )
+        return out
 
     # ── Record Decision ─────────────────────────────────────────────────────────
 
@@ -151,9 +792,21 @@ class ApprovalService:
           'changes_requested'  → mark instance changes_requested; auto-create chat;
                                  notify creator
         """
-        step = await self.step_repo.get_by_id(step_id)
+        # Row-locked: two decisions arriving together must not both pass the
+        # already-decided guard below (X-INT-03, E9, T25). The second request
+        # blocks here, then sees the first decision and gets a 409.
+        step = await self.step_repo.get_by_id(step_id, for_update=True)
         if not step:
             raise NotFoundException("ApprovalStep not found")
+        # Section 11 Observability (P4-9): bind the run id so EVERY line
+        # logged while this decision is processed carries it - including
+        # lines from the services this calls into, which otherwise log with
+        # no way to tie them to the run. Request id is already bound by the
+        # logging middleware; together they make one decision traceable
+        # end to end.
+        structlog.contextvars.bind_contextvars(
+            run_id=str(step.instance_id), step_id=str(step.id),
+        )
         if step.decision != ApprovalDecision.PENDING:
             raise ConflictException(f"This step already has a decision: '{step.decision}'")
 
@@ -161,6 +814,29 @@ class ApprovalService:
         instance = await self.instance_repo.get_by_id(step.instance_id, org_id)
         if not instance:
             raise NotFoundException("WorkflowInstance not found")
+
+        # WF-WD-03 / E8 / T32: the run itself has to still be open.
+        #
+        # Nothing checked this. The owner could withdraw a document and the
+        # approver could then approve it anyway - and approving the last
+        # stage set the document to APPROVED, so a withdrawn document came
+        # out the far end approved. The same hole let a decision land on an
+        # already-rejected run, and on one sent back to its owner for changes
+        # (where the document in front of the approver is no longer the one
+        # under review).
+        #
+        # 409 and not 403: the caller had every right to act, the world moved
+        # underneath them. The message says which way it moved so the UI can
+        # explain it rather than show a bare failure, and drafts are left
+        # untouched (AP-CHG-04, X-INT-02).
+        if instance.status in _CLOSED_TO_DECISIONS:
+            raise ConflictException(
+                _DECISION_CONFLICT_MESSAGES.get(
+                    instance.status,
+                    f"This document is no longer awaiting a decision "
+                    f"(status: '{instance.status}').",
+                )
+            )
 
         doc = await self.db.get(Document, instance.document_id)
         if not doc:
@@ -176,15 +852,67 @@ class ApprovalService:
         # Authorization check
         await self._authorize_actor(step, actor_id)
 
-        # Signature enforcement: if stage.requires_signature, an Approve decision
-        # MUST include a valid ESignatureRequest
+        # AP-REJ-02 / E23 / T15: a rejection is terminal (BR-07), so it must
+        # carry a reason the owner can act on. Validated here, server-side
+        # and independent of the client, because `note` is an optional field
+        # and nothing checked it — a document could be rejected with no
+        # reason at all (defect 5).
+        if req.decision == ApprovalDecision.REJECTED:
+            from app.domain.decision_rules import (
+                RejectionReasonError,
+                validate_rejection_reason,
+            )
+            try:
+                req.note = validate_rejection_reason(req.note)
+            except RejectionReasonError as exc:
+                raise UnprocessableEntityException(str(exc)) from exc
+
+        # AP-CHG-02 / G16: a change request must say what to change.
+        #
+        # "At least one comment OR a non-empty overall note" — the two are
+        # alternatives, because an approver may have anchored three comments
+        # and have nothing to add in general, or have one overall remark and
+        # nothing worth anchoring. Requiring both would force them to
+        # duplicate themselves; requiring neither sends the owner a document
+        # back with no indication of why.
+        if req.decision == ApprovalDecision.CHANGES_REQUESTED:
+            from app.services.annotation_service import AnnotationService
+
+            ann_svc = AnnotationService(self.db)
+            written = await ann_svc.count_written_drafts(
+                document_version_id=step.document_version_id,
+                author_id=actor_id,
+            )
+            if written == 0 and not (req.note or "").strip():
+                raise UnprocessableEntityException(
+                    "Say what needs changing: add at least one comment on the "
+                    "document, or write an overall note. Sending it back with "
+                    "neither leaves the owner nothing to act on."
+                )
+
+        # Signature enforcement for an Approve decision.
+        #
+        # Both sources are checked. The stage DEFINITION is not the whole
+        # story: WF-STG-21 requires a signature when the RESOLVED approver's
+        # department requires one, which is decided at activation and
+        # recorded on the stage instance — the case a manager rule resolving
+        # into Finance creates. Reading only `stage.requires_signature` let
+        # that approval through unsigned (AP-APR-05, E25, T21, T30).
         if req.decision == ApprovalDecision.APPROVED:
             stage = await self.db.get(WorkflowStage, step.stage_id)
-            if stage and stage.requires_signature and not req.signature:
-                from app.core.exceptions import UnprocessableEntityException
+            stage_instance = await self._stage_instance_for(step)
+            needs_signature = bool(
+                (stage and stage.requires_signature)
+                or (stage_instance and stage_instance.signing_required)
+            )
+            if needs_signature and not req.signature:
+                reason = (
+                    stage_instance.signing_reason
+                    if stage_instance and stage_instance.signing_reason
+                    else "This stage requires a digital signature to approve."
+                )
                 raise UnprocessableEntityException(
-                    "This stage requires a digital signature to approve. "
-                    "Provide a 'signature' in your request body."
+                    f"{reason} Provide a 'signature' in your request body."
                 )
 
         # Record decision
@@ -353,8 +1081,19 @@ class ApprovalService:
                 current_version_id=step.document_version_id,
             )
 
-        # Notify document owner of progress via EventBus (subscribers.py dispatches)
-        # DO NOT also call notif_svc.notify() here — that would double-fire.
+        # The owner's progress notification is NOT sent from here any more.
+        #
+        # This fired on every approved step, including steps that did not
+        # complete their stage (min_approvals_required > 1) and the final
+        # step of the run — so the owner got "Approval step approved" for the
+        # moment their document was fully approved. advance_stage() now
+        # queues N3 when a stage actually completes and N6 when the run does.
+        #
+        # The event itself still publishes, because other subscribers consume
+        # it, but it no longer carries notif_* fields: the subscriber
+        # dispatches with its own session and its own commit, independent of
+        # this transaction, which is exactly the X-NOT-01 violation the outbox
+        # exists to close.
         doc = await self.db.get(Document, instance.document_id)
         if doc:
             EventBus.publish("document.status_changed", {
@@ -362,13 +1101,7 @@ class ApprovalService:
                 "org_id": str(org_id),
                 "new_status": "approved",
                 "event": "workflow_stage_approved",
-                # Notification fields for subscribers.py:
-                "notif_user_id": str(doc.submitted_by),
-                "notif_type": NotificationType.APPROVED,
-                "notif_title": "Approval step approved",
-                "notif_body": f"Stage '{stage.name}' has been approved.",
-                "notif_deep_link": f"/documents/{doc.id}",
-                "notif_instance_id": str(instance.id),
+                "stage_name": stage.name,
             })
 
     async def _handle_rejected(
@@ -381,25 +1114,46 @@ class ApprovalService:
         """Mark workflow as rejected; notify document owner."""
         instance.status = WorkflowInstanceStatus.REJECTED
         instance.completed_at = datetime.now(timezone.utc)
+        rejected_si = await self._stage_instance_for(step)
+        if rejected_si is not None:
+            rejected_si.status = "rejected"
+            rejected_si.completed_at = instance.completed_at
+            if rejected_si.timer_paused_at is None:
+                rejected_si.timer_paused_at = instance.completed_at
+            await self.workflow_svc.close_review_round(rejected_si, "rejected")
         doc = await self.db.get(Document, instance.document_id)
         if doc:
             doc.status = DocumentStatus.REJECTED
         await self.db.flush()
 
         if doc:
+            # The event stays (other subscribers consume it) but no longer
+            # carries notif_* fields — that path committed its notification in
+            # a separate session before this transaction had committed, so a
+            # rejection that rolled back still told the owner they had been
+            # rejected (X-NOT-01).
             EventBus.publish("document.status_changed", {
                 "doc_id": str(instance.document_id),
                 "org_id": str(instance.org_id),
                 "new_status": DocumentStatus.REJECTED,
                 "event": "workflow_rejected",
-                # Notification fields for subscribers.py:
-                "notif_user_id": str(doc.submitted_by),
-                "notif_type": NotificationType.REJECTED,
-                "notif_title": "Document rejected",
-                "notif_body": f"Your document '{doc.title}' was rejected.",
-                "notif_deep_link": f"/documents/{doc.id}",
-                "notif_instance_id": str(instance.id),
             })
+
+            # N7 carries the stage and the reason, so the owner can act on it
+            # from the notification itself (AP-REJ-04) rather than having to
+            # open the document to find out what went wrong.
+            stage = await self.db.get(WorkflowStage, step.stage_id)
+            await self.outbox.enqueue_notification(
+                notif_catalogue.n7_run_rejected(
+                    instance_id=instance.id,
+                    owner_id=doc.submitted_by,
+                    doc_title=doc.title,
+                    document_id=doc.id,
+                    stage_name=stage.name if stage else "Approval",
+                    reason=step.decision_note,
+                ),
+                org_id=org_id,
+            )
         logger.info("workflow_rejected", instance_id=str(instance.id), step_id=str(step.id))
 
     async def _handle_changes_requested(
@@ -416,13 +1170,71 @@ class ApprovalService:
         3. Add requester + approver as participants
         4. Notify requester
         """
-        # 1. Update instance — DO NOT change current_stage_id
+        # 1. Update instance — DO NOT change current_stage_id.
+        #
+        # BR-06 depends on this: the run must come back to THIS stage when the
+        # owner resubmits, which it can only do if nothing moved the pointer.
         instance.status = WorkflowInstanceStatus.CHANGES_REQUESTED
         doc = await self.db.get(Document, instance.document_id)
         if doc:
             # SENT_BACK is the canonical diagram value for "returned for changes"
             doc.status = DocumentStatus.SENT_BACK
         await self.db.flush()
+
+        # 1b. AP-CHG-01 — publish this approver's drafts, in the SAME
+        #     transaction as the decision. That is what makes the 409 path
+        #     safe: if the owner withdrew the document while the approver was
+        #     typing, the guard in decide() raises before any of this runs,
+        #     and if anything later in the transaction fails, the publish
+        #     rolls back with it. Every draft is still a draft either way,
+        #     which is what AP-CHG-05 and E11 require.
+        #
+        #     Scoped to this approver's own drafts: a parallel stage can have
+        #     two approvers on the same version, and publishing the other
+        #     one's unfinished notes would be the worst possible breach of
+        #     AP-ANN-05.
+        from app.services.annotation_service import AnnotationService
+
+        stage_instance = await self._stage_instance_for(step)
+        open_round = None
+        if stage_instance is not None:
+            open_round = await self.workflow_svc.open_review_round(
+                stage_instance, step.document_version_id
+            )
+        published = await AnnotationService(self.db).publish_drafts(
+            document_version_id=step.document_version_id,
+            author_id=actor_id,
+            org_id=org_id,
+            review_round_id=open_round.id if open_round else None,
+        )
+        if stage_instance is not None:
+            await self.workflow_svc.close_review_round(
+                stage_instance, "changes_requested"
+            )
+
+        # 1c. Stop the stage clock (section 6.10, AP-SLA-03). The document is
+        #     with its owner now, so it must not accrue toward the approver's
+        #     breach, and the sweep reads both of these.
+        if stage_instance is not None:
+            stage_instance.status = "changes_requested"
+            if stage_instance.timer_paused_at is None:
+                stage_instance.timer_paused_at = datetime.now(timezone.utc)
+            await self.db.flush()
+
+        await self._write_audit(
+            org_id=org_id,
+            actor_id=actor_id,
+            action=AuditAction.ANNOTATION_PUBLISHED,
+            resource_type="DocumentVersion",
+            resource_id=step.document_version_id,
+            instance_id=instance.id,
+            after={
+                "published_count": len(published),
+                "stage_instance_id": (
+                    str(stage_instance.id) if stage_instance else None
+                ),
+            },
+        )
 
         if doc:
             EventBus.publish("document.status_changed", {
@@ -450,23 +1262,38 @@ class ApprovalService:
         else:
             conv_id = existing_conv.id
 
-        # 4. Notify document owner via EventBus (subscribers.py dispatches)
-        # DO NOT also call notif_svc.notify() here — that would double-fire.
+        # 4. Queue N4 for the owner.
+        #
+        # The event still publishes for other subscribers, but no longer
+        # carries notif_* fields: that subscriber dispatches on its own
+        # session with its own commit, independent of this transaction, so a
+        # change request that rolled back still told the owner their document
+        # had been sent back (X-NOT-01). This was the last path still doing
+        # that.
         if doc:
             EventBus.publish("document.status_changed", {
                 "doc_id": str(instance.document_id),
                 "org_id": str(org_id),
                 "new_status": DocumentStatus.SENT_BACK,
                 "event": "changes_requested",
-                # Notification fields for subscribers.py:
-                "notif_user_id": str(doc.submitted_by),
-                "notif_type": NotificationType.CHANGES_REQUESTED,
-                "notif_title": "Changes requested on your document",
-                "notif_body": f"An approver has requested changes on '{doc.title}'.",
-                "notif_deep_link": f"/chat/{conv_id}",
-                "notif_instance_id": str(instance.id),
-                "notif_metadata": {"conversation_id": str(conv_id)},
+                "conversation_id": str(conv_id),
             })
+
+            stage = await self.db.get(WorkflowStage, step.stage_id)
+            await self.outbox.enqueue_notification(
+                notif_catalogue.n4_changes_requested(
+                    instance_id=instance.id,
+                    owner_id=doc.submitted_by,
+                    doc_title=doc.title,
+                    document_id=doc.id,
+                    stage_name=stage.name if stage else "Approval",
+                    note=step.decision_note,
+                    conversation_id=conv_id,
+                    cycle=getattr(instance, "current_cycle", 1) or 1,
+                    round_number=step.round_number,
+                ),
+                org_id=org_id,
+            )
         logger.info(
             "changes_requested",
             instance_id=str(instance.id),
@@ -1359,6 +2186,31 @@ class ApprovalService:
                     "admin to enable self-approval in organization settings if "
                     "this is intentional for your workflow."
                 )
+
+    async def _stage_instance_for(
+        self, step: ApprovalStep
+    ) -> StageInstance | None:
+        """This step's stage instance, if the run has them (§4.3 D).
+
+        Matched on `legacy_stage_id` because `ApprovalStep.stage_id` is the
+        legacy stage the step was written against. The newest cycle wins: a
+        full re-approval reset (WF-REV-13) leaves the earlier cycle's rows in
+        place as Superseded, and the live cycle is the one being decided.
+
+        Returns None for a run created before P2-1, which simply has no stage
+        instances; callers fall back to the stage definition.
+        """
+        rows = await self.db.execute(
+            select(StageInstance)
+            .where(
+                StageInstance.instance_id == step.instance_id,
+                StageInstance.legacy_stage_id == step.stage_id,
+                StageInstance.deleted_at.is_(None),
+            )
+            .order_by(StageInstance.cycle.desc())
+            .limit(1)
+        )
+        return rows.scalar_one_or_none()
 
     async def _authorize_actor(self, step: ApprovalStep, actor_id: uuid.UUID) -> None:
         """

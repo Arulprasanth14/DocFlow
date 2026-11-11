@@ -75,6 +75,14 @@ REAL_SEND_EMAILS = _NotificationService._send_emails
 
 
 @pytest.fixture(autouse=True)
+def _disable_rate_limiting(monkeypatch):
+    """Section 11's rate limiter is per-address, and the whole suite calls
+    from one address — so with it on, an unrelated test fails with 429
+    depending on how many ran before it."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
 def _disable_background_dispatch(monkeypatch):
     """
     NotificationService._send_emails and the two EventBus handlers in
@@ -117,6 +125,19 @@ def _disable_background_dispatch(monkeypatch):
         return None
 
     monkeypatch.setattr(NotificationService, "_push_to_redis", _no_push)
+
+    # Submit and resubmit enqueue Celery jobs (review-copy rendering, comment
+    # carry-over). With a broker running, a test would hand real jobs carrying
+    # test ids to the REAL dev worker; with none, each publish pays a
+    # connection timeout. Tests that cover this work call it directly.
+    async def _no_enqueue(*a, **kw):
+        return None
+
+    import app.services.annotation_carryover as _carryover
+    import app.services.rendition_service as _rendition
+
+    monkeypatch.setattr(_rendition, "queue_rendition", _no_enqueue)
+    monkeypatch.setattr(_carryover, "queue_carry_over", _no_enqueue)
 
 
 async def _ensure_test_database() -> None:

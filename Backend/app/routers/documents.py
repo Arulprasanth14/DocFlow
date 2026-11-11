@@ -40,6 +40,7 @@ from app.schemas.document import (
     SubmitCheckResponse,
 )
 from app.schemas.org import MessageResponse
+from app.schemas.workflow_instances import SubmitAsNewRequest
 from app.schemas.template import SaveAsTemplateRequest, TemplateDetailResponse
 from app.services.document_service import DocumentService, DocumentTypeService
 from app.services.template_studio_service import TemplateStudioService
@@ -481,6 +482,43 @@ async def submit_document(
         req=body,
         idempotency_key=idempotency_key,
     )
+
+
+@documents_router.post(
+    "/{doc_id}/submit-as-new",
+    dependencies=[require_permission("documents:submit")],
+)
+async def submit_as_new(
+    doc_id: UUID,
+    body: SubmitAsNewRequest,
+    current_user: CurrentUser,
+    db: DatabaseDep,
+) -> dict:
+    """WF-SUB-06 / AP-REJ-04 / E18 — start a fresh run after a terminal one.
+
+    A rejection is terminal (BR-07), so the way forward is a new run rather
+    than reopening the old one. The closed run keeps every decision, comment
+    and signature exactly as it was and stays fully visible; the new run
+    starts at stage 1 and records which run it follows.
+
+    Also the way back from a withdrawal, which would otherwise be a dead
+    end — the document's status is CANCELLED, which the ordinary submit path
+    refuses.
+    """
+    if not current_user.org_id:
+        from app.core.exceptions import ForbiddenException
+        raise ForbiddenException("No organization context")
+    from app.services.workflow_service import WorkflowService
+
+    run = await WorkflowService(db).submit_as_new(
+        org_id=current_user.org_id,
+        document_id=doc_id,
+        requester_id=current_user.id,
+        template_id=body.template_id,
+        version_id=body.version_id,
+    )
+    await db.commit()
+    return run.model_dump(mode="json")
 
 
 @documents_router.delete(

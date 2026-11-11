@@ -57,7 +57,23 @@ async def _make_instance(db_session, org, submitter_id, approver_id, *, stages=1
         org_id=org.id,
         document_id=doc.id,
         template_id=template.id,
-        template_version_snapshot={},
+        # The frozen definition this run is pinned to (DM-02). Real runs
+        # always carry it — start_workflow() writes it via
+        # _freeze_template() — and since P2-2 the engine routes by it rather
+        # than by re-reading the live template, so a run built here with an
+        # empty snapshot has no route and is correctly refused.
+        template_version_snapshot={
+            "id": str(template.id),
+            "stages": [
+                {
+                    "id": str(st.id),
+                    "name": st.name,
+                    "sequence_order": st.sequence_order,
+                    "approver_rules": [],
+                }
+                for st in stage_rows
+            ],
+        },
         current_stage_id=stage_rows[0].id,
         status=WorkflowInstanceStatus.IN_PROGRESS,
     )

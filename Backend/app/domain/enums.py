@@ -253,6 +253,35 @@ class AuditAction(StrEnum):
     WORKFLOW_INSTANCE_CANCEL = "workflow.instance.cancel"
     WORKFLOW_INSTANCE_COMPLETE = "workflow.instance.complete"
     WORKFLOW_STAGE_ADVANCE = "workflow.stage.advance"
+    # §7.2 stage category (Workflow module, task P2-7). Recorded when a
+    # stage activates, when its approver is fixed, and when signing is
+    # forced on because the RESOLVED approver's department requires it
+    # (WF-STG-21) — the last one is why this is audited at all: the
+    # requirement was not visible in the definition the owner saved.
+    STAGE_ACTIVATED = "stage.activated"
+    STAGE_APPROVER_RESOLVED = "stage.approver_resolved"
+    STAGE_SIGNING_REQUIRED = "stage.signing_required"
+    # P2-17 / AP-SLA-05, AP-SLA-06. The reassignment record has to name the
+    # old approver, the new one and the reason: it is the only supported way
+    # to change an active stage's approver, so it is the one an audit will be
+    # read for.
+    STAGE_BLOCKED = "stage.blocked"
+    STAGE_REASSIGNED = "stage.reassigned"
+    # P2-12 / WF-SUB-06. Distinct from workflow.instance.create so the chain
+    # from a rejected run to its successor is readable in the audit trail.
+    RUN_RESUBMITTED_AS_NEW = "run.submitted_as_new"
+    # WF-REV-13: a full re-approval reset. Earlier stage instances are kept
+    # as Superseded, and this is the event that says why they are.
+    RUN_FULL_REAPPROVAL_RESET = "run.full_reapproval_reset"
+    # P3-10 / section 7.2 review category. A reply and a status change are
+    # the only things that may happen to a published annotation (AP-ANN-09,
+    # BR-09), so between them they are the whole audit trail of a review
+    # conversation.
+    ANNOTATION_DRAFTED = "review.comment_drafted"
+    ANNOTATION_DISCARDED = "review.comment_discarded"
+    ANNOTATION_PUBLISHED = "review.comments_published"
+    ANNOTATION_REPLIED = "review.comment_replied"
+    ANNOTATION_STATUS_CHANGED = "review.comment_status_changed"
     # User actions
     USER_LOGIN = "user.login"
     USER_LOGOUT = "user.logout"

@@ -271,6 +271,34 @@ class WorkflowInstance(BaseModel):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # ── Runtime layer (migration e1f2a3b4c5d6, task P2-1) ──────────────────
+    # THE PINNED DEFINITION (DM-02). A run is routed by this version for its
+    # whole life; the live template is never consulted again after submit.
+    # Nullable only because a run whose template could not be represented as
+    # a version stays on the legacy path rather than being coerced.
+    version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_template_versions.id"),
+        nullable=True, index=True,
+    )
+    # AP-REJ-04 / WF-SUB-06: "Submit as New" starts a fresh run linked to the
+    # one it replaces, because a rejected run is terminal and is never
+    # reopened (BR-07, BR-14).
+    previous_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_instances.id"), nullable=True,
+    )
+    # X-INT-02 optimistic locking.
+    row_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False,
+    )
+    # X-INT-01: the key this run was created under, so a replayed submit
+    # returns this run instead of starting a second one.
+    idempotency_key: Mapped[str | None] = mapped_column(String(255))
+    # WF-REV-13: a full re-approval reset opens a new cycle of stage
+    # instances; this says which cycle is live.
+    current_cycle: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False,
+    )
+
     # Relationships
     document: Mapped["Document"] = relationship(  # type: ignore[name-defined]
         "Document", back_populates="workflow_instances", lazy="noload",
@@ -299,9 +327,30 @@ class WorkflowInstance(BaseModel):
         foreign_keys="Notification.instance_id",
     )
 
+    stage_instances: Mapped[list["StageInstance"]] = relationship(
+        "StageInstance", back_populates="instance",
+        foreign_keys="StageInstance.instance_id",
+        lazy="noload", cascade="all, delete-orphan",
+        order_by="StageInstance.position",
+    )
+    version: Mapped["WorkflowTemplateVersion | None"] = relationship(
+        "WorkflowTemplateVersion", foreign_keys=[version_id], lazy="noload",
+    )
+
     __table_args__ = (
         Index("idx_wi_document_status", "document_id", "status"),
         Index("idx_wi_org_status", "org_id", "status"),
+        # BR-01 / X-INT-06: at most ONE live run per document, enforced by
+        # the database so a double-submitted request cannot create a second
+        # one (E10, T26). Partial, because a document may be resubmitted
+        # after its previous run reached a terminal state.
+        Index(
+            "uq_wi_single_live_run", "document_id", unique=True,
+            postgresql_where=text(
+                "status NOT IN ('approved', 'rejected', 'cancelled',"
+                " 'finalized', 'completed') AND deleted_at IS NULL"
+            ),
+        ),
     )
 
 
@@ -343,6 +392,14 @@ class ApprovalStep(BaseModel):
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Round number (1 = first pass, 2 = after first revision, etc.)
     round_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # The stage instance this decision belongs to (task P2-1). Nullable so
+    # every pre-existing row stays valid; `stage_id` is untouched and still
+    # populated. StageInstance owns status and timing, ApprovalStep owns the
+    # decision and its signature — the link points this way only.
+    stage_instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stage_instances.id"),
+        nullable=True, index=True,
+    )
 
     # ── Revocation / invalidation (§6.5) ───────────────────────────────────
     # A revoked decision is NEVER deleted and its `decision` field is NEVER
@@ -820,7 +877,12 @@ class WorkflowShare(BaseModel):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False,
     )
     granted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False,
+        # server_default mirrors migration b7c8d9e0f1a2, which created the
+        # column with DEFAULT now(). Without it here the model and the
+        # migrated schema disagree and `alembic check` reports drift, even
+        # though the Python default made the behaviour identical.
+        DateTime(timezone=True), default=utcnow,
+        server_default=text("now()"), nullable=False,
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(
@@ -858,4 +920,267 @@ class WorkflowShare(BaseModel):
             "grantee_user_id",
             postgresql_where=text("revoked_at IS NULL"),
         ),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RUNTIME LAYER — Workflow Module §4.3 D, migration e1f2a3b4c5d6 (task P2-1)
+#
+# A run's own record of the stages it must visit, created once from the PINNED
+# version and never re-derived from the live template. This is what makes
+# DM-02 enforceable: advance_stage() reading the live template is what let an
+# owner's edit reroute — or silently approve — someone else's in-flight
+# document (defect 1).
+#
+# Division of responsibility with the existing ApprovalStep, so the two can
+# never become rival sources of truth:
+#   StageInstance  owns stage STATUS, TIMING and the resolved approver.
+#   ApprovalStep   owns the per-approver DECISION and its signature.
+# The dependency points one way only: a step belongs to a stage instance.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# §4.3 D. A module constant so the model CHECK and the migration CHECK are
+# written from the same list.
+STAGE_INSTANCE_STATUSES = (
+    "pending", "active", "awaiting_signature", "changes_requested",
+    "approved", "rejected", "blocked", "superseded",
+)
+
+_STAGE_STATUS_CHECK = "status IN ('" + "', '".join(STAGE_INSTANCE_STATUSES) + "')"
+
+
+class StageInstance(BaseModel):
+    """One stage of one run (§4.3 D).
+
+    `cycle` exists for WF-REV-13: require_full_reapproval resets a run to
+    stage 1, and the spec requires the earlier stage instances to be marked
+    Superseded and RETAINED for audit. A new pass therefore opens cycle 2
+    rather than overwriting cycle 1, which is why uniqueness is
+    (instance, cycle, position) and not (instance, position).
+    """
+    __tablename__ = "stage_instances"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False,
+    )
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_instances.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # The pinned definition this stage came from — authoritative for routing.
+    version_stage_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_version_stages.id"), nullable=True,
+    )
+    # Kept only so an ApprovalStep (whose stage_id is NOT NULL and references
+    # workflow_stages) can still be written for this stage while the legacy
+    # table remains in the schema. Never read to decide routing.
+    legacy_stage_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_stages.id"), nullable=True,
+    )
+    cycle: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Snapshot: the timeline must still read correctly after the definition
+    # changes (DM-02).
+    stage_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    approver_type: Mapped[str] = mapped_column(
+        String(40), default="specific_user",
+        server_default="specific_user", nullable=False,
+    )
+    # Resolved ONCE at activation and authoritative from then on, even if the
+    # org chart changes afterwards (WF-STG-23, E5). NULL until activation.
+    resolved_approver_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,
+    )
+    department_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True,
+    )
+    # WF-STG-21: may be forced true at activation even when the definition
+    # said off (a manager rule resolving into a signing department), so the
+    # reason is recorded next to it and surfaced to the approver.
+    signing_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False,
+    )
+    signing_reason: Mapped[str | None] = mapped_column(String(255))
+
+    status: Mapped[str] = mapped_column(
+        String(40), default="pending", server_default="pending", nullable=False,
+    )
+    due_within_hours: Mapped[int | None] = mapped_column(Integer)
+    # Server-computed and stored; the UI never computes a due date
+    # (AP-SLA-07, BR-13).
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # §6.10: the clock stops while Changes Requested or Blocked, so a document
+    # sitting with its owner does not accrue toward the approver's breach.
+    timer_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    round_count: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False,
+    )
+    blocked_reason: Mapped[str | None] = mapped_column(String(255))
+    # X-INT-02 optimistic locking.
+    row_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False,
+    )
+
+    # Relationships
+    instance: Mapped["WorkflowInstance"] = relationship(
+        "WorkflowInstance", back_populates="stage_instances",
+        foreign_keys=[instance_id], lazy="noload",
+    )
+    version_stage: Mapped["WorkflowVersionStage | None"] = relationship(
+        "WorkflowVersionStage", lazy="noload",
+    )
+    resolved_approver: Mapped["User | None"] = relationship(  # type: ignore[name-defined]
+        "User", foreign_keys=[resolved_approver_id], lazy="noload",
+    )
+    rounds: Mapped[list["ReviewRound"]] = relationship(
+        "ReviewRound", back_populates="stage_instance",
+        lazy="noload", cascade="all, delete-orphan",
+        order_by="ReviewRound.round_number",
+    )
+    decisions: Mapped[list["Decision"]] = relationship(
+        "Decision", back_populates="stage_instance",
+        lazy="noload", cascade="all, delete-orphan",
+    )
+
+    @property
+    def is_open(self) -> bool:
+        """True while this stage still needs someone to act."""
+        return self.status in (
+            "pending", "active", "awaiting_signature",
+            "changes_requested", "blocked",
+        )
+
+    @property
+    def is_timer_running(self) -> bool:
+        """The SLA sweep must skip a paused stage (§6.10, defect 6)."""
+        return (
+            self.status in ("active", "awaiting_signature")
+            and self.timer_paused_at is None
+        )
+
+    __table_args__ = (
+        UniqueConstraint("instance_id", "cycle", "position",
+                         name="uq_stage_instance_position"),
+        CheckConstraint("position >= 1", name="ck_stage_instance_position"),
+        CheckConstraint("cycle >= 1", name="ck_stage_instance_cycle"),
+        CheckConstraint("round_count >= 1", name="ck_stage_instance_rounds"),
+        CheckConstraint(_STAGE_STATUS_CHECK, name="ck_stage_instance_status"),
+        CheckConstraint(
+            "due_within_hours IS NULL OR "
+            "(due_within_hours >= 1 AND due_within_hours <= 720)",
+            name="ck_stage_instance_due_within",
+        ),
+        # The approvals dashboard's main query (AP-DSH-*) and the one-minute
+        # SLA sweep (AP-SLA-01) both read exactly these three columns.
+        Index("idx_stage_instance_queue",
+              "resolved_approver_id", "status", "due_at"),
+        Index("idx_stage_instance_org_status", "org_id", "status"),
+    )
+
+
+class ReviewRound(BaseModel):
+    """One pass of one stage over one document version (§6.5.2, BR-06).
+
+    A change request closes a round; a resubmission opens the next one on the
+    SAME stage instance. That is what makes "the document returns to the stage
+    that asked for changes, never stage 1" auditable instead of destructive.
+    """
+    __tablename__ = "review_rounds"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False,
+    )
+    stage_instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stage_instances.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The exact version under review in this round (DM-02, WF-REV-08).
+    document_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_versions.id"), nullable=False,
+    )
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow,
+        server_default=text("now()"), nullable=False,
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(String(40))
+
+    stage_instance: Mapped["StageInstance"] = relationship(
+        "StageInstance", back_populates="rounds", lazy="noload",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("stage_instance_id", "round_number",
+                         name="uq_review_round_number"),
+        CheckConstraint("round_number >= 1", name="ck_review_round_number"),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN "
+            "('approved', 'rejected', 'changes_requested', "
+            "'withdrawn', 'superseded')",
+            name="ck_review_round_outcome",
+        ),
+    )
+
+
+class Decision(BaseModel):
+    """An approver's recorded decision (AP-APR-06). Immutable once written (BR-09).
+
+    Nothing in the service layer updates a Decision row. A correction is a new
+    row and a revocation is recorded on the ApprovalStep, so the original
+    decision survives exactly as it was made.
+    """
+    __tablename__ = "decisions"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False,
+    )
+    stage_instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stage_instances.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    review_round_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("review_rounds.id"), nullable=True,
+    )
+    actor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False,
+    )
+    decision: Mapped[str] = mapped_column(String(40), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text)
+    # AP-APR-06 asks for the version id AND its hash, so a decision stays
+    # verifiable on its own terms.
+    document_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_versions.id"), nullable=False,
+    )
+    document_version_hash: Mapped[str | None] = mapped_column(String(128))
+    esignature_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("esignatures.id"), nullable=True,
+    )
+    # Bridge to the existing per-approver record so the two never drift.
+    approval_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("approval_steps.id"), nullable=True,
+    )
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow,
+        server_default=text("now()"), nullable=False,
+    )
+
+    stage_instance: Mapped["StageInstance"] = relationship(
+        "StageInstance", back_populates="decisions", lazy="noload",
+    )
+    actor: Mapped["User"] = relationship(  # type: ignore[name-defined]
+        "User", foreign_keys=[actor_id], lazy="noload",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('approved', 'rejected', 'changes_requested')",
+            name="ck_decision_value",
+        ),
+        Index("idx_decision_actor", "actor_id", "decided_at"),
     )

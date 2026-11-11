@@ -28,6 +28,7 @@ class NotificationRepository:
         deep_link: str | None = None,
         instance_id: uuid.UUID | None = None,
         metadata: dict | None = None,
+        dedupe_key: str | None = None,
     ) -> Notification:
         notif = Notification(
             org_id=org_id,
@@ -38,10 +39,28 @@ class NotificationRepository:
             deep_link=deep_link,
             instance_id=instance_id,
             metadata_=metadata or {},
+            dedupe_key=dedupe_key,
         )
         self.db.add(notif)
         await self.db.flush()
         return notif
+
+    async def dedupe_key_exists(self, dedupe_key: str) -> bool:
+        """Has this exact event already been delivered to this recipient?
+
+        Section 7.1. The unique index is the real guarantee; this check is
+        what lets a retried outbox delivery be a no-op instead of an
+        IntegrityError that rolls the whole batch back.
+        """
+        row = (
+            await self.db.execute(
+                select(Notification.id).where(
+                    Notification.dedupe_key == dedupe_key,
+                    Notification.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        return row is not None
 
     async def create_bulk(self, notifications: list[dict]) -> list[Notification]:
         """Bulk-create multiple notifications (e.g., notify all stage approvers)."""

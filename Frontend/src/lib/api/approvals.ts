@@ -62,18 +62,120 @@ export interface ApprovalStep {
   // longer counts.
   revoked_at?: string | null;
   superseded_at?: string | null;
+  // AP-DSH-06 urgency, computed on the SERVER. BR-13 / AP-SLA-07 make the
+  // deadline server-owned, so the client renders this rather than comparing
+  // `due_at` against its own clock.
+  urgency?: 'overdue' | 'due_soon' | 'normal' | 'none';
+  hours_until_due?: number | null;
+  /** AP-DET-01 — what a queue row links to. Null for runs created before
+   *  stage instances existed; the row then falls back to the document. */
+  stage_instance_id?: string | null;
+}
+
+export interface ApprovalQueueSummary {
+  pending: number;
+  overdue: number;
+  due_today: number;
+  due_this_week: number;
 }
 
 export interface MyApprovalsResponse {
   items: ApprovalStep[];
+  /** Size of the whole filtered set, not of `items`. */
   total: number;
+  page: number;
+  limit: number;
+  pages: number;
+  /** AP-DSH-02 — one count per tab, honouring the active filters. */
+  counts: Record<string, number>;
+  /** AP-DSH-08 — the unfiltered urgency strip. */
+  summary: ApprovalQueueSummary;
 }
 
 export interface ApprovalFilters {
   page?: number;
   limit?: number;
   status?: string;
+  /** Free text over document title and document ID (server-side). */
+  q?: string;
+  template_id?: string;
+  department_id?: string;
+  /** 'due_at' | '-due_at' | 'submitted_at' | '-submitted_at' | 'title' | '-title' */
+  sort?: string;
   [key: string]: string | number | boolean | undefined;
+}
+
+export interface StageDecisionSummary {
+  step_id: string;
+  position: number | null;
+  stage_name: string | null;
+  approver_id: string;
+  approver_name: string | null;
+  decision: string;
+  decided_at: string | null;
+  note: string | null;
+  round_number: number;
+  /** false when revoked or superseded — kept for audit, no longer gating. */
+  is_counted: boolean;
+}
+
+/** AP-DET-01..05 — everything the approval screen needs, in one call. */
+export interface StageInstanceDetail {
+  id: string;
+  instance_id: string;
+  position: number;
+  total_stages: number;
+  stage_name: string;
+  status: string;
+  cycle: number;
+  round_count: number;
+
+  signing_required: boolean;
+  signing_reason: string | null;
+
+  due_at: string | null;
+  urgency: 'overdue' | 'due_soon' | 'normal' | 'none';
+  hours_until_due: number | null;
+  activated_at: string | null;
+  timer_paused_at: string | null;
+  blocked_reason: string | null;
+
+  document_id: string | null;
+  document_public_id: string | null;
+  document_title: string | null;
+  document_version_id: string | null;
+  document_version_num: number | null;
+  /** AP-RES-03: the version this one replaced, when there is one. Null on a
+   *  first submission, which is why the comparison tab is conditional. */
+  previous_version_id?: string | null;
+  previous_version_num?: number | null;
+  submitted_by: string | null;
+  submitter_name: string | null;
+  submitted_at: string | null;
+
+  template_id: string | null;
+  workflow_name: string | null;
+  run_status: string | null;
+
+  resolved_approver_id: string | null;
+  resolved_approver_name: string | null;
+
+  /** The step a decision is posted to. Null for viewers — a viewer is never
+   *  handed an id to act on. */
+  my_step_id: string | null;
+  /** Computed on the SERVER from stored state (section 7.3 CRITICAL). */
+  can_act: boolean;
+  /** Always set when can_act is false, so the UI can say why rather than
+   *  render a disabled button with no explanation (UX-INT-01). */
+  cannot_act_reason: string | null;
+  history: StageDecisionSummary[];
+}
+
+export interface ReassignStagePayload {
+  new_approver_id: string;
+  /** Mandatory (AP-SLA-06) — recorded in the audit trail and shown to both
+   *  the outgoing and the incoming approver. */
+  reason: string;
 }
 
 // ── API ────────────────────────────────────────────────────────────────────────
@@ -96,6 +198,27 @@ export const approvalsApi = {
    */
   decide: (stepId: string, payload: DecisionPayload) =>
     apiClient.post<ApprovalStep>(`/approvals/${stepId}/decision`, payload),
+
+  /**
+   * GET /approvals/stage-instances/{id} — the approval screen's data.
+   * Returns 404 (not 403) to anyone not entitled to it, so a real stage and
+   * an invented id are indistinguishable to a stranger (AP-DET-03, E28).
+   */
+  getStageInstance: (stageInstanceId: string) =>
+    apiClient.get<StageInstanceDetail>(
+      `/approvals/stage-instances/${stageInstanceId}`,
+    ),
+
+  /**
+   * POST /approvals/stage-instances/{id}/reassign — Org Admin only.
+   * The only supported way to change an active stage's approver in v1
+   * (AP-SLA-06); delegation is out of scope per section 2.1.
+   */
+  reassignStage: (stageInstanceId: string, payload: ReassignStagePayload) =>
+    apiClient.post<Record<string, unknown>>(
+      `/approvals/stage-instances/${stageInstanceId}/reassign`,
+      payload,
+    ),
 
   /**
    * POST /approvals/{step_id}/delegate — delegate a step to another user.

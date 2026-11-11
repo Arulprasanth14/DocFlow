@@ -19,7 +19,9 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    CheckConstraint,
     Index,
+    text,
     Integer,
     String,
     Text,
@@ -325,7 +327,27 @@ class DocumentVersion(BaseModel):
     Rows are IMMUTABLE once written — never updated.
     """
     __tablename__ = "document_versions"
-    __table_args__ = (UniqueConstraint("document_id", "version_num", name="uq_doc_version"),)
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_num", name="uq_doc_version"),
+        # WF-REV-08: "which version answered this round?", for the owner's
+        # feedback view. Partial, because only revisions answer a round and
+        # the vast majority of rows are initial uploads.
+        Index(
+            "idx_dv_responds_to_round", "responds_to_round_id",
+            postgresql_where=text("responds_to_round_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "rendition_status IS NULL OR rendition_status IN "
+            "('pending', 'ready', 'failed', 'not_needed')",
+            name="ck_dv_rendition_status",
+        ),
+        # The rendition worker's only query. Partial, so it stays small as
+        # finished rows accumulate.
+        Index(
+            "idx_dv_rendition_pending", "rendition_status",
+            postgresql_where=text("rendition_status = 'pending'"),
+        ),
+    )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"),
@@ -357,6 +379,53 @@ class DocumentVersion(BaseModel):
     uploaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False,
     )
+    # ── Review pipeline (Workflow module section 6.4.1, 5.10; task P3-2) ──────
+    # The PDF the viewer actually renders. An uploaded .docx cannot be shown
+    # in a PDF viewer, so section 6.4.1 renders one; this points at it. NULL
+    # means "not rendered yet, or not needed" - a document already uploaded as
+    # a PDF renders itself.
+    rendition_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        # use_alter: documents -> document_versions -> file_assets ->
+        # documents is a cycle, and without this SQLAlchemy cannot sort the
+        # tables and silently stops considering FK order for every table in
+        # the cycle. Same reason, and same fix, as supersedes_version_id
+        # below. The database is unaffected - the migration adds this FK with
+        # an ALTER either way.
+        ForeignKey("file_assets.id", use_alter=True,
+                   name="fk_dv_rendition_file"),
+        nullable=True,
+    )
+    # 'initial' | 'revision'. WF-REV-08 wants a revision distinguishable from
+    # a first upload without inferring it from version_num, which breaks as
+    # soon as a run is restarted (submit-as-new starts at the current version,
+    # not at version 1).
+    reason: Mapped[str | None] = mapped_column(String(20))
+    # Rendition state (task P3-3). `rendition_file_id` says WHERE the review
+    # PDF is; these say what happened producing it. Without a status, "not
+    # converted yet" and "conversion failed" are both NULL and the review
+    # screen can only spin forever (section 6.4.1 asks for a failure state).
+    #   'pending' | 'ready' | 'failed' | 'not_needed'
+    # 'not_needed' is a real state, not an absence: a PDF is its own
+    # rendition, and recording that stops the worker re-examining it.
+    rendition_status: Mapped[str | None] = mapped_column(String(20))
+    # The message the owner reads. On the row, not only in a worker log: the
+    # person who can fix a password-protected file is the owner, and they will
+    # never see a log line.
+    rendition_error: Mapped[str | None] = mapped_column(Text)
+    rendition_page_count: Mapped[int | None] = mapped_column(Integer)
+    # WF-REV-08 / BR-11: the round this version was uploaded to answer, so the
+    # feedback an owner was responding to stays attached to what they did
+    # about it. NULL for an initial upload, which answers nothing.
+    responds_to_round_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        # Also cyclic: review_rounds -> stage_instances -> workflow_instances
+        # -> documents -> document_versions -> review_rounds.
+        ForeignKey("review_rounds.id", use_alter=True,
+                   name="fk_dv_responds_to_round"),
+        nullable=True,
+    )
+
     # ── Legacy field (kept for compatibility) ──────────────────────────────────
     changed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True,

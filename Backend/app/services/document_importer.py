@@ -1122,3 +1122,183 @@ def kind_of(filename: str, mime_type: str | None) -> str:
     ):
         return "ocr"
     return "docx"
+
+
+# ── PDF renditions for the review viewer (§6.4.1, task P3-3) ──────────────────
+#
+# The approval viewer renders PDF and nothing else (AP-VWR-01). An owner who
+# uploads a .docx must still be reviewable, so the file is converted once and
+# the PDF is kept alongside the version as its rendition.
+#
+# This is a different job from the convert_* functions above. Those parse a
+# file into DocFlow's own block structure for editing; a rendition has to
+# preserve the LAYOUT the owner actually submitted, because the approver signs
+# against that document and a re-flowed copy is not the same artefact. So it
+# goes through soffice to PDF rather than through our own renderer.
+
+#: Rendering spawns a whole office suite, so the ceiling is lower than the
+#: generic upload limit — same reasoning as MAX_DOC_BYTES.
+MAX_RENDITION_BYTES = 25 * 1024 * 1024
+
+#: File extensions soffice can turn into a PDF for us.
+RENDERABLE_EXTENSIONS = (
+    ".doc", ".docx", ".odt", ".rtf", ".txt", ".md",
+    ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp",
+)
+
+
+class RenditionError(ValueError):
+    """A rendition could not be produced. The message is shown to the user."""
+
+
+def needs_rendition(filename: str, mime_type: str | None = None) -> bool:
+    """Does this file need converting before the viewer can show it?
+
+    A PDF is its own rendition. An image is not converted either: the viewer
+    handles images directly, and rasterising one into a PDF would only lose
+    quality for no gain.
+    """
+    name = (filename or "").lower()
+    mime = (mime_type or "").lower()
+    if name.endswith(".pdf") or mime == "application/pdf":
+        return False
+    if mime.startswith("image/") or name.endswith(
+        (".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".gif")
+    ):
+        return False
+    return name.endswith(RENDERABLE_EXTENSIONS) or mime.startswith(
+        ("application/vnd.openxmlformats", "application/msword",
+         "application/vnd.oasis", "text/")
+    )
+
+
+def assert_pdf_is_reviewable(data: bytes, *, filename: str = "") -> int:
+    """Reject a PDF that cannot be reviewed, and return its page count.
+
+    WF-REV-09 / E15. Checked at UPLOAD, not when an approver first opens it:
+    a document that cannot be opened must not be submittable, because by the
+    time an approver discovers it the run is already live, an approver has
+    been notified, and the owner has been told their document is in review.
+
+    Two distinct refusals, with different messages, because the fixes are
+    different:
+
+      * **encrypted** - the owner has a password on it. They can remove it and
+        re-upload. Note that an empty-password PDF (encrypted but openable
+        with "") is still refused: the viewer cannot supply even an empty
+        password, and pypdf's own reads of it are unreliable.
+      * **corrupt** - the bytes are not a readable PDF at all.
+    """
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            raise RenditionError(
+                "That PDF is password-protected, so it cannot be displayed "
+                "for review. Remove the password and upload it again."
+            )
+        page_count = len(reader.pages)
+    except RenditionError:
+        raise
+    except (PdfReadError, ValueError, OSError, KeyError) as exc:
+        raise RenditionError(
+            "That PDF could not be read - it looks damaged or incomplete. "
+            "Try re-saving or re-exporting it and uploading again."
+        ) from exc
+
+    if page_count < 1:
+        raise RenditionError(
+            "That PDF has no pages in it. Check the file and upload again."
+        )
+    return page_count
+
+
+def convert_to_pdf(data: bytes, *, filename: str) -> bytes:
+    """Render an office file to PDF bytes via LibreOffice.
+
+    Mirrors convert_doc()'s sandboxing exactly, for the same reasons:
+
+      * soffice runs from a temp directory that is NEVER the one holding the
+        untrusted file, which could otherwise contain a startup script or a
+        macro auto-exec artefact;
+      * a private `-env:UserInstallation` profile per run, because
+        LibreOffice takes a lock on its single shared profile and two workers
+        converting at once will race - the loser either hangs to the timeout
+        or exits 0 having produced nothing;
+      * a hard timeout, and cleanup on every path including failure.
+    """
+    if len(data) > MAX_RENDITION_BYTES:
+        raise RenditionError(
+            f"That file is {len(data) // (1024 * 1024)} MB. The limit for "
+            f"preparing a review copy is "
+            f"{MAX_RENDITION_BYTES // (1024 * 1024)} MB."
+        )
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        # Loud, not silent: a missing binary is an operator problem, and a
+        # document that silently never becomes reviewable is worse than one
+        # that says why.
+        raise RenditionError(
+            "Preparing a review copy of this file requires LibreOffice to be "
+            "installed on the server. The missing binary is: soffice"
+        )
+
+    tmp = tempfile.mkdtemp(prefix="docflow_rendition_")
+    try:
+        safe_name = Path(filename or "upload").name or "upload"
+        src = Path(tmp) / safe_name
+        src.write_bytes(data)
+
+        work_dir = tempfile.mkdtemp(prefix="docflow_soffice_pdf_")
+        try:
+            result = subprocess.run(
+                [
+                    soffice,
+                    f"-env:UserInstallation=file://{Path(work_dir).as_posix()}/profile",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", tmp,
+                    str(src),
+                ],
+                capture_output=True,
+                # Longer than the .doc parse path: this renders every page,
+                # and a long document with images is legitimately slow.
+                timeout=180,
+                cwd=work_dir,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RenditionError(
+                "Preparing a review copy of that file took too long "
+                "(180 s limit). It may be very large or very complex."
+            ) from exc
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        if result.returncode != 0:
+            raise RenditionError(
+                f"LibreOffice could not prepare a review copy of that file "
+                f"(exit {result.returncode})."
+            )
+
+        out = Path(tmp) / (Path(safe_name).stem + ".pdf")
+        if not out.exists():
+            candidates = list(Path(tmp).glob("*.pdf"))
+            if not candidates:
+                # soffice exits 0 on some failures, so a zero exit code is
+                # not proof that anything was produced.
+                raise RenditionError(
+                    "LibreOffice ran but produced no review copy."
+                )
+            out = candidates[0]
+        pdf_bytes = out.read_bytes()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if not pdf_bytes.startswith(b"%PDF"):
+        raise RenditionError(
+            "The review copy that was produced is not a valid PDF."
+        )
+    return pdf_bytes

@@ -24,6 +24,9 @@ celery_app = Celery(
         "app.workers.pdf_tasks",
         "app.workers.reminder_tasks",
         "app.workers.import_tasks",
+        "app.workers.outbox_tasks",
+        "app.workers.rendition_tasks",
+        "app.workers.summary_tasks",
     ],
 )
 
@@ -42,6 +45,12 @@ celery_app.conf.update(
         "app.workers.notification_tasks.*": {"queue": "default"},
         "app.workers.sla_tasks.*": {"queue": "default"},
         "app.workers.cleanup_tasks.*": {"queue": "default"},
+        "app.workers.outbox_tasks.*": {"queue": "default"},
+        # Rendition launches an office suite per job; it belongs with the
+        # other heavyweight work, not on the queue that carries
+        # notifications and SLA ticks.
+        "app.workers.rendition_tasks.*": {"queue": "ai"},
+        "app.workers.summary_tasks.*": {"queue": "ai"},
     },
     # Reliability
     task_acks_late=True,              # ack after task completes (survive worker crash)
@@ -56,10 +65,40 @@ celery_app.conf.update(
 
 # ── Celery Beat Schedule ──────────────────────────────────────────────────────
 celery_app.conf.beat_schedule = {
-    # SLA checker — every 15 minutes
+    # Transactional outbox drain (X-NOT-01, P2-8) — every minute.
+    #
+    # Each request drains what it queued as soon as it commits, so this is
+    # not the normal delivery path: it is the one that makes delivery
+    # durable. A process that dies between commit and drain leaves pending
+    # rows, and this is what picks them up.
+    "drain-outbox": {
+        "task": "app.workers.outbox_tasks.drain_outbox",
+        "schedule": crontab(minute="*"),
+        "options": {"queue": "default"},
+    },
+    # Stuck-rendition sweep (section 6.4.1, task P3-3) — every 5 minutes.
+    #
+    # A safety net, not the normal path: a rendition is enqueued when the
+    # version is uploaded. This catches the enqueue that never reached the
+    # broker and the worker that died mid-convert, so a document cannot sit
+    # in "preparing your review copy" for ever. Deliberately infrequent and
+    # small-batch, because each item is an office-suite launch.
+    "sweep-renditions": {
+        "task": "app.workers.rendition_tasks.sweep_renditions",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "ai"},
+    },
+    # SLA checker — every minute (AP-SLA-01, task P2-16).
+    #
+    # Was every 15 minutes, which cannot deliver the "75% elapsed" and
+    # "due now" reminders on time: a 4-hour stage's 75% mark is a 15-minute
+    # window, so a reminder could arrive after the deadline it warns about.
+    # The sweep queries only active, unpaused stages against the
+    # (resolved_approver_id, status, due_at) index, and is idempotent
+    # (X-INT-07), so a tick that overlaps the previous one is harmless.
     "check-sla-breaches": {
         "task": "app.workers.sla_tasks.check_sla_breaches",
-        "schedule": crontab(minute="*/15"),
+        "schedule": crontab(minute="*"),
         "options": {"queue": "default"},
     },
     # Retention policy cleanup — daily at 3am UTC

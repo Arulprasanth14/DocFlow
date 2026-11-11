@@ -1005,12 +1005,27 @@ class TemplateService:
         """
         from sqlalchemy import or_
 
-        from app.models.workflow import ApprovalStep, WorkflowInstance
+        from app.models.workflow import (
+            ApprovalStep,
+            WorkflowInstance,
+            WorkflowStage,
+        )
 
         existing = list(tmpl.stages or [])
         if existing:
             ids = [st.id for st in existing]
-            referenced = set(
+
+            # A run in flight needs the stages it has NOT REACHED YET just as
+            # much as the ones it has already passed: those are the rest of
+            # the route it is pinned to (DM-02). Keying "keep this row" off
+            # existing references alone hard-deleted every future stage of a
+            # live run, so after an edit the run had nowhere left to advance
+            # to and took the completion branch instead — approving the
+            # document. So if ANY non-terminal run exists on this template,
+            # every current stage row is retired rather than deleted.
+            has_live_run = await self._in_flight_run_count(tmpl.id) > 0
+
+            referenced = set(ids) if has_live_run else set(
                 (
                     await self.db.execute(
                         select(ApprovalStep.stage_id).where(
@@ -1028,11 +1043,39 @@ class TemplateService:
                     )
                 ).scalars().all()
             )
+            # `uq_stage_template_order` is UNIQUE (template_id,
+            # sequence_order) and is NOT partial, so it still counts
+            # soft-deleted rows. A retired stage therefore keeps its slot
+            # occupied and the replacement stage at the same position
+            # violates it — which made saving an edit to a workflow with ANY
+            # in-flight run fail outright. Retired rows are parked on
+            # negative orders, below every order the template has ever used.
+            #
+            # Safe because nothing routes by a retired row's own
+            # sequence_order: the pinned path orders by the snapshot's copied
+            # order or by stage_instances.position, and list_for_template()
+            # filters retired rows out entirely.
+            min_order = (
+                await self.db.execute(
+                    select(func.min(WorkflowStage.sequence_order)).where(
+                        WorkflowStage.template_id == tmpl.id
+                    )
+                )
+            ).scalar()
+            park_at = min(0, min_order if min_order is not None else 0) - 1
+
+            now = datetime.now(timezone.utc)
             for stage in existing:
                 if stage.id in referenced:
-                    # Keep it for history; take it out of the live definition
-                    # by soft-deleting, which list_for_template() filters on.
-                    stage.deleted_at = datetime.now(timezone.utc)
+                    # Keep it for history; take it out of the live
+                    # definition by soft-deleting. The repository filters
+                    # `deleted_at` out of both list_for_template() and the
+                    # get_by_id() eager load, so a retired row stops being
+                    # part of the live definition while remaining available
+                    # by id for any run still pinned to it (task P2-2).
+                    stage.deleted_at = now
+                    stage.sequence_order = park_at
+                    park_at -= 1
                 else:
                     await self.db.delete(stage)
             await self.db.flush()

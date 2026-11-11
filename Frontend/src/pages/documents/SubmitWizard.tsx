@@ -17,11 +17,16 @@ import { useDocument, useSubmitDocument, useDocumentContent, useDocumentFillSche
 // itself must stay eager — it is reachable from the documents list.
 const DocumentPreview = lazy(() =>
   import('@/components/editor/DocumentPreview').then((m) => ({ default: m.DocumentPreview })));
-import { useWorkflowTemplates, useWorkflowTemplateReview } from '@/hooks/useWorkflows';
+import {
+  useWorkflowTemplateReview,
+  useWorkflowsByScope,
+  useWorkflowPreflight,
+} from '@/hooks/useWorkflows';
 import { AIReviewPanel } from '@/components/ai/AIReviewPanel';
 import { useAIAvailability, useAIReview, useAIDecision } from '@/hooks/useAI';
 import { useAutosave } from '@/hooks/useAutosave';
 import type { UpdateDocumentPayload } from '@/lib/api/documents';
+import type { WorkflowTemplateSummary } from '@/lib/api/workflows';
 import { AISuggestDetails } from '@/components/documents/AISuggestDetails';
 import { ContentMiniature } from '@/components/documents/ContentMiniature';
 import { AttachmentsField } from '@/components/documents/AttachmentsField';
@@ -73,7 +78,18 @@ export default function SubmitWizard() {
   const { data: body } = useDocumentContent(id);
   const { data: fillSchema } = useDocumentFillSchema(id);
   const submitDoc = useSubmitDocument();
-  const { data: templates = [], isLoading: templatesLoading } = useWorkflowTemplates({ active_only: true });
+  // WF-OWN-09: mine and shared-with-me are different things, and which is
+  // which matters when choosing. `activeOnly: false` on purpose - an
+  // unusable workflow is SHOWN and disabled with its reason (WF-SEL-08),
+  // not hidden, so a submitter looking for one they know exists can see why
+  // they cannot use it.
+  const mineQ = useWorkflowsByScope('mine', { activeOnly: false });
+  const sharedQ = useWorkflowsByScope('shared', { activeOnly: false });
+  const templatesLoading = mineQ.isLoading || sharedQ.isLoading;
+  const templates = useMemo(
+    () => [...(mineQ.data ?? []), ...(sharedQ.data ?? [])],
+    [mineQ.data, sharedQ.data],
+  );
 
   const [step, setStep] = useState(0);
   const [maxReached, setMaxReached] = useState(0);
@@ -111,7 +127,32 @@ export default function SubmitWizard() {
       : `${id}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   );
 
+  // WF-OWN-09 / WF-SEL-08. SearchableSelect has no group headers, so the
+  // grouping is carried by order (mine first) and by the hint line, which is
+  // also what the search box matches on — so typing "shared" finds the
+  // shared ones. An unusable workflow stays in the list and is disabled with
+  // its reason, rather than silently absent.
+  const workflowOptions = useMemo(() => {
+    const toOption = (t: WorkflowTemplateSummary, group: 'Mine' | 'Shared with me') => {
+      const reason = !t.is_active ? 'inactive — ask the owner to re-enable it' : null;
+      return {
+        value: t.id,
+        label: t.name,
+        hint: [group, `Version ${t.version}`, reason].filter(Boolean).join(' · '),
+        disabled: !!reason,
+      };
+    };
+    return [
+      ...(mineQ.data ?? []).map((t) => toOption(t, 'Mine')),
+      ...(sharedQ.data ?? []).map((t) => toOption(t, 'Shared with me')),
+    ];
+  }, [mineQ.data, sharedQ.data]);
+
   const { data: review, isLoading: reviewLoading } = useWorkflowTemplateReview(templateId || undefined);
+  // WF-SEL-06 — resolve the chain for THIS submitter. The submit endpoint
+  // re-runs the same check (WF-SUB-02), so this is an early warning, never
+  // the authority.
+  const preflightQ = useWorkflowPreflight(templateId || undefined);
 
   const metadataBase = useMemo(() => (doc?.metadata ?? {}) as Record<string, unknown>, [doc?.metadata]);
 
@@ -439,25 +480,62 @@ export default function SubmitWizard() {
                 <label style={labelStyle} htmlFor="wiz-workflow">Workflow <span style={{ color: 'var(--status-rejected)' }}>*</span></label>
                 {/* FR-13.2 — searchable. A native select is unusable once an
                     org has more than a handful of workflows, which is the
-                    normal case for the orgs this is built for. */}
+                    normal case for the orgs this is built for.
+
+                    WF-OWN-09 — grouped into mine and shared-with-me.
+                    WF-SEL-08 — an unusable workflow is listed and disabled
+                    with its reason, rather than quietly missing: a submitter
+                    hunting for one they know exists needs to see why it is
+                    not available. */}
                 <SearchableSelect
                   id="wiz-workflow"
                   value={templateId}
                   onChange={(next) => {
                     setTemplateId(next); setConfirmed(false); setBlockers([]); setWarnings([]);
                   }}
-                  options={templates.map((t) => ({
-                    value: t.id,
-                    label: t.name,
-                    // The summary carries no description, so the second
-                    // line says the thing that actually distinguishes two
-                    // similarly-named workflows.
-                    hint: `Version ${t.version}${t.is_active ? '' : ' · inactive'}`,
-                  }))}
+                  options={workflowOptions}
                   placeholder="Search workflows by name"
                   emptyText="No workflow matches that search"
                   required
                 />
+
+                {/* WF-SEL-06 / E1 / E2 — what would actually happen if this
+                    person submitted through this workflow. The static check
+                    in document_validation.py inspects the approver RULES, so
+                    it passes a "submitter's manager" rule without knowing
+                    that THIS submitter has no manager on record. Without
+                    this panel the run was created with no approval steps at
+                    all: the document sat in PENDING, nobody was notified,
+                    and nobody could act on it. */}
+                {templateId && preflightQ.data && !preflightQ.data.can_submit && (
+                  <div
+                    role="alert"
+                    style={{
+                      marginTop: 16, padding: '12px 14px',
+                      borderRadius: 'var(--radius)',
+                      background: 'var(--status-rejected-bg)',
+                      border: '1px solid color-mix(in srgb, var(--status-rejected) 28%, transparent)',
+                      color: 'var(--status-rejected)', fontSize: '0.85rem',
+                    }}
+                  >
+                    <strong style={{ display: 'block', marginBottom: 6 }}>
+                      This workflow cannot be used for this document yet
+                    </strong>
+                    <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
+                      {preflightQ.data.blockers.map((b) => <li key={b}>{b}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {templateId && (preflightQ.data?.warnings.length ?? 0) > 0 && (
+                  <div style={{
+                    marginTop: 12, padding: '10px 14px',
+                    borderRadius: 'var(--radius)',
+                    background: 'var(--status-pending-bg)',
+                    color: 'var(--status-pending)', fontSize: '0.83rem',
+                  }}>
+                    {preflightQ.data!.warnings.map((w) => <div key={w}>{w}</div>)}
+                  </div>
+                )}
 
                 {templateId && (
                   <div style={{ marginTop: 16 }}>
@@ -465,22 +543,58 @@ export default function SubmitWizard() {
                         control, and announcing it as a label pointed
                         screen-reader users at nothing. */}
                     <span style={labelStyle}>Approval sequence</span>
-                    {reviewLoading ? <p style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)' }}>Loading approvers…</p> : review ? (
+                    {/* Prefers preflight's resolved names over /review's
+                        generic description ("Submitter's manager"), because
+                        a name is what the submitter can actually check
+                        (WF-SEL-04). Falls back to /review while preflight is
+                        in flight or if it fails. */}
+                    {reviewLoading && !preflightQ.data ? (
+                      <p style={{ fontSize: '0.85rem', color: 'var(--muted-foreground)' }}>Loading approvers…</p>
+                    ) : (preflightQ.data?.stages.length ?? 0) > 0 ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {review.stages.map((s, i) => (
-                          <div key={i} style={{ display: 'flex', gap: 10, padding: '10px 12px', borderRadius: 'var(--radius)', background: 'var(--muted)', border: '1px solid var(--border)' }}>
-                            <span style={{ flexShrink: 0, width: 22, height: 22, borderRadius: '50%', background: 'var(--primary)', color: 'var(--primary-foreground)', fontSize: '0.75rem', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{i + 1}</span>
+                        {preflightQ.data!.stages.map((s) => (
+                          <div
+                            key={s.stage_id}
+                            style={{
+                              display: 'flex', gap: 10, padding: '10px 12px',
+                              borderRadius: 'var(--radius)',
+                              background: 'var(--muted)',
+                              border: s.blocker
+                                ? '1px solid color-mix(in srgb, var(--status-rejected) 45%, transparent)'
+                                : '1px solid var(--border)',
+                            }}
+                          >
+                            <span style={{
+                              flexShrink: 0, width: 22, height: 22, borderRadius: '50%',
+                              background: s.blocker ? 'var(--status-rejected)' : 'var(--primary)',
+                              color: 'var(--primary-foreground)', fontSize: '0.75rem',
+                              fontWeight: 700, display: 'flex', alignItems: 'center',
+                              justifyContent: 'center',
+                            }}>{s.position}</span>
                             <div style={{ flex: 1 }}>
                               <div style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--foreground)' }}>{s.name}</div>
-                              <div style={{ fontSize: '0.8rem', color: 'var(--muted-foreground)' }}>Approver: {s.approver_summary}</div>
+                              <div style={{
+                                fontSize: '0.8rem',
+                                color: s.blocker ? 'var(--status-rejected)' : 'var(--muted-foreground)',
+                              }}>
+                                {s.blocker ? s.blocker : `Approver: ${s.approver_summary}`}
+                              </div>
                               <div style={{ fontSize: '0.75rem', color: 'var(--muted-foreground)', marginTop: 2 }}>
-                                {s.sla_hours ? `SLA: ${s.sla_hours}h` : 'No SLA set'}{s.requires_signature ? ' · Requires e-signature' : ''}
+                                {s.sla_hours ? `Due within ${s.sla_hours}h` : 'No deadline set'}
+                                {/* WF-STG-21: said here so a signature
+                                    requirement forced on by the resolved
+                                    approver's department does not appear out
+                                    of nowhere at the approval screen. */}
+                                {s.requires_signature
+                                  ? ` · Requires e-signature${s.signing_reason ? ` (${s.signing_reason})` : ''}`
+                                  : ''}
                               </div>
                             </div>
                           </div>
                         ))}
-                        {review.stages.length === 0 && <div style={{ fontSize: '0.85rem', color: 'var(--status-pending)' }}>This workflow has no stages configured.</div>}
                       </div>
+                    ) : review && review.stages.length === 0 ? (
+                      <div style={{ fontSize: '0.85rem', color: 'var(--status-pending)' }}>This workflow has no stages configured.</div>
                     ) : null}
                   </div>
                 )}

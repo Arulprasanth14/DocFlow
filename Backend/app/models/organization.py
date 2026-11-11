@@ -41,6 +41,14 @@ class Organization(BaseModel):
     branding_primary_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
     branding_accent_color: Mapped[str | None] = mapped_column(String(20), nullable=True)
     notification_defaults: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # AP-SUM-10 / E29: this organization's switch for AI document summaries.
+    # Defaults true so behaviour does not change silently for anyone already
+    # using the module; an org that wants it off sets it off. When false, the
+    # summary panel reports 'unavailable' and no document text is ever sent
+    # to a model provider.
+    ai_summaries_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true"),
+    )
 
     # Relationships
     departments: Mapped[list["Department"]] = relationship(

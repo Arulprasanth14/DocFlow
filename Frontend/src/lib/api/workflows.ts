@@ -63,6 +63,10 @@ export interface ReviseAndResumePayload {
   new_version_id: string;
   /** Note explaining what was changed. */
   note?: string;
+  /** WF-REV-11: resubmit a file identical to the one sent back, knowingly. */
+  confirm_identical?: boolean;
+  /** WF-REV-10: the owner confirms they have addressed open comments. */
+  addressed_confirmed?: boolean;
 }
 
 export interface CancelWorkflowPayload {
@@ -302,7 +306,43 @@ export interface WorkflowShareResult {
 /** WF-LIST-01 tabs. */
 export type WorkflowScope = 'all' | 'mine' | 'shared';
 
+export interface PreflightStage {
+  position: number;
+  stage_id: string;
+  name: string;
+  approver_ids: string[];
+  approver_names: string[];
+  approver_summary: string;
+  requires_signature: boolean;
+  signing_reason: string | null;
+  sla_hours: number | null;
+  /** Set only on the stage that is the problem, so the UI can mark that
+   *  stage rather than print one message for the whole workflow. */
+  blocker: string | null;
+}
+
+/** WF-SUB-02 / WF-SEL-06 — can THIS person submit through this workflow? */
+export interface PreflightResult {
+  template_id: string;
+  workflow_name: string;
+  can_submit: boolean;
+  blockers: string[];
+  warnings: string[];
+  stages: PreflightStage[];
+}
+
 export const workflowSharingApi = {
+  /**
+   * POST /workflow-templates/{id}/preflight — resolve every stage for the
+   * caller. Distinct from /review, which describes the workflow in general:
+   * this answers who would actually approve and what stops this person
+   * submitting at all (E1, E2).
+   */
+  preflight: (templateId: string) =>
+    apiClient.post<PreflightResult>(
+      `/workflow-templates/${templateId}/preflight`,
+    ),
+
   /** GET /workflow-templates?scope= — My Workflows / Shared with me. */
   list: (scope: WorkflowScope, filters?: WorkflowTemplateFilters) =>
     apiClient.get<WorkflowTemplateSummary[]>('/workflow-templates', {
