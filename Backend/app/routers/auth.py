@@ -20,11 +20,24 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Cookie, Request, Response
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.core.exceptions import UnauthorizedException
+from app.core.exceptions import (
+    ForbiddenException,
+    GoneException,
+    UnauthorizedException,
+)
+from app.core.security import decode_token
+from app.core.rate_limit import (
+    limit_firebase_login,
+    limit_login,
+    limit_refresh,
+    limit_register,
+    note_login_failure,
+    note_login_success,
+)
 from app.dependencies import CurrentUser, DatabaseDep
 from app.schemas.auth import (
     ChangePasswordRequest,
@@ -66,9 +79,48 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=_REFRESH_COOKIE, path="/api/v1/auth")
 
 
+def _assert_same_origin(request: Request) -> None:
+    """Reject a cookie-authenticated request that declares a foreign origin.
+
+    A missing Origin/Referer is allowed: non-browser callers (curl, the test
+    client, server-side agents) do not send one, and rejecting those would
+    break them for no security gain - a browser always sends Origin on a
+    cross-site POST, which is the case this is here to stop.
+    """
+    origin = request.headers.get("Origin") or request.headers.get("Referer")
+    if not origin:
+        return
+    allowed = {o.rstrip("/") for o in settings.CORS_ORIGINS}
+    allowed.add(settings.FRONTEND_URL.rstrip("/"))
+    if any(origin.rstrip("/").startswith(candidate) for candidate in allowed if candidate):
+        return
+    logger.warning("auth_refresh_foreign_origin", origin=origin)
+    raise ForbiddenException("Request origin is not allowed", code="FORBIDDEN")
+
+
+def _assert_legacy_password_auth_enabled() -> None:
+    """The bcrypt endpoints are a second, weaker identity system.
+
+    No DocFlow client calls them - the web app signs in through Firebase and
+    exchanges the ID token - so they are disabled by default and answer 410.
+    One release at 410, then the routes and the bcrypt code go. Set
+    LEGACY_PASSWORD_AUTH_ENABLED=true to re-enable them deliberately.
+    """
+    if not settings.LEGACY_PASSWORD_AUTH_ENABLED:
+        raise GoneException(
+            "Password sign-in has been removed. Sign in with Google, "
+            "Microsoft or your email through the normal sign-in screen.",
+            code="ENDPOINT_GONE",
+        )
+
+
 # ── Firebase Login (Google / Microsoft / Firebase Email) ──────────────────────
 
-@router.post("/firebase-login", response_model=LoginResponse)
+@router.post(
+    "/firebase-login",
+    response_model=LoginResponse,
+    dependencies=[Depends(limit_firebase_login)],
+)
 async def firebase_login(
     body: FirebaseLoginRequest,
     request: Request,
@@ -86,6 +138,7 @@ async def firebase_login(
         id_token=body.id_token,
         device_info=body.device_info.model_dump() if body.device_info else None,
         ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("User-Agent"),
     )
 
     # Set refresh token in HttpOnly cookie
@@ -102,7 +155,11 @@ async def firebase_login(
 
 # ── Direct Email/Password Login ───────────────────────────────────────────────
 
-@router.post("/login", response_model=LoginResponse)
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    dependencies=[Depends(limit_login)],
+)
 async def email_login(
     body: EmailLoginRequest,
     request: Request,
@@ -115,13 +172,22 @@ async def email_login(
     """
     from app.core.security import create_refresh_token, decode_token
 
+    _assert_legacy_password_auth_enabled()
+
     svc = AuthService(db)
-    result = await svc.email_login(
-        email=body.email,
-        password=body.password,
-        device_info=body.device_info.model_dump() if body.device_info else None,
-        ip_address=request.client.host if request.client else None,
-    )
+    try:
+        result = await svc.email_login(
+            email=body.email,
+            password=body.password,
+            device_info=body.device_info.model_dump() if body.device_info else None,
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("User-Agent"),
+        )
+    except (UnauthorizedException, ForbiddenException):
+        # Only failures consume the guessing allowance (see core/rate_limit).
+        await note_login_failure(request, body.email)
+        raise
+    await note_login_success(body.email)
 
     payload = decode_token(result.access_token)
     session_id = payload["jti"]
@@ -133,7 +199,12 @@ async def email_login(
 
 # ── Register ──────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/register",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(limit_register)],
+)
 async def register(
     body: RegisterRequest,
     request: Request,
@@ -146,6 +217,8 @@ async def register(
     """
     from app.core.security import create_refresh_token, decode_token
 
+    _assert_legacy_password_auth_enabled()
+
     svc = AuthService(db)
     result = await svc.register(
         email=body.email,
@@ -154,6 +227,7 @@ async def register(
         org_name=body.org_name,
         device_info=body.device_info.model_dump() if body.device_info else None,
         ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("User-Agent"),
     )
 
     payload = decode_token(result.access_token)
@@ -166,35 +240,69 @@ async def register(
 
 # ── Token Refresh ─────────────────────────────────────────────────────────────
 
-@router.post("/refresh", response_model=TokenRefreshResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenRefreshResponse,
+    dependencies=[Depends(limit_refresh)],
+)
 async def refresh_token(
+    request: Request,
+    response: Response,
     db: DatabaseDep,
     docflow_refresh: str | None = Cookie(default=None, alias=_REFRESH_COOKIE),
 ) -> TokenRefreshResponse:
     """
     Refresh access token using the HttpOnly refresh cookie.
     Called automatically by the frontend API client on 401.
+
+    This is the one endpoint that authenticates on a cookie alone, so it is
+    also the one a cross-site page could try to drive. SameSite=Strict already
+    stops the browser sending the cookie from another site; the Origin check
+    below is the belt to that braces, and costs nothing.
     """
     if not docflow_refresh:
         raise UnauthorizedException("No refresh token cookie present")
 
+    _assert_same_origin(request)
+
     svc = AuthService(db)
-    return await svc.refresh_token(docflow_refresh)
+    result, new_refresh = await svc.refresh_token(
+        docflow_refresh,
+        ip_address=request.client.host if request.client else None,
+    )
+    if new_refresh:
+        # Rotation is on: the old cookie is already dead, so the browser must
+        # be handed the successor in the same response.
+        _set_refresh_cookie(response, new_refresh)
+    return result
 
 
 # ── Logout ────────────────────────────────────────────────────────────────────
 
-@router.post("/logout", response_model=MessageResponse)
-async def logout(
-    response: Response,
-    current_user: CurrentUser,
-    db: DatabaseDep,
-) -> MessageResponse:
-    """Revoke current session. Clears the refresh cookie."""
+@router.post("/logout", status_code=204)
+async def logout(request: Request, response: Response, db: DatabaseDep) -> Response:
+    """Revoke the session the presented token names. Clears the cookie.
+
+    Idempotent, and deliberately NOT behind `CurrentUser`: signing out twice,
+    or signing out with a token whose session an administrator already
+    revoked, used to answer 401 - which the frontend then reported as an error
+    on the way out of the door. Logging out is always allowed to succeed.
+    204 regardless of whether there was anything left to revoke.
+    """
     svc = AuthService(db)
-    await svc.logout(current_user.session_id)
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            payload = decode_token(auth_header[7:], expected_type="access")
+            session_id = payload.get("jti", "")
+            if session_id:
+                await svc.logout(session_id)
+        except UnauthorizedException:
+            # Expired or already-dead token: nothing to revoke, still a
+            # successful logout from the caller's point of view.
+            pass
     _clear_refresh_cookie(response)
-    return MessageResponse(message="Logged out successfully")
+    return Response(status_code=204, headers=dict(response.headers))
 
 
 @router.post("/logout-all", response_model=MessageResponse)

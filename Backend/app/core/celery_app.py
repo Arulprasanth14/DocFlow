@@ -101,6 +101,12 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute="*"),
         "options": {"queue": "default"},
     },
+    # Expired-session purge — daily at 03:40 UTC, after the retention pass.
+    "purge-expired-sessions": {
+        "task": "app.workers.cleanup_tasks.purge_expired_sessions",
+        "schedule": crontab(hour=3, minute=40),
+        "options": {"queue": "default"},
+    },
     # Retention policy cleanup — daily at 3am UTC
     "cleanup-expired-documents": {
         "task": "app.workers.cleanup_tasks.cleanup_expired_documents",

@@ -11,8 +11,21 @@ from fastapi import HTTPException, status
 
 
 class DocFlowException(HTTPException):
-    """Base class for all DocFlow HTTP exceptions."""
-    def __init__(self, detail: str, **kwargs):
+    """Base class for all DocFlow HTTP exceptions.
+
+    `code` is an optional machine-readable error code (e.g.
+    ACCOUNT_DEACTIVATED, SESSION_REVOKED). The frontend reacts differently to
+    those two than to a plain 401/403 - it must not retry, and it must show
+    "your access was changed" rather than "session expired" - and a prose
+    detail string cannot carry that distinction. Omitted everywhere it is not
+    needed, and the response body only grows a `code` field when it is set.
+    """
+
+    #: Default for subclasses whose own __init__ does not take a code.
+    code: str | None = None
+
+    def __init__(self, detail: str, *, code: str | None = None, **kwargs):
+        self.code = code
         super().__init__(status_code=self.status_code, detail=detail, **kwargs)
 
 
@@ -31,16 +44,21 @@ class UnauthorizedException(DocFlowException):
     """401 — Not authenticated."""
     status_code = status.HTTP_401_UNAUTHORIZED
 
-    def __init__(self, detail: str = "Authentication required"):
-        super().__init__(detail=detail, headers={"WWW-Authenticate": "Bearer"})
+    def __init__(self, detail: str = "Authentication required", *, code: str | None = None):
+        super().__init__(detail=detail, code=code, headers={"WWW-Authenticate": "Bearer"})
 
 
 class ForbiddenException(DocFlowException):
     """403 — Authenticated but not permitted."""
     status_code = status.HTTP_403_FORBIDDEN
 
-    def __init__(self, detail: str = "You do not have permission to perform this action"):
-        super().__init__(detail=detail)
+    def __init__(
+        self,
+        detail: str = "You do not have permission to perform this action",
+        *,
+        code: str | None = None,
+    ):
+        super().__init__(detail=detail, code=code)
 
 
 class ConflictException(DocFlowException):
@@ -97,20 +115,40 @@ class FieldValidationException(ValidationException):
         super().__init__(detail=detail)
 
 
+class GoneException(DocFlowException):
+    """410 — the endpoint existed and has been removed.
+
+    Distinct from 404 on purpose: a client calling a deprecated endpoint needs
+    to know it is gone for good, not that it might be a typo.
+    """
+    status_code = status.HTTP_410_GONE
+
+    def __init__(self, detail: str = "This endpoint has been removed", *, code: str | None = None):
+        super().__init__(detail=detail, code=code)
+
+
 class RateLimitException(DocFlowException):
     """429 — Rate limit exceeded."""
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
 
-    def __init__(self, detail: str = "Rate limit exceeded. Please slow down."):
-        super().__init__(detail=detail)
+    def __init__(
+        self,
+        detail: str = "Rate limit exceeded. Please slow down.",
+        *,
+        code: str | None = None,
+        headers: dict[str, str] | None = None,
+    ):
+        # `headers` carries Retry-After: the client is told how long to wait
+        # rather than being left to guess or hammer.
+        super().__init__(detail=detail, code=code, headers=headers)
 
 
 class ServiceUnavailableException(DocFlowException):
     """503 — External dependency unavailable."""
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
-    def __init__(self, service: str = "Service"):
-        super().__init__(detail=f"{service} is temporarily unavailable")
+    def __init__(self, service: str = "Service", *, code: str | None = None):
+        super().__init__(detail=f"{service} is temporarily unavailable", code=code)
 
 
 class WorkflowException(ConflictException):

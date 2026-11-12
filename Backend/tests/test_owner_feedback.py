@@ -41,7 +41,7 @@ from app.services.annotation_service import AnnotationService
 
 def _as(user, org, *roles) -> AuthUser:
     return AuthUser(
-        id=user.id, email=user.email, org_id=org.id, roles=list(roles) or ["worker"],
+        id=user.id, org_id=org.id, roles=list(roles) or ["worker"],
         permissions=[],
     )
 

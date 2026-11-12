@@ -142,7 +142,7 @@ class AgentService:
         actions unless a future requirement explicitly changes the
         permission model." HR is explicitly excluded by default (§2.5).
         """
-        if user.is_superadmin or "admin" in user.roles:
+        if user.is_org_admin():
             return
         raise ForbiddenException(
             "Only the Main Administrator can manage the Agent's legal "

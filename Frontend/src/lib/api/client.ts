@@ -24,6 +24,8 @@ export class ApiClientError extends Error {
   readonly status: number;
   readonly detail: string;
   readonly requestId?: string;
+  /** Backend error code, when it set one (e.g. SESSION_REVOKED). */
+  readonly code?: string;
   /**
    * Per-field breakdown of a 422, when the server could attribute the
    * failure. Empty for every other error, so callers can check `.length`
@@ -31,13 +33,50 @@ export class ApiClientError extends Error {
    */
   readonly fields: FieldProblem[];
 
-  constructor(status: number, detail: string, requestId?: string, fields?: FieldProblem[]) {
+  constructor(
+    status: number,
+    detail: string,
+    requestId?: string,
+    fields?: FieldProblem[],
+    code?: string,
+  ) {
     super(detail);
     this.name = 'ApiClientError';
     this.status = status;
     this.detail = detail;
     this.requestId = requestId;
     this.fields = fields ?? [];
+    this.code = code;
+  }
+}
+
+/**
+ * An administrator changed this account while the user was signed in:
+ * deactivated or suspended it, changed their role, or removed them from the
+ * organization. All of those revoke the session server-side, so there is
+ * nothing to retry — refreshing would fail too. Sign out and say why.
+ */
+export const ACCESS_CHANGED_MESSAGE =
+  'Your access was changed by an administrator. Please sign in again.';
+
+/** Codes that mean "stop, sign out" rather than "try refreshing". */
+const ACCESS_CHANGED_CODES = new Set([
+  'SESSION_REVOKED',
+  'ACCOUNT_DEACTIVATED',
+  'ACCOUNT_SUSPENDED',
+]);
+
+/**
+ * Read the error code out of a response without consuming the body the
+ * caller still needs — hence the clone. Returns null for any non-JSON or
+ * unreadable body, so this can never turn a normal error into a crash.
+ */
+async function peekErrorCode(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.clone().json()) as ApiError;
+    return body?.code ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -105,7 +144,27 @@ async function request<T = unknown>(
     credentials: 'include',
   });
 
+  // An administrator changed this account: the session is already revoked
+  // server-side, so refreshing cannot help. Sign out cleanly, no retry loop.
+  // Checked for 401 AND 403, because deactivation surfaces as either
+  // depending on whether the session or the account state failed first.
+  if ((response.status === 401 || response.status === 403) && !skipAuth) {
+    const code = await peekErrorCode(response);
+    if (code && ACCESS_CHANGED_CODES.has(code)) {
+      await triggerFirebaseSignOut();
+      throw new ApiClientError(
+        response.status,
+        ACCESS_CHANGED_MESSAGE,
+        response.headers.get('X-Request-ID') ?? undefined,
+        undefined,
+        code,
+      );
+    }
+  }
+
   // Handle 401 — try refreshing the DocFlow access token once, then give up
+  // (a 503 never reaches here, so an auth-provider outage never signs anyone
+  // out — see ProtectedRoute's retry screen).
   if (response.status === 401 && !skipAuth && !_isRetry) {
     const newToken = await tryRefreshDocFlowToken();
     if (newToken) {
@@ -136,7 +195,13 @@ async function parseResponse<T>(response: Response): Promise<T> {
     } catch {
       errorData = { error: response.statusText, status_code: response.status };
     }
-    throw new ApiClientError(response.status, errorData.error, requestId, errorData.fields);
+    throw new ApiClientError(
+      response.status,
+      errorData.error,
+      requestId,
+      errorData.fields,
+      errorData.code,
+    );
   }
 
   if (response.status === 204 || response.headers.get('content-length') === '0') {
@@ -153,15 +218,48 @@ async function parseResponse<T>(response: Response): Promise<T> {
  * re-fetching a Firebase token would just produce another token the backend
  * can't verify (see AuthContext.handleUserSignedIn for the initial exchange).
  * Returns the new access token string on success, null on failure.
+ *
+ * SHARED: every caller that hits a 401 at the same moment awaits the same
+ * promise. Without this, a page that fires five requests in parallel sends
+ * five refreshes — harmless while refresh tokens are static, but once
+ * rotation is enabled the second one presents an already-rotated token, which
+ * is indistinguishable from a stolen cookie being replayed and revokes the
+ * whole session family. One in-flight refresh is what keeps that from
+ * happening.
  */
+let _inFlightRefresh: Promise<string | null> | null = null;
+
 async function tryRefreshDocFlowToken(): Promise<string | null> {
+  if (_inFlightRefresh) return _inFlightRefresh;
+  _inFlightRefresh = performRefresh().finally(() => {
+    _inFlightRefresh = null;
+  });
+  return _inFlightRefresh;
+}
+
+const RETRY_REFRESH_DELAY_MS = 150;
+
+async function performRefresh(attempt = 0): Promise<string | null> {
   try {
     const response = await fetch(`${BASE_URL}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
     });
-    if (!response.ok) return null;
+
+    if (!response.ok) {
+      // RETRY_REFRESH means another tab rotated the token a moment ago and
+      // the successor cookie is already in this browser: retry once rather
+      // than treating it as a dead session. Only once — a loop here would be
+      // indistinguishable from a client hammering the endpoint.
+      const code = await peekErrorCode(response);
+      if (code === 'RETRY_REFRESH' && attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_REFRESH_DELAY_MS));
+        return performRefresh(attempt + 1);
+      }
+      return null;
+    }
+
     const data = (await response.json()) as { access_token: string };
     tokenStore.set(data.access_token);
     return data.access_token;

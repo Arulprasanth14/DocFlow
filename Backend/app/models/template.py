@@ -54,6 +54,18 @@ class Template(BaseModel):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True
     )
     scope: Mapped[str] = mapped_column(String(20), default="user", server_default="user", nullable=False)
+    # Team scope (FR-5.6): which department owns this template. Added by
+    # migration f5a6b7c8d9e0 and left unmapped until now, which is why the
+    # "team" scope could not be evaluated in code at all: the service read
+    # `getattr(template, "dept_id", None)` and always got None, so a team
+    # template was never editable by its own department and the test database
+    # (built from this metadata) did not even have the column.
+    dept_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("departments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(String(100))

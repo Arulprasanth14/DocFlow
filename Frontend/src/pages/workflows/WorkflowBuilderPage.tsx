@@ -53,6 +53,7 @@ import {
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/ui/PageHeader';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { Stepper } from '@/components/ui/Stepper';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import WorkflowPreview, { type PreviewStage } from '@/components/workflows/WorkflowPreview';
@@ -318,6 +319,7 @@ function StageCard({
               <span style={labelStyle}>Stage name *</span>
               <input
                 className="input"
+                data-stage-name={stage.key}
                 value={stage.name}
                 maxLength={80}
                 onChange={(e) => onPatch({ name: e.target.value })}
@@ -448,9 +450,19 @@ function StageCard({
                   <option value="days">Days</option>
                 </select>
               </div>
-              <span style={{ fontSize: 11.5, color: C.muted }}>
-                <Clock size={11} aria-hidden style={{ verticalAlign: -1 }} /> ={' '}
-                {hoursOf(stage)} hours
+              {/* inline-flex: Tailwind's preflight makes svg display:block,
+                  which dropped the clock onto a line of its own. */}
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  marginTop: 5,
+                  fontSize: 11.5,
+                  color: C.muted,
+                }}
+              >
+                <Clock size={11} aria-hidden /> = {hoursOf(stage)} hours
               </span>
             </div>
 
@@ -538,6 +550,7 @@ export default function WorkflowBuilderPage() {
   const [serverError, setServerError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [announcement, setAnnouncement] = useState('');
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const undoRef = useRef<{ stage: StageDraft; index: number; timer: number } | null>(null);
 
@@ -576,14 +589,19 @@ export default function WorkflowBuilderPage() {
   );
 
   // Load an existing definition into the draft.
+  //
+  // `department_id` and the due-within wording come from the API's restored
+  // version fields. Before they were served, this set `departmentId: ''` and
+  // re-derived the deadline from `sla_hours` — so opening any workflow in the
+  // editor and saving it dropped every stage's department, and with it the
+  // department-mandated signing lock (WF-STG-20). The `??` fallbacks keep a
+  // workflow created before versioning editable.
   useEffect(() => {
     if (!existing) return;
     setName(existing.name);
     setDescription(existing.description ?? '');
     setVisibility(existing.visibility);
-    setRequireFullReapproval(
-      !!(existing as { require_full_reapproval?: boolean }).require_full_reapproval,
-    );
+    setRequireFullReapproval(!!existing.require_full_reapproval);
     setStages(
       [...existing.stages]
         .sort((a, b) => a.sequence_order - b.sequence_order)
@@ -601,11 +619,12 @@ export default function WorkflowBuilderPage() {
             approverKind: kind,
             approverUserId:
               kind === 'specific_user'
-                ? String((rule?.rule_value as { user_id?: string })?.user_id ?? '')
+                ? s.approver_user_id ??
+                  String((rule?.rule_value as { user_id?: string })?.user_id ?? '')
                 : '',
-            departmentId: '',
-            dueValue: useDays ? hours / 24 : hours,
-            dueUnit: useDays ? 'days' : 'hours',
+            departmentId: s.department_id ?? '',
+            dueValue: s.due_within_value ?? (useDays ? hours / 24 : hours),
+            dueUnit: s.due_within_unit ?? (useDays ? 'days' : 'hours'),
             requireSigning: s.requires_signature,
             expanded: false,
           };
@@ -644,7 +663,13 @@ export default function WorkflowBuilderPage() {
   }
 
   function patchStage(index: number, patch: Partial<StageDraft>) {
-    mutate(stages.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+    const next = stages.map((s, i) => (i === index ? { ...s, ...patch } : s));
+    // Expanding or collapsing a card is a view change, not an edit. Routing it
+    // through mutate() marked the form dirty, so opening a workflow, clicking
+    // one chevron and leaving raised "Discard your changes?" over nothing.
+    const viewOnly = Object.keys(patch).every((k) => k === 'expanded');
+    if (viewOnly) setStages(next);
+    else mutate(next);
   }
 
   function move(index: number, dir: -1 | 1) {
@@ -716,10 +741,13 @@ export default function WorkflowBuilderPage() {
     if (stages.length >= MAX_STAGES) return;
     const stage = emptyStage(stages.length);
     mutate([...stages, stage]);
-    // WF-STG-01: focus the new stage's name field.
+    // WF-STG-01: focus the new stage's NAME field. Addressed by the stage's
+    // own key rather than "the last input.input on the page", which landed on
+    // the new card's due-within amount box instead.
     requestAnimationFrame(() => {
-      const inputs = document.querySelectorAll<HTMLInputElement>('input.input');
-      inputs[inputs.length > 0 ? inputs.length - 1 : 0]?.focus?.();
+      document
+        .querySelector<HTMLInputElement>(`[data-stage-name="${stage.key}"]`)
+        ?.focus();
     });
   }
 
@@ -835,14 +863,21 @@ export default function WorkflowBuilderPage() {
   }
 
   function onCancel() {
-    if (dirty && !window.confirm('Discard changes?')) return;
+    if (dirty) {
+      setConfirmDiscard(true);
+      return;
+    }
     navigate('/workflows');
   }
 
   const currentVersion = versions?.find((v) => v.is_current)?.version_number;
 
   return (
-    <div style={{ paddingBottom: 110 }}>
+    /* `page-content` is the app's page gutter, which this page was missing
+       entirely. The column is 760 — WorkflowPreview's own width — so moving
+       Build -> Preview no longer shifts the content sideways from 960 to 760.
+       It is also a comfortable form measure. */
+    <div className="page-content" style={{ paddingTop: 24, maxWidth: 760, margin: '0 auto' }}>
       <PageHeader
         title={isEdit ? 'Edit workflow' : 'New workflow'}
         description={
@@ -863,8 +898,8 @@ export default function WorkflowBuilderPage() {
         {announcement}
       </div>
 
-      <div style={{ maxWidth: 960, margin: '0 auto' }}>
-        <div style={{ margin: '4px 0 20px' }}>
+      <div>
+        <div style={{ margin: '14px 0 20px' }}>
           <Stepper
             steps={[{ key: 'build', label: 'Build' }, { key: 'preview', label: 'Preview' }]}
             current={step}
@@ -1018,7 +1053,9 @@ export default function WorkflowBuilderPage() {
                 <button
                   type="button"
                   onClick={() =>
-                    mutate(stages.map((s) => ({ ...s, expanded: !stages.every((x) => x.expanded) })))
+                    // setStages, not mutate(): a view change must not mark the
+                    // form dirty (see patchStage).
+                    setStages(stages.map((s) => ({ ...s, expanded: !stages.every((x) => x.expanded) })))
                   }
                   style={ghostBtn}
                 >
@@ -1101,27 +1138,26 @@ export default function WorkflowBuilderPage() {
         )}
       </div>
 
-      {/* Sticky action bar — WF-PRV-07, UX-RSP-01 */}
+      {/* Action bar — WF-PRV-07, UX-RSP-01.
+          Sticky INSIDE the content column rather than fixed to the viewport:
+          it then shares the form's left and right edges automatically and
+          follows the sidebar when it collapses, which the fixed version did
+          not. */}
       <div
         style={{
-          position: 'fixed',
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: C.surface,
-          borderTop: `1px solid ${C.border}`,
-          padding: '12px 16px',
-          display: 'flex',
-          gap: 9,
-          justifyContent: 'center',
-          flexWrap: 'wrap',
+          position: 'sticky',
+          bottom: 16,
+          marginTop: 20,
+          background: C.card,
+          border: `1px solid ${C.border}`,
+          borderRadius: 14,
+          boxShadow: 'var(--shadow-lg)',
+          padding: 12,
           zIndex: 20,
         }}
       >
         <div
           style={{
-            width: '100%',
-            maxWidth: 960,
             display: 'flex',
             gap: 9,
             justifyContent: 'flex-end',
@@ -1166,6 +1202,28 @@ export default function WorkflowBuilderPage() {
           )}
         </div>
       </div>
+
+      <div style={{ height: 8 }} />
+
+      {/* WF-BLD-03. Was a native window.confirm(), the only dialog in the
+          module the theme could not reach and the only one that said nothing
+          about what is at stake. */}
+      <ConfirmDialog
+        open={confirmDiscard}
+        title="Discard your changes?"
+        message={
+          isEdit
+            ? 'The edits you have made to this workflow will be lost. The saved version is unchanged.'
+            : 'This workflow has not been created yet, so everything you have entered will be lost.'
+        }
+        confirmLabel="Discard"
+        cancelLabel="Keep editing"
+        onConfirm={() => {
+          setConfirmDiscard(false);
+          navigate('/workflows');
+        }}
+        onCancel={() => setConfirmDiscard(false)}
+      />
     </div>
   );
 }

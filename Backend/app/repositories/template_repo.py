@@ -29,12 +29,12 @@ from app.models.template import (
 
 def _template_dept_col():
     """
-    `templates.dept_id`, whether or not the ORM maps it yet.
+    `templates.dept_id`, fully qualified.
 
-    Migration f5a6b7c8d9e0 adds the column and the model does not map it until
-    that migration is applied (project rule: never map a column ahead of its
-    migration). Until then the clause is built from a **fully qualified**
-    literal, for two reasons:
+    The model DOES map this column now (migration f5a6b7c8d9e0 is what added
+    it), so `Template.dept_id` would work here. The qualified literal stays
+    for the second reason below - ambiguity - which has nothing to do with
+    whether the column is mapped:
 
       * `column("dept_id")` is unqualified, so in any statement that also
         touches `documents` — which has its own `dept_id` — Postgres rejects it

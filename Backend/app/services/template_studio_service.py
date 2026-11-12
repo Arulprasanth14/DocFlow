@@ -18,6 +18,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
@@ -27,6 +28,7 @@ from app.core.exceptions import (
     ValidationException,
 )
 from app.domain.permissions import AuthUser
+from app.models.organization import OrganizationMember
 from app.models.base import utcnow
 from app.models.template import Template, TemplateVersion
 from app.repositories.template_repo import TemplateRepository
@@ -49,6 +51,10 @@ from app.services.content_sanitizer import (
 )
 
 logger = structlog.get_logger(__name__)
+
+#: "Department not looked up yet" - see TemplateStudioService._dept_id. None is
+#: a real answer (the member has no department) and must not be re-queried.
+_UNSET = object()
 
 def _reject_repeat_group_collisions(fields: list[dict]) -> None:
     """
@@ -98,27 +104,72 @@ class TemplateStudioService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
         self.repo = TemplateRepository(db)
+        # _UNSET, not None: None is a real answer ("this member has no
+        # department") and must not be looked up again on every call.
+        self._dept_cache: UUID | None | object = _UNSET
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def _is_admin(user: AuthUser) -> bool:
+        # Org role only, no superadmin bypass: template ownership is an
+        # in-organization concept. Deliberately not AuthUser.is_org_admin().
         return "admin" in user.roles
 
+    async def _dept_id(self, user: AuthUser) -> UUID | None:
+        """The caller's department, read from their membership.
+
+        The access token carries no department claim, so `AuthUser.dept_id` is
+        None for every HTTP caller - which silently disabled the whole "team"
+        template scope: a team template was invisible to the department that
+        owned it, and `_require_can_edit` could never match. Loading it here
+        on demand fixes that without growing the token.
+
+        One query per service instance (so once per request), and only for the
+        paths that need it. `user.dept_id` is honoured when a caller already
+        populated it (background workers construct AuthUser directly).
+        """
+        if user.dept_id is not None:
+            return user.dept_id
+        if self._dept_cache is not _UNSET:
+            return self._dept_cache
+        if user.org_id is None:
+            self._dept_cache = None
+            return None
+        self._dept_cache = (
+            await self.db.execute(
+                select(OrganizationMember.dept_id).where(
+                    OrganizationMember.org_id == user.org_id,
+                    OrganizationMember.user_id == user.id,
+                    OrganizationMember.deleted_at.is_(None),
+                )
+            )
+        ).scalars().first()
+        return self._dept_cache
+
     async def _require(self, template_id: UUID, user: AuthUser) -> Template:
-        t = await self.repo.get_for_user(template_id, user.org_id, user.id, self._is_admin(user), user.dept_id)
+        t = await self.repo.get_for_user(
+            template_id, user.org_id, user.id, self._is_admin(user),
+            await self._dept_id(user),
+        )
         if not t:
             # 404 (not 403) so private templates can't be probed by id.
             raise NotFoundException("Template", str(template_id))
         return t
 
-    def _require_can_edit(self, template: Template, user: AuthUser) -> None:
+    async def _require_can_edit(self, template: Template, user: AuthUser) -> None:
+        """Async because the team-scope branch needs the caller's department,
+        which is read from their membership rather than from the token."""
         if template.owner_id == user.id:
             return
         if template.scope in ("system", "org") and self._is_admin(user):
             return
-        if template.scope == "team" and (self._is_admin(user) or (user.dept_id and getattr(template, 'dept_id', None) == user.dept_id)):
-            return
+        if template.scope == "team":
+            if self._is_admin(user):
+                return
+            dept_id = await self._dept_id(user)
+            if dept_id is not None and template.dept_id == dept_id:
+                return
         raise ForbiddenException("You can only edit your own templates")
 
     async def _version_for(self, template: Template, user: AuthUser) -> TemplateVersion | None:
@@ -208,7 +259,8 @@ class TemplateStudioService:
         published_only: bool = False, sort: str = "recent",
     ) -> list[TemplateSummaryResponse]:
         templates = await self.repo.list_for_user(
-            user.org_id, user.id, self._is_admin(user), dept_id=user.dept_id, scope=scope, category=category, q=q,
+            user.org_id, user.id, self._is_admin(user),
+            dept_id=await self._dept_id(user), scope=scope, category=category, q=q,
             favourites_only=favourites_only, include_archived=include_archived,
             published_only=published_only, sort=sort,
         )
@@ -243,7 +295,7 @@ class TemplateStudioService:
         it are untouched because they are pinned to their own version (C9).
         """
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
         if archived:
             template.status = "archived"
         elif template.current_version_id:
@@ -334,7 +386,7 @@ class TemplateStudioService:
         )
 
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
 
         # Untrusted: this body came from a browser and is written straight
         # back into the version row.
@@ -390,7 +442,7 @@ class TemplateStudioService:
         self, template_id: UUID, user: AuthUser, req: TemplateUpdateRequest
     ) -> TemplateDetailResponse:
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
 
         if req.name is not None:
             template.name = req.name.strip() or template.name
@@ -550,7 +602,7 @@ class TemplateStudioService:
         self, template_id: UUID, user: AuthUser, req: TemplatePublishRequest
     ) -> TemplateDetailResponse:
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
 
         # Metadata captured at publish time (FR-11.3).
         if req.name is not None:
@@ -627,7 +679,7 @@ class TemplateStudioService:
         publishes as usual.
         """
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
 
         source = await self.repo.get_version(version_id)
         if source is None or source.template_id != template.id:
@@ -753,7 +805,7 @@ class TemplateStudioService:
 
     async def delete_template(self, template_id: UUID, user: AuthUser) -> None:
         template = await self._require(template_id, user)
-        self._require_can_edit(template, user)
+        await self._require_can_edit(template, user)
         # Soft delete only — documents created from it keep their pinned version.
         await self.repo.soft_delete(template)
         await self.db.commit()

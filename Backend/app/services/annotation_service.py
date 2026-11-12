@@ -274,7 +274,7 @@ class AnnotationService:
         """
         from app.services.document_service import _is_run_participant
 
-        if actor.is_superadmin or "admin" in actor.roles:
+        if actor.is_org_admin():
             return
         if await _is_run_participant(self.db, doc.id, actor.id):
             return
@@ -626,7 +626,7 @@ class AnnotationService:
 
         is_owner = doc.submitted_by == actor.id
         is_author = ann.author_id == actor.id
-        is_admin = actor.is_superadmin or "admin" in actor.roles
+        is_admin = actor.is_org_admin()
 
         allowed: dict[str, str] = {}
         if is_author or is_admin:

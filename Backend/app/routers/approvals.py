@@ -461,6 +461,15 @@ async def export_audit_log(
     if not current_user.org_id:
         raise ForbiddenException("No organization context")
 
+    # Authorized HERE, not inside the generator: once StreamingResponse has
+    # started, an exception can no longer become a 403 (it escaped as an
+    # unhandled error instead). Admin-only, HR not included - exporting the
+    # whole audit log is a Main-Administrator action.
+    if not current_user.is_org_admin():
+        raise ForbiddenException(
+            "Only an organization admin can export the audit log."
+        )
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return StreamingResponse(
         stream_audit_csv(

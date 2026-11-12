@@ -70,6 +70,11 @@ function Chip({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 
   return (
     <span
       style={{
+        // inline-flex so a chip with an icon keeps it on the text's line:
+        // Tailwind's preflight makes svg display:block.
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
         fontSize: 11,
         color,
         background: `color-mix(in srgb, ${color} 10%, transparent)`,
@@ -261,7 +266,12 @@ export default function WorkflowsPage() {
   );
 
   return (
-    <div>
+    /* `page-content` is the app's page gutter (index.css: 32px, 16px on
+       mobile) and every other page uses it. Without it this page rendered
+       flush against the viewport edge and the sidebar, which is what made
+       the module look unaligned next to Documents and Approvals. The column
+       cap matches Drafts, so a row never stretches to 1400px. */
+    <div className="page-content" style={{ paddingTop: 24, maxWidth: 1040, margin: '0 auto' }}>
       <PageHeader
         title="Workflows"
         description="Reusable approval routes for your documents."
@@ -294,9 +304,12 @@ export default function WorkflowsPage() {
       <div
         style={{
           display: 'flex',
-          gap: 10,
+          gap: 16,
           alignItems: 'center',
           flexWrap: 'wrap',
+          // The tab row above ended flush on this row, so the active tab's
+          // surface ran straight into the search field.
+          marginTop: 16,
           marginBottom: 16,
         }}
       >
@@ -306,6 +319,9 @@ export default function WorkflowsPage() {
             alignItems: 'center',
             gap: 8,
             flex: '1 1 240px',
+            // Capped: an 850px search box pushed "Show archived" to the far
+            // edge, away from the list it filters.
+            maxWidth: 420,
             background: C.card,
             border: `1px solid ${C.border}`,
             borderRadius: 10,
@@ -546,8 +562,7 @@ export default function WorkflowsPage() {
                     <Chip>v{wf.version}</Chip>
                     {tab === 'shared' ? (
                       <Chip tone="primary">
-                        <Users size={10} aria-hidden style={{ verticalAlign: -1 }} /> Shared
-                        with you
+                        <Users size={10} aria-hidden /> Shared with you
                       </Chip>
                     ) : null}
                   </div>

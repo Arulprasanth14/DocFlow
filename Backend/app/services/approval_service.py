@@ -369,7 +369,7 @@ class ApprovalService:
             raise not_found
 
         # Who may look. Everyone else gets the same answer a stranger gets.
-        is_admin = actor.is_superadmin or "admin" in actor.roles or "hr" in actor.roles
+        is_admin = actor.is_admin_or_hr()
         is_owner = doc.submitted_by == actor.id
         my_step = await self._my_step_for_stage(si, actor.id)
         is_approver = si.resolved_approver_id == actor.id or my_step is not None

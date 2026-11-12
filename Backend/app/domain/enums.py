@@ -192,8 +192,20 @@ class OrganizationPlan(StrEnum):
 
 # ── Organization Member Status ─────────────────────────────────────────────────
 class MemberStatus(StrEnum):
+    """The complete set of values `organization_members.status` may hold.
+
+    Derived from what the code actually writes, not from what this enum used
+    to say: `pending` (a join request awaiting review) and `rejected` (one that
+    was declined) were both in use and missing here, while `suspended` was
+    listed but only reachable through the unvalidated API. The column is a
+    VARCHAR with no CHECK constraint, by decision - the migration that came
+    with this change only REPORTS rows outside this set, so an unexpected
+    value is visible without a deploy being able to fail on production data.
+    """
     ACTIVE = "active"
+    PENDING = "pending"
     INACTIVE = "inactive"
+    REJECTED = "rejected"
     SUSPENDED = "suspended"
 
 
@@ -297,6 +309,21 @@ class AuditAction(StrEnum):
 
 
 # ── Permissions (Resource Codes) ──────────────────────────────────────────────
+#
+# RESERVED codes. These are defined and seeded into role_permissions, but no
+# route enforces them with require_permission() today - the equivalent rule is
+# enforced by a role check or in the service layer instead:
+#
+#   documents:cancel, workflows:read, workflows:admin, approvals:delegate,
+#   chat:read, chat:send, analytics:read, analytics:export, admin:audit,
+#   admin:workflow_templates, members:invite_standard, members:invite_hr,
+#   members:delete, agent:knowledge_manage
+#
+# They are kept (not deleted) because they describe the intended model and are
+# already in every organization's data; turning them into real route guards is
+# deferred, because several are coarser than the role rule they would replace
+# - e.g. HR holds admin:users, so guarding a Main-Administrator-only screen
+# with require_permission("admin:users") would GRANT it to HR.
 class Permission(StrEnum):
     # Documents
     DOCUMENTS_CREATE = "documents:create"

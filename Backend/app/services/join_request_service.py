@@ -35,6 +35,7 @@ from app.core.exceptions import (
 )
 from app.domain.enums import NotificationType
 from app.models.organization import Organization, OrganizationMember, Role
+from app.domain.permissions import roles_include_org_admin
 from app.models.user import User
 from app.services.account_service import normalize_org_name
 
@@ -48,7 +49,7 @@ ASSIGNABLE_BY_ADMIN_ONLY = {"hr"}
 
 
 def _is_main_admin(roles: list[str], is_superadmin: bool) -> bool:
-    return is_superadmin or "admin" in roles
+    return roles_include_org_admin(roles, is_superadmin)
 
 
 def _is_reviewer(roles: list[str], is_superadmin: bool) -> bool:
@@ -301,10 +302,11 @@ class JoinRequestService:
             role_id=role.id,
         )
 
-        from app.core.redis import cache_delete
-        from app.services.org_service import _perm_cache_key
-
-        await cache_delete(_perm_cache_key(decided["user_id"], org_id))
+        # No permission-cache invalidation here any more: nothing ever read
+        # that cache, so deleting the key was a no-op. Admission GRANTS
+        # access, so the requester's sessions are deliberately NOT revoked -
+        # their next /auth/refresh picks up the new org and role, which keeps
+        # the waiting-screen to app transition silent.
 
         approver = await self.db.get(User, actor_id)
         approver_name = (approver.name or approver.email) if approver else "an administrator"

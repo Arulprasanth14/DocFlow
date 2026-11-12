@@ -39,7 +39,7 @@ PAGES = {
 
 def _as(user, org, *roles) -> AuthUser:
     return AuthUser(
-        id=user.id, email=user.email, org_id=org.id,
+        id=user.id, org_id=org.id,
         roles=list(roles) or ["worker"], permissions=[],
     )
 

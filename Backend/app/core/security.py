@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from jose import JWTError, jwt
+from jose.exceptions import ExpiredSignatureError
 import bcrypt
 
 from app.config import settings
@@ -105,23 +106,124 @@ def create_refresh_token(user_id: UUID, session_id: str) -> str:
     return jwt.encode(payload, _get_private_key(), algorithm=_get_algorithm())
 
 
-def decode_token(token: str) -> dict[str, Any]:
+#: Every algorithm this deployment is allowed to be configured with. `none`,
+#: an empty value and typos are therefore rejected at startup rather than
+#: being handed to the decoder at request time.
+JWT_ALGORITHM_ALLOWLIST: tuple[str, ...] = (
+    "HS256", "HS384", "HS512", "RS256", "RS384", "RS512",
+)
+
+#: Claims that must be present on every DocFlow token. python-jose IGNORES
+#: `options={"require": [...]}` (verified: a token with no `type` decodes
+#: fine with it set), so the check has to happen here or not at all.
+_REQUIRED_CLAIMS: tuple[str, ...] = ("sub", "exp", "iss", "type")
+
+
+def validate_jwt_config() -> None:
+    """
+    Fail fast on a JWT configuration that cannot be verified safely.
+
+    Called from the application lifespan. Three failure modes:
+
+      * `JWT_ALGORITHM` is not on the allowlist — including `none`, which is
+        the algorithm an attacker asks for.
+      * RS* is in force but `JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY` are not PEM key
+        material, so signing or verifying would fail at the first request.
+      * HS* is in force with a secret too short to be the whole security
+        boundary. In production that is fatal (`validate_production` asserts
+        it too); outside production it is a warning, because the default
+        development secret is deliberately short and must not block boot.
+
+    Signing and verifying both resolve the algorithm through
+    `_get_algorithm()`, so this validates the one value both use.
+    """
+    configured = (settings.JWT_ALGORITHM or "").strip()
+    if configured not in JWT_ALGORITHM_ALLOWLIST:
+        raise RuntimeError(
+            f"JWT_ALGORITHM={configured!r} is not supported. Allowed: "
+            f"{', '.join(JWT_ALGORITHM_ALLOWLIST)}."
+        )
+
+    algorithm = _get_algorithm()
+    if algorithm not in JWT_ALGORITHM_ALLOWLIST:
+        raise RuntimeError(
+            f"Resolved JWT algorithm {algorithm!r} is not supported. Allowed: "
+            f"{', '.join(JWT_ALGORITHM_ALLOWLIST)}."
+        )
+
+    if algorithm.startswith("RS"):
+        if "BEGIN" not in _get_private_key() or "BEGIN" not in _get_public_key():
+            raise RuntimeError(
+                f"JWT algorithm {algorithm} is configured, but JWT_PRIVATE_KEY / "
+                "JWT_PUBLIC_KEY do not contain PEM key material."
+            )
+    elif len(settings.SECRET_KEY) < 32:
+        message = (
+            f"JWT algorithm {algorithm} is in force (no RSA key configured) but "
+            "SECRET_KEY is shorter than 32 characters."
+        )
+        if settings.is_production:
+            raise RuntimeError(message)
+        import warnings
+
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+
+
+def decode_token(token: str, *, expected_type: str | None = None) -> dict[str, Any]:
     """
     Decode and verify a JWT token.
-    Raises UnauthorizedException on invalid/expired token.
+    Raises UnauthorizedException on an invalid, expired or wrong-kind token.
+
+    The algorithm is PINNED to the single algorithm this deployment signs
+    with. The decoder used to also accept "HS256" alongside the configured
+    one, which is the classic algorithm-confusion setup: under RS256 the
+    verification key is the RSA PUBLIC key, which by definition is not
+    secret, so a forger signs `alg: HS256` using those key bytes as the HMAC
+    secret and the signature verifies.
+
+    Measured behaviour of the old two-algorithm decoder, so nobody has to
+    re-derive it: with a PEM-formatted public key python-jose happened to
+    refuse the HMAC construction and raised `JWKError`, which is NOT a
+    `JWTError` and so escaped the handler below as an unhandled 500 rather
+    than a 401. With a public key carrying no PEM markers (base64 DER, a
+    JWKS blob) the forged token was accepted outright, `is_superadmin: true`
+    included. Pinning removes the dependency on that library accident and
+    turns every variant into a clean 401.
+
+    `expected_type` rejects a token of the wrong kind, so a refresh token
+    cannot be presented as an access token or vice versa. Callers that
+    legitimately accept either kind pass None.
     """
     try:
         payload = jwt.decode(
             token,
             _get_public_key(),
-            algorithms=[_get_algorithm(), "HS256"],   # accept both during transition
-            options={"require": ["sub", "exp", "iss"]},
+            algorithms=[_get_algorithm()],
         )
-        if payload.get("iss") != "docflow":
-            raise UnauthorizedException("Invalid token issuer")
-        return payload
+    except ExpiredSignatureError as exc:
+        # Distinct from a malformed token: the client should refresh once,
+        # not sign the user out (spec section 3.3).
+        raise UnauthorizedException(
+            f"Token validation failed: {exc}", code="TOKEN_EXPIRED"
+        ) from exc
     except JWTError as exc:
-        raise UnauthorizedException(f"Token validation failed: {exc}") from exc
+        raise UnauthorizedException(
+            f"Token validation failed: {exc}", code="INVALID_TOKEN"
+        ) from exc
+
+    missing = [claim for claim in _REQUIRED_CLAIMS if payload.get(claim) is None]
+    if missing:
+        raise UnauthorizedException(
+            f"Token validation failed: missing claim(s) {', '.join(missing)}",
+            code="INVALID_TOKEN",
+        )
+    if payload.get("iss") != "docflow":
+        raise UnauthorizedException("Invalid token issuer", code="INVALID_TOKEN")
+    if expected_type is not None and payload.get("type") != expected_type:
+        raise UnauthorizedException(
+            "Token is not valid for this operation", code="INVALID_TOKEN"
+        )
+    return payload
 
 
 verify_jwt = decode_token

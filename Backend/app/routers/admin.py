@@ -19,13 +19,17 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import structlog
+
 from app.core.exceptions import ForbiddenException, NotFoundException
-from app.dependencies import CurrentUser
+from app.core.firebase import revoke_firebase_sessions
+from app.dependencies import CurrentUser, require_admin_or_hr, require_main_admin
 from app.database import get_db
 from app.domain.enums import SYSTEM_ROLES
 from app.models.audit import AuditLog
 from app.models.user import User
 from app.repositories.org_repo import OrgMemberRepository
+from app.repositories.user_repo import SessionRepository
 from app.schemas.workflow_instances import (
     WorkflowTemplateCreate,
     WorkflowTemplateResponse,
@@ -34,37 +38,16 @@ from app.schemas.workflow_instances import (
 )
 from app.services.template_service import TemplateService
 
+logger = structlog.get_logger(__name__)
+
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
-def _require_main_admin(user: CurrentUser) -> None:
-    """
-    Strictly the Main Administrator org role (or platform superadmin).
-    Per the requirements report §2.1/13.3, only the Main Administrator may
-    add an HR user, delete/deactivate a member, or manage roles/permissions
-    — HR support staff must NOT pass this gate even though they pass
-    `_require_admin_or_hr` for day-to-day admin screens.
-    """
-    if user.is_superadmin:
-        return
-    if "admin" not in user.roles:
-        raise ForbiddenException("Only the Main Administrator can perform this action")
-
-
-def _require_admin_or_hr(user: CurrentUser) -> None:
-    """
-    Org-level day-to-day admin access: Main Administrator OR HR (§2.2 — HR
-    "supports the Main Administrator with day-to-day organization
-    management"). NOT the platform-wide `is_superadmin` flag, which is a
-    separate, orthogonal concept (see domain/permissions.py). Covers
-    workflow-template management and audit-log visibility, which the
-    requirements report grants to HR; actions reserved exclusively for the
-    Main Administrator use `_require_main_admin` instead.
-    """
-    if user.is_superadmin:
-        return
-    if not ({"admin", "hr"} & set(user.roles)):
-        raise ForbiddenException("Only organization administrators can perform this action")
+# The two role gates now live in app/dependencies.py, built on
+# AuthUser.is_org_admin() / is_admin_or_hr(), so there is one definition of
+# each. Aliased here so the call sites below read unchanged.
+_require_main_admin = require_main_admin
+_require_admin_or_hr = require_admin_or_hr
 
 
 # ── Roles Catalog ──────────────────────────────────────────────────────────────
@@ -240,6 +223,14 @@ async def deactivate_user(
 
     target_user.is_active = False
     target_user.status = "inactive"
+
+    # Revoke every session in the SAME transaction as the flags. Without this
+    # the flags were the only effect, and a deactivated user kept working
+    # until their session expired - this endpoint's summary line has always
+    # promised the revocation.
+    # TODO(multi-org): revoke_all cuts the user's sessions in EVERY
+    # organization. Per-org revocation needs sessions.org_id (Phase F).
+    await SessionRepository(db).revoke_all(user_id)
     await db.flush()
 
     # Write audit entry
@@ -252,6 +243,30 @@ async def deactivate_user(
     )
     db.add(log)
     await db.commit()
+
+    logger.info(
+        "auth.session.revoked",
+        reason="deactivate",
+        actor_user_id=str(current_user.id),
+        target_user_id=str(user_id),
+        org_id=str(current_user.org_id) if current_user.org_id else None,
+    )
+
+    # Firebase side, AFTER the commit: the DocFlow change is authoritative and
+    # must not be rolled back because an external provider is unreachable.
+    # Deactivation here is permanent, so the identity is disabled too, not
+    # just stripped of its refresh tokens.
+    if target_user.firebase_uid:
+        revoked = await revoke_firebase_sessions(
+            target_user.firebase_uid, disable_user=True
+        )
+        if not revoked:
+            logger.warning(
+                "firebase_deactivation_incomplete",
+                target_user_id=str(user_id),
+                detail="DocFlow access is revoked; the Firebase identity may still mint ID tokens",
+            )
+
     return {"status": "deactivated", "user_id": str(user_id)}
 
 

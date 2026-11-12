@@ -3,8 +3,18 @@ DocFlow Backend — Router: WebSocket Chat
 Endpoint:
   WS /ws/chat/{conversation_id}?token=JWT
 
-Auth: JWT passed as ?token= query parameter (confirmed — browser WS API does not
-      support custom headers, so query param is the only viable mechanism).
+Auth: the DocFlow access token as ?token= (browsers cannot set headers on a
+WebSocket). It runs through the SAME validation as an authenticated HTTP
+request - pinned algorithm, token kind, session bound to the user, account
+still allowed to authenticate - re-checked periodically while open.
+
+NOTE (ops): the access token travels in the query string, because browsers
+cannot set headers on a WebSocket. DocFlow's own request logger records the
+path only (middleware/logging.py), but the ASGI server's and any reverse
+proxy's access logs must be configured to scrub `?token=` - otherwise live
+credentials land in log storage. Replacing this with a single-use ticket
+endpoint is tracked as a separate item.
+
 
 Step 0.3 fix applied: per-message re-authorization — is_participant() is checked
       via ChatService.send() on EVERY inbound 'message' frame, not just at
@@ -27,9 +37,11 @@ import uuid
 import structlog
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from app.config import settings
+from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.redis import get_redis
-from app.core.security import verify_jwt
 from app.database import async_session_factory
+from app.dependencies import authenticate_token
 from app.repositories.chat_repo import ConversationRepository
 from app.schemas.chat import SendMessageRequest
 from app.services.chat_service import ChatService
@@ -46,17 +58,22 @@ async def chat_websocket(
 ) -> None:
     # ── Step 1: Authenticate via token query param ───────────────────────────
     try:
-        payload = verify_jwt(token)
-        user_id = uuid.UUID(payload["sub"])
-        # org_id is legitimately null for a logged-in user with no org yet —
-        # uuid.UUID(None) raised TypeError here, and since that happened before
-        # websocket.accept(), uvicorn reported it to the browser as a handshake
-        # 403 instead of a clean close, causing an infinite reconnect loop.
-        org_id = uuid.UUID(payload["org_id"]) if payload.get("org_id") else None
-    except Exception as exc:
-        logger.warning("ws_chat_auth_failed", error=str(exc))
-        await websocket.close(code=4001)
+        async with async_session_factory() as db:
+            auth = await authenticate_token(db, token)
+    except (UnauthorizedException, ForbiddenException) as exc:
+        # 1008 = policy violation. Previously this only verified the JWT
+        # signature, so a revoked session kept a live chat socket and a refresh
+        # token was accepted as a credential.
+        logger.warning("ws_chat_auth_failed", error=str(exc.detail))
+        await websocket.close(code=1008)
         return
+    except Exception as exc:  # noqa: BLE001 - never surface an internal error
+        logger.error("ws_chat_auth_error", error=f"{type(exc).__name__}: {exc}")
+        await websocket.close(code=1011)
+        return
+
+    user_id = auth.id
+    org_id = auth.org_id
 
     # ── Step 2: Verify participant access at connect time ────────────────────
     async with async_session_factory() as db:
@@ -181,16 +198,45 @@ async def chat_websocket(
         except Exception as exc:
             logger.error("ws_chat_writer_error", error=str(exc))
 
+
+    async def revalidate_loop() -> None:
+        """Re-run authentication while the socket is open.
+
+        Revocation used to apply to HTTP only: an already-open socket kept
+        streaming until the user closed the tab. The interval is the window
+        during which a revoked session still has a live socket.
+        """
+        interval = max(settings.WS_REVALIDATE_SECONDS, 30)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                async with async_session_factory() as db:
+                    await authenticate_token(db, token)
+            except (UnauthorizedException, ForbiddenException) as exc:
+                logger.info(
+                    "ws_chat_session_revoked",
+                    user_id=str(user_id), reason=str(exc.detail),
+                )
+                await websocket.close(code=1008)
+                return
+            except Exception as exc:  # noqa: BLE001 - a DB blip is not a revocation
+                logger.warning(
+                    "ws_chat_revalidation_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
     reader_task = asyncio.create_task(reader_loop())
     writer_task = asyncio.create_task(writer_loop())
+    revalidate_task = asyncio.create_task(revalidate_loop())
 
     try:
-        await asyncio.gather(reader_task, writer_task)
+        await asyncio.gather(reader_task, writer_task, revalidate_task)
     except Exception:
         pass
     finally:
         reader_task.cancel()
         writer_task.cancel()
+        revalidate_task.cancel()
         await pubsub.unsubscribe(channel)
         await pubsub.close()
         logger.info(

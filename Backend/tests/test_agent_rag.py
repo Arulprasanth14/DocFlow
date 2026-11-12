@@ -146,7 +146,7 @@ def _auth(user, org, roles):
     from app.domain.permissions import AuthUser
 
     return AuthUser(
-        id=user.id, email=user.email, org_id=org.id, roles=roles, permissions=[]
+        id=user.id, org_id=org.id, roles=roles, permissions=[]
     )
 
 

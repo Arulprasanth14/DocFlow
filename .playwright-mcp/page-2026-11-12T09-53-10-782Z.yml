@@ -1,0 +1,77 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic "Collapse sidebar" [ref=f3e5] [cursor=pointer]: DocFlow
+    - navigation [ref=f3e11]:
+      - generic [ref=f3e12]: Workspace
+      - link "Dashboard" [ref=f3e13] [cursor=pointer]:
+        - /url: /dashboard
+      - link "Documents" [ref=f3e21] [cursor=pointer]:
+        - /url: /documents
+      - link "Workflows" [ref=f3e27] [cursor=pointer]:
+        - /url: /workflows
+      - link "Search" [ref=f3e36] [cursor=pointer]:
+        - /url: /search
+      - link "Analytics" [ref=f3e42] [cursor=pointer]:
+        - /url: /analytics
+      - link "Messages" [ref=f3e47] [cursor=pointer]:
+        - /url: /chat
+      - link "Drafts" [ref=f3e52] [cursor=pointer]:
+        - /url: /drafts
+      - link "Agent" [ref=f3e59] [cursor=pointer]:
+        - /url: /agent
+      - link "Settings" [ref=f3e65] [cursor=pointer]:
+        - /url: /settings
+    - generic [ref=f3e78]:
+      - generic [ref=f3e79]: Workspace
+      - generic [ref=f3e80]: SD Innovations
+  - main [ref=f3e84]:
+    - generic [ref=f3e85]:
+      - button "Search documents, workflows, or users… ⌘K" [ref=f3e86] [cursor=pointer]:
+        - generic [ref=f3e90]: Search documents, workflows, or users…
+        - generic [ref=f3e91]: ⌘K
+      - generic [ref=f3e92]:
+        - button "Switch to Dark Mode" [ref=f3e93] [cursor=pointer]
+        - button [ref=f3e98] [cursor=pointer]
+        - button "AM Arun Mehta" [ref=f3e104] [cursor=pointer]:
+          - generic [ref=f3e105]: AM
+          - generic [ref=f3e106]: Arun Mehta
+    - generic [ref=f3e110]:
+      - generic [ref=f3e111]: /workflows
+      - generic [ref=f3e112]:
+        - generic [ref=f3e113]:
+          - generic [ref=f3e114]:
+            - generic [ref=f3e115]:
+              - heading "Workflows" [active] [level=1] [ref=f3e116]
+              - paragraph [ref=f3e117]: Reusable approval routes for your documents.
+            - button "New Workflow" [ref=f3e119] [cursor=pointer]
+          - generic [ref=f3e122]:
+            - button "My Workflows 2" [ref=f3e123] [cursor=pointer]:
+              - text: My Workflows
+              - generic [ref=f3e124]: "2"
+            - button "Shared with me 1" [ref=f3e125] [cursor=pointer]:
+              - text: Shared with me
+              - generic [ref=f3e126]: "1"
+        - generic [ref=f3e127]:
+          - textbox "Search workflows" [ref=f3e132]
+          - generic [ref=f3e133] [cursor=pointer]:
+            - checkbox "Show archived" [ref=f3e134]
+            - text: Show archived
+        - list [ref=f3e135]:
+          - listitem [ref=f3e136]:
+            - generic [ref=f3e142]:
+              - button "Purchase approval over £5,000" [ref=f3e143] [cursor=pointer]
+              - paragraph [ref=f3e144]: "Two-step route for capital expenditure: the requester’s manager, then Finance for the signed authorisation."
+              - generic [ref=f3e145]:
+                - generic [ref=f3e146]: Active
+                - generic [ref=f3e147]: Organization
+                - generic [ref=f3e148]: v3
+            - button "Workflow actions" [ref=f3e150] [cursor=pointer]
+          - listitem [ref=f3e155]:
+            - generic [ref=f3e161]:
+              - button "Supplier-onboarding-and-compliance-verification-route" [ref=f3e162] [cursor=pointer]
+              - generic [ref=f3e163]:
+                - generic [ref=f3e164]: Active
+                - generic [ref=f3e165]: Private
+                - generic [ref=f3e166]: v1
+            - button "Workflow actions" [ref=f3e168] [cursor=pointer]
+  - region "Notifications alt+T"

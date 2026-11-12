@@ -44,7 +44,7 @@ async def workflow_health(
     Scoped to the caller's organization, so one tenant's backlog is not
     visible to another (BR-12).
     """
-    if not (current_user.is_superadmin or "admin" in current_user.roles):
+    if not current_user.is_org_admin():
         raise ForbiddenException(
             "Only an organization admin can read operational health."
         )

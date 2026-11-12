@@ -1,0 +1,266 @@
+{
+  "/api/v1/admin/audit-logs": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/admin/roles/catalog": {
+    "admin": 200,
+    "hr": 403,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/admin/workflow-templates": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/analytics/dashboard": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/analytics/report": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/approvals": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/approvals/audit/export": {
+    "admin": 200,
+    "hr": 403,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/approvals/recalls": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/approvals/signing-key": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/auth/me": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/auth/sessions": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/chat/conversations": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/chat/members": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/document-types": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/documents": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/documents/analytics": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/notifications": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/notifications/unread-count": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/ops/workflow-health": {
+    "admin": 200,
+    "hr": 403,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/availability": {
+    "admin": 422,
+    "hr": 422,
+    "other_org_admin": 422,
+    "trainee": 422,
+    "unauthenticated": 401,
+    "worker": 422
+  },
+  "/api/v1/orgs/join-requests/mine": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/orgs/me": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/orgs/me/departments": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/orgs/me/join-requests": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/me/members": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/me/permissions": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/me/roles": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/me/stats": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 403,
+    "unauthenticated": 401,
+    "worker": 403
+  },
+  "/api/v1/orgs/me/teams": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/orgs/search": {
+    "admin": 422,
+    "hr": 422,
+    "other_org_admin": 422,
+    "trainee": 422,
+    "unauthenticated": 401,
+    "worker": 422
+  },
+  "/api/v1/search": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/templates": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  },
+  "/api/v1/workflow-templates": {
+    "admin": 200,
+    "hr": 200,
+    "other_org_admin": 200,
+    "trainee": 200,
+    "unauthenticated": 401,
+    "worker": 200
+  }
+}

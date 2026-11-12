@@ -46,6 +46,14 @@ export interface WorkflowPreviewProps {
   requireFullReapproval?: boolean;
   /** Compact cards once a workflow gets long (WF-PRV-06). */
   compact?: boolean;
+  /**
+   * Show the name and description above the timeline. Default true. The
+   * detail page turns it off because its PageHeader already states both, and
+   * printing them twice in a row read as a rendering mistake. The summary
+   * chips and the timeline itself are unaffected, so WF-PRV-09 (the same
+   * route preview everywhere) still holds.
+   */
+  showTitle?: boolean;
 }
 
 function dueLabel(stage: PreviewStage): string {
@@ -75,12 +83,18 @@ function Chip({
         color,
         background: `color-mix(in srgb, ${color} 10%, transparent)`,
         border: `1px solid color-mix(in srgb, ${color} 22%, transparent)`,
-        borderRadius: 999,
+        // 12, not a full pill, and allowed to wrap: the "Submitter's manager
+        // (assigned when the document is submitted)" chip is ~400px on one
+        // line, and with `nowrap` it forced the whole page wider than a
+        // phone. A wrapped full pill looks broken; 12 holds either way.
+        borderRadius: 12,
         padding: '3px 9px',
-        whiteSpace: 'nowrap',
+        maxWidth: '100%',
+        overflowWrap: 'anywhere',
+        lineHeight: 1.35,
       }}
     >
-      <Icon size={12} aria-hidden />
+      <Icon size={12} aria-hidden style={{ flexShrink: 0 }} />
       {children}
     </span>
   );
@@ -92,6 +106,7 @@ export function WorkflowPreview({
   stages,
   requireFullReapproval = false,
   compact: compactProp,
+  showTitle = true,
 }: WorkflowPreviewProps) {
   // WF-PRV-06: more than six stages switches to compact cards so the action
   // bar stays reachable without hunting.
@@ -102,18 +117,20 @@ export function WorkflowPreview({
     <div style={{ maxWidth: 760, margin: '0 auto', width: '100%' }}>
       {/* Header — WF-PRV-02 */}
       <header style={{ marginBottom: 18 }}>
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 20,
-            fontWeight: 800,
-            color: C.heading,
-            overflowWrap: 'anywhere',
-          }}
-        >
-          {name || 'Untitled workflow'}
-        </h2>
-        {description ? (
+        {showTitle ? (
+          <h2
+            style={{
+              margin: 0,
+              fontSize: 20,
+              fontWeight: 800,
+              color: C.heading,
+              overflowWrap: 'anywhere',
+            }}
+          >
+            {name || 'Untitled workflow'}
+          </h2>
+        ) : null}
+        {showTitle && description ? (
           <p
             style={{
               margin: '6px 0 0',
@@ -125,7 +142,9 @@ export function WorkflowPreview({
             {description}
           </p>
         ) : null}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 11 }}>
+        <div
+          style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: showTitle ? 11 : 0 }}
+        >
           <Chip icon={Users}>
             {stages.length} {stages.length === 1 ? 'stage' : 'stages'}
           </Chip>

@@ -88,6 +88,29 @@ class WorkflowStageResponse(BaseModel):
     approver_rules: list[StageApproverRuleResponse] = []
     created_at: datetime
 
+    # ── Fields the builder needs back in order to EDIT a stage ────────────
+    # `workflow_stages` predates the Workflow module and has no column for
+    # any of these; the immutable `workflow_version_stages` row written
+    # alongside it does (§5.5 fields C and D). TemplateService fills them in
+    # from the template's CURRENT version, so loading a workflow into the
+    # edit form returns exactly what was saved instead of dropping the
+    # department and re-deriving the deadline wording.
+    #
+    # All optional: a template created before versioning existed has no
+    # current version, and a caller that only wants the legacy shape is
+    # unaffected.
+    department_id: uuid.UUID | None = None
+    department_name: str | None = None
+    # What the user typed ("2 days"), not the engine's hours. `sla_hours`
+    # above stays the computed value and the two are kept in step.
+    due_within_value: int | None = None
+    due_within_unit: str | None = None
+    # Resolved here rather than client-side because a Worker or Trainee has
+    # no permission to call /orgs/me/members and could not look the name up
+    # themselves — the same reason /review resolves names server-side.
+    approver_user_id: uuid.UUID | None = None
+    approver_name: str | None = None
+
     model_config = {"from_attributes": True}
 
 
@@ -135,6 +158,11 @@ class WorkflowTemplateResponse(BaseModel):
     document_type_scope: str | None
     is_active: bool
     version: int
+    # WF-BLD-07 / BR-06. The column has existed since Phase 2 but was never
+    # serialized, so the edit form read `undefined`, showed the toggle OFF
+    # and then saved that OFF back - silently turning off full re-approval
+    # for anyone who edited a workflow that had it on.
+    require_full_reapproval: bool = False
     stages: list[WorkflowStageResponse] = []
     created_at: datetime
     updated_at: datetime | None = None

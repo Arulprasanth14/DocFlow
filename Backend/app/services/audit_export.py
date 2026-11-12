@@ -64,10 +64,12 @@ async def stream_audit_csv(
     the authenticated user, never from a query parameter, so there is no
     parameter to tamper with.
     """
-    if not (actor.is_superadmin or "admin" in actor.roles):
-        raise ForbiddenException(
-            "Only an organization admin can export the audit log."
-        )
+    # Authorization is enforced by the ROUTE, before the StreamingResponse is
+    # constructed. It cannot live here: FastAPI consumes this generator after
+    # the response has started, so a ForbiddenException raised at this point
+    # never reaches the exception handler - it surfaced as an unhandled error
+    # (HTTP 500 / a torn stream) instead of a 403. Found by the role x
+    # endpoint matrix.
 
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")

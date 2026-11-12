@@ -37,7 +37,7 @@ from test_signatures_and_revocation import _make_instance
 
 def _as(user, *roles) -> AuthUser:
     return AuthUser(
-        id=user.id, email=user.email, org_id=None, roles=list(roles),
+        id=user.id, org_id=None, roles=list(roles),
         permissions=[],
     )
 

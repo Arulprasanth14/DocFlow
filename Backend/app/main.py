@@ -60,6 +60,14 @@ async def lifespan(app: FastAPI):
     # Validate production configuration
     settings.validate_production()
 
+    # Refuse to boot on a JWT setup that cannot be verified safely (unknown
+    # or `none` algorithm, RS* without PEM keys). Signing and verifying read
+    # the same resolved algorithm, so a bad value here is not recoverable
+    # per-request.
+    from app.core.security import validate_jwt_config
+
+    validate_jwt_config()
+
     # Configure structured logging
     configure_logging()
 
@@ -171,7 +179,19 @@ def create_app() -> FastAPI:
         fields = getattr(exc, "fields", None)
         if fields:
             body["fields"] = [f.as_dict() for f in fields]
-        return JSONResponse(status_code=exc.status_code, content=body)
+        # Machine-readable code, only when the raiser set one. The frontend
+        # branches on ACCOUNT_DEACTIVATED / SESSION_REVOKED.
+        code = getattr(exc, "code", None)
+        if code:
+            body["code"] = code
+        # exc.headers was being dropped: Retry-After on a 429 and
+        # WWW-Authenticate on a 401 are part of the contract, and neither was
+        # reaching the client because this handler built the response by hand.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=body,
+            headers=getattr(exc, "headers", None),
+        )
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
@@ -181,6 +201,10 @@ def create_app() -> FastAPI:
             content={
                 "error": "Internal server error",
                 "status_code": 500,
+                # Spec section 3.3: a code on the 500 too, so a client can tell
+                # "the server broke" from an expected auth outcome. It must
+                # never be used FOR an expected auth outcome.
+                "code": "INTERNAL_ERROR",
                 "request_id": getattr(request.state, "request_id", None),
             },
         )

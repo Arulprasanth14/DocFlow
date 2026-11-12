@@ -499,7 +499,7 @@ class SummaryService:
         """
         from app.services.document_service import _is_run_participant
 
-        if actor.is_superadmin or "admin" in actor.roles or "hr" in actor.roles:
+        if actor.is_admin_or_hr():
             return
         if await _is_run_participant(self.db, doc.id, actor.id):
             return

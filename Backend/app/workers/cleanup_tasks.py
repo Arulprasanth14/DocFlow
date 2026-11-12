@@ -40,6 +40,31 @@ logger = structlog.get_logger(__name__)
 RETENTION_ACTION = "document.retention_purge"
 
 
+@celery_app.task(name="app.workers.cleanup_tasks.purge_expired_sessions")
+def purge_expired_sessions() -> dict:
+    """Delete sessions that expired more than SESSION_PURGE_AFTER_DAYS ago.
+
+    Expired rows are already ignored by every auth check, so this is hygiene,
+    not security: without it the table grows by one row per login forever, and
+    with rotation enabled by one row per REFRESH. The grace period keeps
+    recent history around long enough to investigate an incident.
+    """
+    return asyncio.run(_run_session_purge())
+
+
+async def _run_session_purge() -> dict:
+    from app.repositories.user_repo import SessionRepository
+
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=settings.SESSION_PURGE_AFTER_DAYS
+    )
+    async with async_session_factory() as db:
+        deleted = await SessionRepository(db).delete_expired_before(cutoff)
+        await db.commit()
+    logger.info("session_purge_complete", deleted=deleted, cutoff=cutoff.isoformat())
+    return {"deleted": deleted, "cutoff": cutoff.isoformat()}
+
+
 @celery_app.task(name="app.workers.cleanup_tasks.cleanup_expired_documents")
 def cleanup_expired_documents() -> dict:
     """Nightly retention pass. Returns a summary for the Celery result backend."""

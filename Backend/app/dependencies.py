@@ -12,12 +12,16 @@ from uuid import UUID
 from fastapi import Depends, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import structlog
+
 from app.core.exceptions import ForbiddenException, UnauthorizedException
 from app.core.security import decode_token
 from app.database import get_db
 from app.domain.enums import Permission
-from app.domain.permissions import AuthUser
+from app.domain.permissions import AuthUser, assert_can_authenticate
 
+
+logger = structlog.get_logger(__name__)
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DatabaseDep = Annotated[AsyncSession, Depends(get_db)]
@@ -29,25 +33,28 @@ async def _get_token_from_request(request: Request) -> str:
     """Extract Bearer token from Authorization header."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise UnauthorizedException("Missing or invalid Authorization header")
+        raise UnauthorizedException(
+            "Missing or invalid Authorization header", code="INVALID_TOKEN"
+        )
     return auth_header[7:]
 
 
-async def get_current_user(
-    request: Request,
-    db: DatabaseDep,
-) -> AuthUser:
+async def authenticate_token(db: AsyncSession, token: str) -> AuthUser:
     """
-    FastAPI dependency: validate JWT + session, return AuthUser.
+    Validate a DocFlow access token and return the AuthUser it stands for.
 
-    Steps:
-    1. Extract Bearer token from Authorization header
-    2. Decode + verify JWT signature
-    3. Check session is not revoked in DB
-    4. Return AuthUser with resolved permissions
+    THE single implementation of per-request authentication (spec section 6.2
+    steps 2-4), so HTTP requests and WebSocket connections cannot drift apart:
+
+    2. Decode + verify the JWT (pinned algorithm, `type` must be access)
+    3. The session must exist FOR THIS USER and not be revoked or expired
+    4. The account must still be allowed to authenticate
+
+    Raises UnauthorizedException (401) or ForbiddenException (403); callers
+    decide how to surface that - HTTP returns the status, WebSockets close
+    with 1008.
     """
-    token = await _get_token_from_request(request)
-    payload = decode_token(token)
+    payload = decode_token(token, expected_type="access")
 
     user_id = UUID(payload["sub"])
     org_id = UUID(payload["org_id"]) if payload.get("org_id") else None
@@ -56,29 +63,57 @@ async def get_current_user(
     permissions = payload.get("permissions", [])
     is_superadmin = payload.get("is_superadmin", False)
 
-    # Check session has not been revoked
+    # Session + user state in ONE query (the spec's per-request budget).
+    #
+    # Bound to the user, not just to the session id: without the user_id
+    # predicate a token only needs SOME live `jti` to pass this check, so an
+    # attacker who can mint a signature could take their own session id and
+    # claim any `sub` (any user, any org, superadmin).
+    #
+    # The users join is what makes deactivation take effect immediately: the
+    # flag used to be written and never read, so a deactivated user kept
+    # working until their session expired (up to 30 days).
     from sqlalchemy import select
-    from app.models.user import Session
+    from app.models.user import Session, User
 
     result = await db.execute(
-        select(Session).where(
+        select(Session, User.is_active, User.status)
+        .join(User, User.id == Session.user_id)
+        .where(
             Session.session_token == session_id,
+            Session.user_id == user_id,
             Session.revoked_at.is_(None),
+            User.deleted_at.is_(None),
         )
     )
-    session = result.scalar_one_or_none()
-    if not session or not session.is_valid:
-        raise UnauthorizedException("Session expired or revoked. Please log in again.")
+    row = result.first()
+    if row is None:
+        raise UnauthorizedException(
+            "Session expired or revoked. Please log in again.",
+            code="SESSION_REVOKED",
+        )
+    session, is_active, status = row
+    if not session.is_valid:
+        raise UnauthorizedException(
+            "Session expired or revoked. Please log in again.",
+            code="SESSION_REVOKED",
+        )
+    assert_can_authenticate(is_active=is_active, status=status)
 
     return AuthUser(
         id=user_id,
-        email=payload.get("email", ""),
         org_id=org_id,
         roles=roles,
         permissions=permissions,
         is_superadmin=is_superadmin,
         session_id=session_id,
     )
+
+
+async def get_current_user(request: Request, db: DatabaseDep) -> AuthUser:
+    """FastAPI dependency: the Bearer token's AuthUser."""
+    token = await _get_token_from_request(request)
+    return await authenticate_token(db, token)
 
 
 CurrentUser = Annotated[AuthUser, Depends(get_current_user)]
@@ -138,13 +173,15 @@ async def get_current_firebase_user(
     try:
         claims = await verify_firebase_token(token)
     except ValueError as exc:
-        raise UnauthorizedException(f"Invalid Firebase token: {exc}") from exc
+        raise UnauthorizedException(
+            f"Invalid Firebase token: {exc}", code="INVALID_TOKEN"
+        ) from exc
     except FirebaseUnavailableError as exc:
         # 503, not 500/401: the credential isn't bad, the auth provider just
         # couldn't be reached. The client should retry, not sign out or
         # treat the user as new.
         raise ServiceUnavailableException(
-            "Sign-in"
+            "Sign-in", code="AUTH_PROVIDER_UNAVAILABLE"
         ) from exc
 
     return FirebaseAuthUser(
@@ -175,8 +212,16 @@ def require_permission(permission: Permission | str):
         user: CurrentUser,
     ) -> AuthUser:
         if not user.has_permission(permission):
+            # Sampling/aggregation is the caller's problem: one line per
+            # denial is fine at this volume, and a denial is exactly what an
+            # investigation looks for.
+            logger.info(
+                "rbac.permission.denied",
+                user_id=str(user.id), required=str(permission),
+            )
             raise ForbiddenException(
-                f"You need the '{permission}' permission to perform this action"
+                f"You need the '{permission}' permission to perform this action",
+                code="FORBIDDEN",
             )
         return user
 
@@ -201,6 +246,27 @@ def require_superadmin():
             raise ForbiddenException("Superadmin access required")
         return user
     return Depends(check)
+
+
+def require_main_admin(user: AuthUser) -> None:
+    """Strictly the Main Administrator org role (or a platform superadmin).
+
+    Per the requirements report section 2.1/13.3 only the Main Administrator
+    may add an HR user, delete or deactivate a member, or manage roles and
+    permissions - HR support staff must NOT pass this gate even though they
+    pass `require_admin_or_hr` for day-to-day admin screens.
+
+    Lives here, next to the other guards, rather than inside a router: it is
+    not a routing concern, and the spec's component map expected it here.
+    """
+    if not user.is_org_admin():
+        raise ForbiddenException("Only the Main Administrator can perform this action")
+
+
+def require_admin_or_hr(user: AuthUser) -> None:
+    """Org-level day-to-day admin access: Main Administrator OR HR."""
+    if not user.is_admin_or_hr():
+        raise ForbiddenException("Only organization administrators can perform this action")
 
 
 def require_role(*allowed_roles: str):

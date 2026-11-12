@@ -126,6 +126,36 @@ export interface WorkflowTemplateInput {
   stages: WorkflowStageInput[];
 }
 
+/** One stage of a workflow, as the full-detail read returns it. */
+export interface WorkflowStageDetail {
+  id: string;
+  name: string;
+  sequence_order: number;
+  stage_type: string;
+  min_approvals_required: number;
+  sla_hours: number | null;
+  reapproval_on_revision: boolean;
+  requires_signature: boolean;
+  approver_rules: { id: string; rule_type: string; rule_value: Record<string, unknown> }[];
+  /**
+   * §5.5 fields C and D, restored from the template's current immutable
+   * version. `workflow_stages` has no column for any of these, so before the
+   * server started filling them in the edit form dropped every stage's
+   * department — and with it the department-mandated signing lock — and
+   * re-derived the deadline instead of showing the words the owner chose.
+   *
+   * Null on a workflow created before versioning existed, so every read site
+   * must have a fallback.
+   */
+  department_id: string | null;
+  department_name: string | null;
+  due_within_value: number | null;
+  due_within_unit: 'hours' | 'days' | null;
+  /** Resolved server-side: a Worker or Trainee cannot read the member list. */
+  approver_user_id: string | null;
+  approver_name: string | null;
+}
+
 export interface WorkflowTemplateDetail {
   id: string;
   org_id: string;
@@ -136,21 +166,14 @@ export interface WorkflowTemplateDetail {
   document_type_scope: string | null;
   is_active: boolean;
   version: number;
+  /** WF-BLD-07 / BR-06 — now serialized by the API, so an edit no longer
+   *  silently turns it off. */
+  require_full_reapproval: boolean;
   created_by: string | null;
   visibility: 'private' | 'organization';
   created_at: string;
   updated_at: string | null;
-  stages: {
-    id: string;
-    name: string;
-    sequence_order: number;
-    stage_type: string;
-    min_approvals_required: number;
-    sla_hours: number | null;
-    reapproval_on_revision: boolean;
-    requires_signature: boolean;
-    approver_rules: { id: string; rule_type: string; rule_value: Record<string, unknown> }[];
-  }[];
+  stages: WorkflowStageDetail[];
 }
 
 export interface TemplateReviewStage {

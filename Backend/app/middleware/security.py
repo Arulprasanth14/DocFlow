@@ -110,13 +110,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Section 11 Security — a fixed-window limiter per identity and bucket."""
 
     #: Path prefixes that get their own, tighter bucket.
+    #
+    # /api/v1/auth is deliberately NOT here any more. One coarse bucket for
+    # the whole prefix meant /auth/me and /auth/refresh spent the same
+    # allowance as /auth/login, so an office behind one NAT could lock itself
+    # out by doing nothing wrong, while /auth/login still got a far more
+    # generous budget than password guessing warrants. The auth routes now
+    # carry per-route sliding windows (core/rate_limit.py); what is left here
+    # is the global bucket, which still applies to them.
     BUCKETS: tuple[tuple[str, str], ...] = (
-        ("/api/v1/auth", "auth"),
         ("/api/v1/files", "uploads"),
         ("/api/v1/ai", "ai"),
     )
 
-    SKIP_PREFIXES = ("/health", "/metrics", "/docs", "/openapi", "/redoc")
+    # /auth/me is read on every page load and carries no abuse value, so it
+    # is exempt entirely rather than sharing an allowance with sign-in.
+    SKIP_PREFIXES = (
+        "/health", "/metrics", "/docs", "/openapi", "/redoc",
+        "/api/v1/auth/me",
+    )
 
     def _bucket(self, path: str) -> str:
         for prefix, name in self.BUCKETS:
@@ -126,7 +138,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _limit_for(self, bucket: str) -> tuple[int, int]:
         raw = {
-            "auth": settings.RATE_LIMIT_AUTH,
             "uploads": settings.RATE_LIMIT_UPLOADS,
             "ai": settings.RATE_LIMIT_AI_CHAT,
         }.get(bucket, settings.RATE_LIMIT_GLOBAL)

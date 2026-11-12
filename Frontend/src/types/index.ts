@@ -30,6 +30,12 @@ export interface ApiError {
   error: string;
   status_code: number;
   request_id?: string;
+  /**
+   * Machine-readable error code, set by the backend only where the client has
+   * to behave differently: ACCOUNT_DEACTIVATED, ACCOUNT_SUSPENDED,
+   * SESSION_REVOKED. A prose message cannot carry that distinction.
+   */
+  code?: string;
   /** Present on a 422 the server could attribute to specific fields. */
   fields?: FieldProblem[];
 }

@@ -31,6 +31,13 @@ class User(BaseModel):
     # 'member' | 'department_admin' | 'super_admin'
     # This does NOT determine who is a requester vs. approver on a workflow —
     # that is per-instance, determined by WorkflowStage.StageApproverRule.
+    #
+    # DEPRECATED and unread: authority comes from the four organization roles
+    # (OrganizationMember -> Role -> role_permissions) plus the platform
+    # `is_superadmin` flag. Nothing in auth, RBAC or the services reads this
+    # column; it is a third role model sitting next to the real one. Dropping
+    # it needs a migration, so it is left in place and flagged instead - do
+    # not start reading it.
     role: Mapped[str] = mapped_column(String(50), default="member", nullable=False, index=True)
 
     # Legacy — kept for backward compatibility; superseded by `role`
@@ -92,14 +99,39 @@ class Session(BaseModel):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    # ── Rotation (Auth/RBAC Gap #5) ────────────────────────────────────────
+    # Every login starts a FAMILY. Each refresh rotates the current session
+    # out (rotated_at + replaced_by) and inserts its successor with the same
+    # family_id, so presenting an already-rotated refresh token is detectable:
+    # either a legitimate parallel tab inside the grace window, or a stolen
+    # cookie being replayed - in which case the whole family dies.
+    family_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    # The organization this token was minted for. NULL on sessions created
+    # before the rotation migration, and on sessions of a user with no org.
+    org_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replaced_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    #: logout | logout_all | deactivate | role_change | status_change |
+    #: removal | theft | password_change | admin
+    revoked_reason: Mapped[str | None] = mapped_column(String(50))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     user: Mapped["User"] = relationship("User", back_populates="sessions", lazy="noload")
 
     @property
     def is_valid(self) -> bool:
-        """Check if session is still valid (not revoked, not expired)."""
+        """Not revoked, not expired. Says nothing about rotation: an access
+        token stays usable until its own `exp` even after its session has been
+        rotated (decided deliberately - see AuthService.refresh_token)."""
         from datetime import timezone
         now = datetime.now(timezone.utc)
         return self.revoked_at is None and self.expires_at > now
 
-    def revoke(self) -> None:
+    def revoke(self, reason: str | None = None) -> None:
         self.revoked_at = utcnow()
+        if reason:
+            self.revoked_reason = reason

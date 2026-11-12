@@ -1,0 +1,44 @@
+- generic [ref=f1e2]:
+  - generic [ref=f1e3]:
+    - complementary [ref=f1e4]:
+      - generic [ref=f1e5]: DocFlow
+      - generic [ref=f1e11]: Enterprise Document Platform
+      - heading [level=1] [ref=f1e12]:
+        - text: Where documents
+        - emphasis [ref=f1e13]: move
+        - text: at the speed of your team.
+      - generic [ref=f1e14]:
+        - generic [ref=f1e21]:
+          - generic [ref=f1e22]: Automated approvals
+          - generic [ref=f1e23]: Route documents through multi-stage workflows that run themselves.
+        - generic [ref=f1e29]:
+          - generic [ref=f1e30]: Enterprise-grade control
+          - generic [ref=f1e31]: Role-based access, audit trails and org-scoped isolation by default.
+        - generic [ref=f1e37]:
+          - generic [ref=f1e38]: AI that reads the fine print
+          - generic [ref=f1e39]: Draft, summarise and search across every document instantly.
+      - generic [ref=f1e40]:
+        - generic [ref=f1e41]:
+          - generic [ref=f1e42]: Approval pipeline
+          - generic [ref=f1e43]: On track
+        - generic [ref=f1e44]:
+          - generic [ref=f1e45]: Submitted
+          - generic [ref=f1e53]: Review
+          - generic [ref=f1e61]: Approved
+    - generic [ref=f1e69]:
+      - generic [ref=f1e70]:
+        - generic [ref=f1e71]:
+          - generic [ref=f1e72]: DocFlow
+          - heading "Welcome back" [level=1] [ref=f1e78]
+          - paragraph [ref=f1e79]: Sign in to your workspace
+        - generic [ref=f1e80]:
+          - button "Continue with Google" [ref=f1e81] [cursor=pointer]
+          - button "Continue with Microsoft" [ref=f1e87] [cursor=pointer]
+        - generic [ref=f1e93]: or with email
+        - button "Continue with Email" [active] [ref=f1e97] [cursor=pointer]
+        - paragraph [ref=f1e101]:
+          - text: Don't have an account?
+          - link "Create one" [ref=f1e102] [cursor=pointer]:
+            - /url: /register
+      - paragraph [ref=f1e103]: Enterprise Document Workflow & Approval Platform
+  - button "Open Tanstack query devtools" [ref=f1e154] [cursor=pointer]

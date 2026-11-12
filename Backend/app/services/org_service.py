@@ -1,7 +1,10 @@
 """
 DocFlow Backend — Service: Organizations & RBAC
 Business logic for org settings, departments, teams, roles, and member management.
-Includes Redis permission cache with 5-minute TTL (invalidated on role/member changes).
+Member role, status and removal changes revoke the member's sessions - the
+only mechanism that makes them take effect before the token expires, since
+an access token carries a permission snapshot. There is deliberately no
+permission cache: the one that used to live here was written to, never read.
 """
 from __future__ import annotations
 
@@ -15,15 +18,17 @@ from app.core.exceptions import (
     ConflictException,
     ForbiddenException,
     NotFoundException,
+    UnprocessableEntityException,
 )
-from app.core.redis import cache_delete, cache_get, cache_set
-from app.domain.enums import Permission
+from app.domain.enums import MemberStatus, Permission
+from app.core.audit import write_audit_event
+from app.domain.permissions import roles_include_org_admin
 from app.models.organization import Organization, OrganizationMember, Role
 from app.models.user import User
 from app.repositories.dept_repo import DepartmentRepository, TeamRepository
 from app.repositories.org_repo import OrgMemberRepository, OrganizationRepository
 from app.repositories.role_repo import MemberRepository, RoleRepository
-from app.repositories.user_repo import UserRepository
+from app.repositories.user_repo import SessionRepository, UserRepository
 from app.schemas.org import (
     DepartmentResponse,
     JoinRequestStatusResponse,
@@ -40,13 +45,6 @@ from app.schemas.org import (
 )
 
 logger = structlog.get_logger(__name__)
-
-_PERM_CACHE_TTL = 300  # 5 minutes
-
-
-def _perm_cache_key(user_id: UUID, org_id: UUID) -> str:
-    return f"permissions:{user_id}:{org_id}"
-
 
 # ── Org Service ───────────────────────────────────────────────────────────────
 
@@ -388,8 +386,11 @@ class RoleService:
         await self.role_repo.set_permissions(role_id, permission_codes)
         await self.db.commit()
 
-        # Invalidate permission cache for all members with this role
-        await self._invalidate_role_permission_caches(role_id, org_id)
+        # TODO(gap-3): if editing a role's permission set is ever exposed
+        # (every mutating role endpoint currently rejects all callers), this
+        # must revoke the sessions of every member holding the role - their
+        # tokens carry the old snapshot. The permission-cache deletion that
+        # used to sit here did nothing: nothing ever read that cache.
 
         logger.info("role_permissions_set", role_id=str(role_id), count=len(permission_codes))
 
@@ -438,21 +439,6 @@ class RoleService:
             by_category.setdefault(p.category, []).append(p.code)
         return PermissionCatalogResponse(permissions=perms, by_category=by_category)
 
-    async def _invalidate_role_permission_caches(self, role_id: UUID, org_id: UUID) -> None:
-        """Delete Redis permission cache entries for all users with this role."""
-        from sqlalchemy import select
-        from app.models.organization import OrganizationMember
-        result = await self.db.execute(
-            select(OrganizationMember.user_id).where(
-                OrganizationMember.role_id == role_id,
-                OrganizationMember.deleted_at.is_(None),
-            )
-        )
-        user_ids = result.scalars().all()
-        for uid in user_ids:
-            await cache_delete(_perm_cache_key(uid, org_id))
-
-
 # ── Member Service ────────────────────────────────────────────────────────────
 
 class MemberService:
@@ -465,6 +451,7 @@ class MemberService:
         self.org_member_repo = OrgMemberRepository(db)
         self.member_repo = MemberRepository(db)
         self.role_repo = RoleRepository(db)
+        self.session_repo = SessionRepository(db)
 
     async def list_members(
         self,
@@ -536,7 +523,7 @@ class MemberService:
         if not role:
             raise NotFoundException("Role not found")
 
-        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        is_main_admin = roles_include_org_admin(actor_roles, actor_is_superadmin)
         if role.name == "admin":
             raise ForbiddenException(
                 "The Main Administrator role cannot be assigned via invite"
@@ -666,8 +653,12 @@ class MemberService:
         if not member:
             raise NotFoundException("Member not found")
 
-        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        is_main_admin = roles_include_org_admin(actor_roles, actor_is_superadmin)
         current_role_name = member.role.name if member.role else None
+        previous_status = member.status
+        role_changed = False
+        status_changed = False
+        new_role_name = current_role_name
 
         if role_id is not None:
             role = await self.role_repo.get_by_id(role_id, org_id)
@@ -687,18 +678,68 @@ class MemberService:
             if role.name != "admin":
                 await self._assert_not_last_admin(member, org_id)
             member.role_id = role_id
-            # Invalidate permission cache on role change
-            await cache_delete(_perm_cache_key(member.user_id, org_id))
+            role_changed = True
+            new_role_name = role.name
 
         if dept_id is not None:
             member.dept_id = dept_id
         if team_id is not None:
             member.team_id = team_id
         if status is not None:
+            # A typo used to be stored verbatim: "actve" made the member vanish
+            # from every status-filtered query, with no error anywhere.
+            if status not in {str(v) for v in MemberStatus}:
+                raise UnprocessableEntityException(
+                    f"'{status}' is not a valid member status. Valid values: "
+                    + ", ".join(sorted(str(v) for v in MemberStatus))
+                )
+            status_changed = status != member.status
             member.status = status
+
+        # A demoted or suspended member must lose the sessions they already
+        # hold: the access token carries a permission snapshot that is now
+        # wrong, and revocation is the only thing that ends it before `exp`.
+        # Same transaction as the change itself.
+        # TODO(multi-org): revoke_all cuts the user's sessions in EVERY
+        # organization. Per-org revocation needs sessions.org_id (Phase F).
+        if role_changed or status_changed:
+            await self.session_repo.revoke_all(member.user_id)
 
         await self.db.flush()
         await self.db.commit()
+
+        if role_changed:
+            await write_audit_event(
+                self.db, org_id=org_id, actor_id=None,
+                action="rbac.role.changed", resource_type="OrganizationMember",
+                resource_id=member.id,
+                before={"role": current_role_name}, after={"role": new_role_name},
+                commit=True,
+            )
+            logger.info(
+                "rbac.role.changed", org_id=str(org_id),
+                target_user_id=str(member.user_id), member_id=str(member_id),
+                old_role=current_role_name, new_role=new_role_name,
+            )
+        if status_changed:
+            await write_audit_event(
+                self.db, org_id=org_id, actor_id=None,
+                action="rbac.member.status_changed",
+                resource_type="OrganizationMember", resource_id=member.id,
+                before={"status": previous_status}, after={"status": status},
+                commit=True,
+            )
+            logger.info(
+                "rbac.member.status_changed", org_id=str(org_id),
+                target_user_id=str(member.user_id), member_id=str(member_id),
+                old_status=previous_status, new_status=status,
+            )
+        if role_changed or status_changed:
+            logger.info(
+                "auth.session.revoked",
+                reason="role_change" if role_changed else "status_change",
+                org_id=str(org_id), target_user_id=str(member.user_id),
+            )
 
         user = await self.member_repo.get_user_for_member(member)
         return MemberResponse(
@@ -725,7 +766,7 @@ class MemberService:
         if not member:
             raise NotFoundException("Member not found")
 
-        is_main_admin = actor_is_superadmin or "admin" in (actor_roles or [])
+        is_main_admin = roles_include_org_admin(actor_roles, actor_is_superadmin)
         # §2.1/13.3: "Delete a member" (an active/suspended account) is
         # Main Administrator-only. Denying a still-PENDING join request is a
         # distinct, lower-stakes action that reuses this same endpoint
@@ -740,11 +781,24 @@ class MemberService:
         from app.models.base import utcnow
         member.deleted_at = utcnow()
         member.status = "inactive"
-        # Invalidate permission cache
-        await cache_delete(_perm_cache_key(member.user_id, org_id))
+        # TODO(multi-org): revoke_all cuts the user's sessions in EVERY
+        # organization. Per-org revocation needs sessions.org_id (Phase F).
+        await self.session_repo.revoke_all(member.user_id)
         await self.db.flush()
         await self.db.commit()
-        logger.info("member_removed", member_id=str(member_id))
+        await write_audit_event(
+            self.db, org_id=org_id, actor_id=None,
+            action="rbac.member.removed", resource_type="OrganizationMember",
+            resource_id=member.id, after={"status": "inactive"}, commit=True,
+        )
+        logger.info(
+            "rbac.member.removed", member_id=str(member_id),
+            target_user_id=str(member.user_id), org_id=str(org_id),
+        )
+        logger.info(
+            "auth.session.revoked", reason="removal",
+            org_id=str(org_id), target_user_id=str(member.user_id),
+        )
 
     # ── Join Requests ─────────────────────────────────────────────────────────
     # Self-service "request access to an existing organization" — the normal
@@ -781,22 +835,6 @@ class MemberService:
             return JoinRequestStatusResponse(org_name=None, status=None)
         member, org = row
         return JoinRequestStatusResponse(org_name=org.name, status=member.status)
-
-
-# ── Permission Cache Helpers (for external use) ───────────────────────────────
-
-async def get_cached_permissions(user_id: UUID, org_id: UUID) -> list[str] | None:
-    """Check Redis cache for user permissions. Returns None on miss."""
-    cached = await cache_get(_perm_cache_key(user_id, org_id))
-    if cached and isinstance(cached, list):
-        return cached
-    return None
-
-
-async def set_cached_permissions(
-    user_id: UUID, org_id: UUID, permissions: list[str]
-) -> None:
-    await cache_set(_perm_cache_key(user_id, org_id), permissions, ttl_seconds=_PERM_CACHE_TTL)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

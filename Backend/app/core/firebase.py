@@ -147,6 +147,43 @@ async def verify_firebase_token(id_token: str) -> dict:
     return await asyncio.to_thread(_verify_sync, id_token)
 
 
+async def revoke_firebase_sessions(firebase_uid: str, *, disable_user: bool = False) -> bool:
+    """
+    Revoke a Firebase identity's refresh tokens, optionally disabling it.
+
+    Without this, locking a user out of DocFlow leaves the Firebase side able
+    to mint fresh ID tokens for them, which is the credential /auth/firebase-
+    login accepts.
+
+    Best effort by design: returns True on success, False on any failure, and
+    NEVER raises. The DocFlow-side change (flags + session revocation) is the
+    authoritative one and must not be rolled back because an external provider
+    was unreachable - the caller logs the False and moves on.
+    """
+    import asyncio
+
+    if not _firebase_app or not firebase_uid:
+        return False
+
+    def _revoke() -> bool:
+        from firebase_admin import auth as firebase_auth
+
+        firebase_auth.revoke_refresh_tokens(firebase_uid)
+        if disable_user:
+            firebase_auth.update_user(firebase_uid, disabled=True)
+        return True
+
+    try:
+        return await asyncio.to_thread(_revoke)
+    except Exception as exc:  # noqa: BLE001 - provider failure must not propagate
+        # stdlib logging in this module (not structlog): %-style, no kwargs.
+        logger.warning(
+            "firebase_session_revocation_failed: uid=%s disable=%s %s: %s",
+            firebase_uid, disable_user, type(exc).__name__, exc,
+        )
+        return False
+
+
 def create_firebase_user(email: str, password: str, name: str | None = None) -> str:
     """
     Create a Firebase account server-side with an admin-assigned password.

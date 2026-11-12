@@ -34,7 +34,7 @@ from app.services.approval_service import ApprovalService
 
 def _as(user, org, *roles) -> AuthUser:
     return AuthUser(
-        id=user.id, email=user.email, org_id=org.id, roles=list(roles),
+        id=user.id, org_id=org.id, roles=list(roles),
         permissions=[],
     )
 
@@ -205,7 +205,7 @@ async def test_another_org_gets_404(db_session, org, worker, trainee):
     )
 
     outsider = AuthUser(
-        id=approver.id, email=approver.email, org_id=uuid.uuid4(),
+        id=approver.id, org_id=uuid.uuid4(),
         roles=["admin"], permissions=[],
     )
     with pytest.raises(NotFoundException):

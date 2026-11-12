@@ -48,6 +48,7 @@ from app.core.exceptions import (
 from app.models.organization import Organization, OrganizationMember, Role
 from app.models.user import User
 from app.repositories.org_repo import OrgMemberRepository, OrganizationRepository
+from app.domain.permissions import assert_can_authenticate
 from app.repositories.user_repo import UserRepository
 
 logger = structlog.get_logger(__name__)
@@ -124,8 +125,11 @@ class AccountService:
         else:
             self._refresh_profile(user, name, avatar_url)
 
-        if user.status == "suspended":
-            raise ForbiddenException("Your account has been suspended. Contact your administrator.")
+        # One shared rule for every authentication path (see
+        # domain/permissions.assert_can_authenticate). Blocks BEFORE any
+        # session is created, so a deactivated or suspended identity never
+        # gets a token.
+        assert_can_authenticate(is_active=user.is_active, status=user.status)
         await self.db.flush()
         return user
 
@@ -185,7 +189,8 @@ class AccountService:
             logger.warning("account_link_refused_unverified_email", user_id=str(existing.id))
             raise ForbiddenException(
                 "An account with this email already exists. Verify your email "
-                "address with your sign-in provider, then try again."
+                "address with your sign-in provider, then try again.",
+                code="EMAIL_NOT_VERIFIED",
             )
 
         existing.firebase_uid = firebase_uid

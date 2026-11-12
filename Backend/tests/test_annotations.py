@@ -44,7 +44,7 @@ RECT = AnnotationRect(x=0.1, y=0.2, w=0.3, h=0.04)
 
 def _as(user, org, *roles) -> AuthUser:
     return AuthUser(
-        id=user.id, email=user.email, org_id=org.id,
+        id=user.id, org_id=org.id,
         roles=list(roles) or ["worker"], permissions=[],
     )
 

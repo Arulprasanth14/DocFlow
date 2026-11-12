@@ -1,0 +1,110 @@
+- generic [ref=f5e3]:
+  - complementary [ref=f5e4]:
+    - generic "Collapse sidebar" [ref=f5e5] [cursor=pointer]: DocFlow
+    - navigation [ref=f5e11]:
+      - generic [ref=f5e12]: Workspace
+      - link "Dashboard" [ref=f5e13] [cursor=pointer]:
+        - /url: /dashboard
+      - link "Documents" [ref=f5e21] [cursor=pointer]:
+        - /url: /documents
+      - link "Workflows" [ref=f5e27] [cursor=pointer]:
+        - /url: /workflows
+      - link "Search" [ref=f5e36] [cursor=pointer]:
+        - /url: /search
+      - link "Analytics" [ref=f5e42] [cursor=pointer]:
+        - /url: /analytics
+      - link "Messages" [ref=f5e47] [cursor=pointer]:
+        - /url: /chat
+      - link "Drafts" [ref=f5e52] [cursor=pointer]:
+        - /url: /drafts
+      - link "Agent" [ref=f5e59] [cursor=pointer]:
+        - /url: /agent
+      - link "Settings" [ref=f5e65] [cursor=pointer]:
+        - /url: /settings
+    - generic [ref=f5e78]:
+      - generic [ref=f5e79]: Workspace
+      - generic [ref=f5e80]: SD Innovations
+  - main [ref=f5e84]:
+    - generic [ref=f5e85]:
+      - button "Search documents, workflows, or users… ⌘K" [ref=f5e86] [cursor=pointer]:
+        - generic [ref=f5e90]: Search documents, workflows, or users…
+        - generic [ref=f5e91]: ⌘K
+      - generic [ref=f5e92]:
+        - button "Switch to Dark Mode" [ref=f5e93] [cursor=pointer]
+        - button [ref=f5e98] [cursor=pointer]
+        - button "AM Arun Mehta" [ref=f5e104] [cursor=pointer]:
+          - generic [ref=f5e105]: AM
+          - generic [ref=f5e106]: Arun Mehta
+    - generic [ref=f5e110]:
+      - generic [ref=f5e111]: /workflows/wf-1/edit
+      - generic [ref=f5e112]:
+        - generic [ref=f5e113]:
+          - navigation "Breadcrumb" [ref=f5e114]:
+            - link "Workflows" [ref=f5e116] [cursor=pointer]:
+              - /url: /workflows
+          - generic [ref=f5e117]:
+            - generic [ref=f5e118]:
+              - heading "Edit workflow" [active] [level=1] [ref=f5e119]
+              - paragraph [ref=f5e120]: Saving creates a new version. Documents already in approval keep running on the version they were submitted with.
+            - button "Back" [ref=f5e122] [cursor=pointer]
+        - generic [ref=f5e126]:
+          - navigation "Submission steps" [ref=f5e128]:
+            - button "1 Build" [disabled] [ref=f5e130]:
+              - generic [ref=f5e131]: "1"
+              - generic [ref=f5e132]: Build
+            - button "2 Preview" [ref=f5e135] [cursor=pointer]:
+              - generic [ref=f5e136]: "2"
+              - generic [ref=f5e137]: Preview
+          - paragraph [ref=f5e138]: This workflow is on version 3. Saving creates version 4; in-flight runs are unaffected.
+          - generic [ref=f5e141]:
+            - heading "Workflow details" [level=2] [ref=f5e142]
+            - generic [ref=f5e143]:
+              - generic [ref=f5e144]:
+                - generic [ref=f5e145]: Workflow name *
+                - textbox "Workflow name *" [ref=f5e146]:
+                  - /placeholder: e.g. Purchase approval over 5k
+                  - text: Purchase approval over £5,000
+              - generic [ref=f5e147]:
+                - generic [ref=f5e148]: Description
+                - textbox "Description 107/500" [ref=f5e149]:
+                  - /placeholder: What is this route for?
+                  - text: "Two-step route for capital expenditure: the requester’s manager, then Finance for the signed authorisation."
+                - generic [ref=f5e150]: 107/500
+              - generic [ref=f5e151]:
+                - checkbox "Require full re-approval after changes When ON, a revised document restarts from Stage 1 instead of returning to the stage that requested changes." [checked] [ref=f5e152]
+                - generic [ref=f5e153]:
+                  - text: Require full re-approval after changes
+                  - generic [ref=f5e154]: When ON, a revised document restarts from Stage 1 instead of returning to the stage that requested changes.
+          - generic [ref=f5e155]:
+            - generic [ref=f5e156]:
+              - heading "Approval stages" [level=2] [ref=f5e157]
+              - button "Expand all" [ref=f5e158] [cursor=pointer]
+            - list [ref=f5e159]:
+              - listitem [ref=f5e160]:
+                - generic [ref=f5e162]:
+                  - button "Reorder Manager sign-off" [ref=f5e163]
+                  - generic [aria-hidden] [ref=f5e171]: Step 1
+                  - generic [ref=f5e172]:
+                    - text: Manager sign-off
+                    - generic [ref=f5e173]: — Submitter’s manager · Operations · 24 hours
+                  - button "Move Manager sign-off up" [disabled] [ref=f5e174]
+                  - button "Move Manager sign-off down" [ref=f5e177] [cursor=pointer]
+                  - button "Expand stage" [ref=f5e180] [cursor=pointer]
+                  - button "Remove Stage 1" [ref=f5e183] [cursor=pointer]
+              - listitem [ref=f5e187]:
+                - generic [ref=f5e189]:
+                  - button "Reorder Finance authorisation" [ref=f5e190]
+                  - generic [aria-hidden] [ref=f5e198]: Step 2
+                  - generic [ref=f5e199]:
+                    - text: Finance authorisation
+                    - generic [ref=f5e200]: — Priya Raman · Finance · 3 days
+                  - button "Move Finance authorisation up" [ref=f5e201] [cursor=pointer]
+                  - button "Move Finance authorisation down" [disabled] [ref=f5e204]
+                  - button "Expand stage" [ref=f5e207] [cursor=pointer]
+                  - button "Remove Stage 2" [ref=f5e210] [cursor=pointer]
+            - status [ref=f5e214]
+            - button "Add stage" [ref=f5e215] [cursor=pointer]
+        - generic [ref=f5e218]:
+          - button "Cancel" [ref=f5e219] [cursor=pointer]
+          - button "Preview workflow" [ref=f5e220] [cursor=pointer]
+  - region "Notifications alt+T"

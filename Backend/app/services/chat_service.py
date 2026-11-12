@@ -404,7 +404,7 @@ class ChatService:
 
         actor = AuthUser(
             id=user.id,
-            email=user.email,
+
             org_id=doc.org_id,
             roles=list(role_rows),
             permissions=[],

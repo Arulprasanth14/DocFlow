@@ -46,15 +46,18 @@ export default function WorkflowDetailPage() {
 
   if (isLoading) {
     return (
-      <div style={{ display: 'grid', gap: 12 }}>
-        <Skeleton style={{ height: 70, borderRadius: 14 }} />
-        <Skeleton style={{ height: 220, borderRadius: 14 }} />
-      </div>
+      <Shell>
+        <div style={{ display: 'grid', gap: 12 }}>
+          <Skeleton style={{ height: 70, borderRadius: 14 }} />
+          <Skeleton style={{ height: 220, borderRadius: 14 }} />
+        </div>
+      </Shell>
     );
   }
 
   if (error || !wf) {
     return (
+      <Shell>
       <EmptyState
         art="search"
         title="Workflow not found"
@@ -69,9 +72,15 @@ export default function WorkflowDetailPage() {
           </button>
         }
       />
+      </Shell>
     );
   }
 
+  // The API now resolves the approver's name and the stage's department
+  // server-side (a Worker or Trainee cannot read the member list themselves),
+  // so this page shows the real route instead of the placeholder
+  // "Assigned approver" it used to print for every stage. The id-based
+  // fallbacks keep a pre-versioning workflow readable rather than blank.
   const stages: PreviewStage[] = [...wf.stages]
     .sort((a, b) => a.sequence_order - b.sequence_order)
     .map((s) => {
@@ -82,20 +91,16 @@ export default function WorkflowDetailPage() {
       return {
         name: s.name,
         approverType: isManager ? 'submitter_manager' : 'specific_user',
-        // The detail payload carries ids, not names; the preview falls back to
-        // a neutral label rather than inventing a person (DESIGN.md: real data
-        // only). Resolving names here would need the member list and is not
-        // worth a second request on a read-only page.
-        approverName: isManager ? null : 'Assigned approver',
-        departmentName: null,
-        dueWithinValue: useDays ? hours / 24 : hours,
-        dueWithinUnit: useDays ? 'days' : 'hours',
+        approverName: isManager ? null : s.approver_name,
+        departmentName: s.department_name,
+        dueWithinValue: s.due_within_value ?? (useDays ? hours / 24 : hours),
+        dueWithinUnit: s.due_within_unit ?? (useDays ? 'days' : 'hours'),
         requireSigning: s.requires_signature,
       };
     });
 
   return (
-    <div>
+    <Shell>
       <PageHeader
         title={wf.name}
         description={wf.description ?? undefined}
@@ -128,18 +133,19 @@ export default function WorkflowDetailPage() {
         }
       />
 
-      <WorkflowPreview
-        name={wf.name}
-        description={wf.description}
-        stages={stages}
-        requireFullReapproval={
-          !!(wf as { require_full_reapproval?: boolean }).require_full_reapproval
-        }
-      />
+      <div style={{ marginTop: 20 }}>
+        <WorkflowPreview
+          name={wf.name}
+          description={wf.description}
+          stages={stages}
+          requireFullReapproval={wf.require_full_reapproval}
+          showTitle={false}
+        />
+      </div>
 
       {/* Version history — owner only (WF-LC-05, DM-04) */}
       {isOwner && versions && versions.length > 0 ? (
-        <section style={{ maxWidth: 760, margin: '26px auto 0' }}>
+        <section style={{ marginTop: 26 }}>
           <h2
             style={{
               margin: '0 0 10px',
@@ -198,6 +204,23 @@ export default function WorkflowDetailPage() {
           onClose={() => setSharing(false)}
         />
       ) : null}
+    </Shell>
+  );
+}
+
+/**
+ * The page shell. `page-content` carries the app's standard gutters, which
+ * this page was missing entirely, and the 760 column is WorkflowPreview's own
+ * width — so the header, the timeline and the version history share one axis
+ * instead of the header running full width over a centred timeline.
+ */
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="page-content"
+      style={{ paddingTop: 24, maxWidth: 760, margin: '0 auto', width: '100%' }}
+    >
+      {children}
     </div>
   );
 }

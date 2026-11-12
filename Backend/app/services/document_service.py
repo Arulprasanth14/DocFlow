@@ -176,6 +176,10 @@ async def can_user_access_document(db: AsyncSession, user: AuthUser, doc: Docume
     """
     if user.id == doc.submitted_by:
         return True
+    # NOT AuthUser.is_admin_or_hr(): that folds in the platform superadmin
+    # flag, and document visibility is deliberately an organization-role
+    # decision here. Left as a role check on purpose (see Q3 - current
+    # visibility is confirmed as intended and must not change).
     if "admin" in user.roles or "hr" in user.roles:
         return True
 

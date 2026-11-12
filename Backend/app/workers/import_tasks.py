@@ -173,7 +173,7 @@ async def _llm_pass(db, job: ImportJob, text: str, existing: list[dict]) -> list
     user = AuthUser(
         id=job.created_by,
         org_id=job.org_id,
-        email="",
+
         roles=set(),
         permissions=set(),
     )

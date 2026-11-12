@@ -93,16 +93,22 @@ class TemplateService:
             visibility=visibility,
         )
 
-        for stage_req in sorted(req.stages, key=lambda s: s.sequence_order):
+        # `version_stages` is in the same sequence_order order as this loop.
+        for i, stage_req in enumerate(
+            sorted(req.stages, key=lambda s: s.sequence_order)
+        ):
+            sla_hours, requires_signature = self._legacy_stage_fields(
+                stage_req, version_stages[i] if i < len(version_stages) else None
+            )
             stage = await self.stage_repo.create(
                 template_id=tmpl.id,
                 name=stage_req.name,
                 sequence_order=stage_req.sequence_order,
                 stage_type=stage_req.stage_type,
                 min_approvals_required=stage_req.min_approvals_required,
-                sla_hours=stage_req.sla_hours,
+                sla_hours=sla_hours,
                 reapproval_on_revision=stage_req.reapproval_on_revision,
-                requires_signature=stage_req.requires_signature,
+                requires_signature=requires_signature,
             )
             for rule in stage_req.approver_rules:
                 await self.stage_repo.add_approver_rule(
@@ -144,7 +150,7 @@ class TemplateService:
 
         # Reload with stages
         tmpl = await self.tmpl_repo.get_by_id(tmpl.id, org_id)
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
 
     async def validate_definition(self, stages: Sequence, org_id: uuid.UUID) -> None:
         """
@@ -308,11 +314,100 @@ class TemplateService:
                 "Trainees cannot be assigned as approvers: " + ", ".join(trainees)
             )
 
+    async def _to_response(self, tmpl) -> WorkflowTemplateResponse:
+        """Serialize a template and restore the fields only the version row has.
+
+        Every read of a full template goes through here. `workflow_stages`
+        predates the Workflow module and carries no department and no
+        due-within wording (§5.5 fields C/D), while the immutable
+        `workflow_version_stages` row written beside it carries both. Without
+        this, loading a workflow into the edit form dropped the department of
+        every stage - and with it the department-mandated signing lock
+        (WF-STG-20) - and showed the deadline re-derived from hours instead of
+        the words the owner chose.
+
+        Anything missing stays None: a template created before versioning
+        existed has no current version, and that is a legitimate state rather
+        than an error.
+        """
+        resp = WorkflowTemplateResponse.model_validate(tmpl)
+        if not resp.stages or not getattr(tmpl, "current_version_id", None):
+            return resp
+
+        from app.models.workflow import WorkflowVersionStage
+
+        rows = (
+            await self.db.execute(
+                select(WorkflowVersionStage)
+                .where(WorkflowVersionStage.version_id == tmpl.current_version_id)
+                .order_by(WorkflowVersionStage.position)
+            )
+        ).scalars().all()
+        if not rows:
+            return resp
+
+        # Stage names are unique within a workflow (enforced in
+        # _build_version_stages), so the name is a reliable join. Position is
+        # the fallback for a legacy row whose name was changed outside the
+        # versioned path.
+        by_name = {(r.name or "").strip().casefold(): r for r in rows}
+        ordered = sorted(resp.stages, key=lambda st: st.sequence_order)
+
+        pairs: list[tuple] = []
+        for i, stage in enumerate(ordered):
+            match = by_name.get((stage.name or "").strip().casefold())
+            if match is None and len(rows) == len(ordered):
+                match = rows[i]
+            if match is not None:
+                pairs.append((stage, match))
+
+        if not pairs:
+            return resp
+
+        dept_ids = {m.department_id for _, m in pairs if m.department_id}
+        user_ids = {m.approver_user_id for _, m in pairs if m.approver_user_id}
+
+        dept_names: dict[uuid.UUID, str] = {}
+        if dept_ids:
+            from app.models.organization import Department
+
+            result = await self.db.execute(
+                select(Department.id, Department.name).where(
+                    Department.id.in_(dept_ids)
+                )
+            )
+            dept_names = {d_id: name for d_id, name in result.all()}
+
+        user_names: dict[uuid.UUID, str] = {}
+        if user_ids:
+            from app.models.user import User
+
+            result = await self.db.execute(
+                select(User.id, User.name, User.email).where(User.id.in_(user_ids))
+            )
+            user_names = {u_id: (name or email) for u_id, name, email in result.all()}
+
+        for stage, match in pairs:
+            stage.department_id = match.department_id
+            stage.department_name = (
+                dept_names.get(match.department_id) if match.department_id else None
+            )
+            stage.due_within_value = match.due_within_value
+            stage.due_within_unit = match.due_within_unit
+            stage.approver_user_id = match.approver_user_id
+            stage.approver_name = (
+                user_names.get(match.approver_user_id)
+                if match.approver_user_id
+                else None
+            )
+
+        return resp
+
     async def get(self, template_id: uuid.UUID, org_id: uuid.UUID) -> WorkflowTemplateResponse:
         tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
         if not tmpl:
             raise NotFoundException("WorkflowTemplate not found")
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
 
     async def get_readable(
         self,
@@ -333,7 +428,7 @@ class TemplateService:
         if not tmpl:
             raise NotFoundException("WorkflowTemplate not found")
         await self._assert_can_read(tmpl, actor_id, is_admin)
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
 
     async def _assert_can_read(self, tmpl, actor_id, is_admin: bool = False) -> None:
         """May this caller SEE that this workflow exists, and read it?
@@ -510,14 +605,30 @@ class TemplateService:
         # An identical stage list is NOT a definition change: the builder
         # re-sends `stages` on every save, so treating that as an edit would
         # mint a new version each time someone fixed a typo in the name.
-        stages_changed = req.stages is not None and self._stages_differ(
-            tmpl.stages, req.stages
-        )
-        new_version = None
-        if stages_changed:
+        #
+        # The comparison runs on the NORMALIZED definition, not on the raw
+        # request against the legacy `workflow_stages` rows. Those rows have
+        # no department and no due-within columns, so a stage whose only
+        # change was its department or its deadline wording compared equal
+        # and the edit was silently dropped - no new version, nothing saved,
+        # and the UI reporting success. `_build_version_stages()` writes
+        # nothing; it validates and shapes, which also means a department
+        # left blank is resolved to the approver's own on BOTH sides before
+        # they are compared, so re-sending an unchanged list is still the
+        # no-op the builder relies on.
+        version_stages = None
+        stages_changed = False
+        if req.stages is not None:
             await self.validate_definition(req.stages, org_id)
             await self._reject_trainee_approvers(req.stages, org_id)
             version_stages = await self._build_version_stages(req.stages, org_id)
+            stages_changed = await self._definition_changed(
+                tmpl, version_stages, req.stages
+            )
+
+        new_version = None
+        if stages_changed:
+            assert version_stages is not None  # set together with stages_changed
 
             new_version = await self.version_repo.create_version(
                 template_id=tmpl.id,
@@ -541,7 +652,7 @@ class TemplateService:
             # REPLACED, not versioned - the version row above is the durable
             # record. Safe only because this is additive: nothing reads a
             # deleted stage once the run that used it has its own snapshot.
-            await self._replace_legacy_stages(tmpl, req.stages)
+            await self._replace_legacy_stages(tmpl, req.stages, version_stages)
 
         if updates:
             # `version` stays as the human-facing counter it has always been;
@@ -557,17 +668,81 @@ class TemplateService:
             stages_changed=stages_changed,
             new_version=(new_version.version_number if new_version else None),
         )
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
+
+    async def _definition_changed(
+        self, tmpl, built: Sequence[dict], raw: Sequence
+    ) -> bool:
+        """Does `built` describe a different definition than the current version?
+
+        `built` is the output of `_build_version_stages()`: validated,
+        normalized and in execution order. The stored side is the template's
+        current `workflow_version_stages`, which is the only place the
+        department, the due-within wording and the forced signing flag are
+        recorded. Comparing these two is what makes a department-only or
+        deadline-only edit detectable.
+
+        A template with no current version (created before versioning) has
+        nothing to compare against, so it falls back to the legacy
+        fingerprint over `workflow_stages`.
+        """
+        version_id = getattr(tmpl, "current_version_id", None)
+        if not version_id:
+            return self._stages_differ(tmpl.stages, raw)
+
+        from app.models.workflow import WorkflowVersionStage
+
+        rows = (
+            await self.db.execute(
+                select(WorkflowVersionStage)
+                .where(WorkflowVersionStage.version_id == version_id)
+                .order_by(WorkflowVersionStage.position)
+            )
+        ).scalars().all()
+        if not rows:
+            return self._stages_differ(tmpl.stages, raw)
+
+        def stored_fp(r) -> tuple:
+            return (
+                (r.name or "").strip().casefold(),
+                str(r.approver_type),
+                str(r.approver_user_id) if r.approver_user_id else None,
+                str(r.department_id) if r.department_id else None,
+                int(r.due_within_value),
+                str(r.due_within_unit),
+                int(r.due_within_hours),
+                bool(r.require_signing),
+            )
+
+        def built_fp(d: dict) -> tuple:
+            return (
+                (d.get("name") or "").strip().casefold(),
+                str(d.get("approver_type")),
+                str(d["approver_user_id"]) if d.get("approver_user_id") else None,
+                str(d["department_id"]) if d.get("department_id") else None,
+                int(d["due_within_value"]),
+                str(d["due_within_unit"]),
+                int(d["due_within_hours"]),
+                bool(d.get("require_signing", False)),
+            )
+
+        # Order is part of the definition here, unlike the legacy fingerprint:
+        # `built` is already sorted by sequence_order and `rows` by position,
+        # so reordering two otherwise identical stages is a real change
+        # (WF-STG-02) and must mint a version.
+        return [stored_fp(r) for r in rows] != [built_fp(d) for d in built]
 
     @staticmethod
     def _stages_differ(stored: Sequence, incoming: Sequence) -> bool:
         """True when `incoming` describes a different definition than `stored`.
 
-        Used by update() to tell "the client re-sent the stage list unchanged"
-        (safe: a no-op) from "the client wants the stages changed" (refused
-        until versioning exists, rather than silently dropped). Compares only
-        what actually defines behaviour, so re-ordering the JSON array or
-        changing letter case in a name is not mistaken for a real edit.
+        The legacy fallback for a template with no current version, used only
+        by `_definition_changed()`. It can see no department and no
+        due-within wording, because `workflow_stages` has no column for
+        either - which is exactly why the versioned comparison is preferred
+        wherever a version exists. Compares only what actually defines
+        behaviour, so re-ordering the JSON array or changing letter case in a
+        name is not mistaken for a real edit.
         """
         import json
 
@@ -619,7 +794,7 @@ class TemplateService:
         await self.db.commit()
         tmpl = await self.tmpl_repo.get_by_id(template_id, org_id)
         logger.info("template_active_toggled", template_id=str(template_id), is_active=is_active)
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
 
     async def duplicate(
         self,
@@ -677,7 +852,7 @@ class TemplateService:
             owner=str(actor_id),
         )
         copy = await self.tmpl_repo.get_by_id(copy.id, org_id)
-        return WorkflowTemplateResponse.model_validate(copy)
+        return await self._to_response(copy)
 
     async def delete(
         self,
@@ -780,6 +955,34 @@ class TemplateService:
             "department_parent_chain_too_deep", department_id=str(department_id)
         )
         return False
+
+    @staticmethod
+    def _legacy_stage_fields(stage_req, built: dict | None) -> tuple[int | None, bool]:
+        """(sla_hours, requires_signature) for the legacy `workflow_stages` row.
+
+        That row used to be written from the raw request while the version row
+        was written from the normalized definition, so the two disagreed:
+          * a client sending only `due_within_value`/`due_within_unit` got a
+            legacy row with `sla_hours = NULL` - no deadline on the rows the
+            engine still executes; and
+          * the department-forced signing flag (WF-STG-20) reached the version
+            row but not the legacy one.
+        `sla_hours` is derived only when the request was explicit about the
+        deadline; a stage that says nothing keeps NULL exactly as before.
+        """
+        sla_hours = stage_req.sla_hours
+        requires_signature = bool(stage_req.requires_signature)
+        if built is not None:
+            explicit = (
+                getattr(stage_req, "due_within_value", None) is not None
+                and getattr(stage_req, "due_within_unit", None) is not None
+            )
+            if sla_hours is None and explicit:
+                sla_hours = int(built["due_within_hours"])
+            requires_signature = requires_signature or bool(
+                built.get("require_signing", False)
+            )
+        return sla_hours, requires_signature
 
     @staticmethod
     def _due_within(stage) -> tuple[int, str, int]:
@@ -989,7 +1192,9 @@ class TemplateService:
         )
         return int(result.scalar() or 0)
 
-    async def _replace_legacy_stages(self, tmpl, stages: Sequence) -> None:
+    async def _replace_legacy_stages(
+        self, tmpl, stages: Sequence, built: Sequence[dict] | None = None
+    ) -> None:
         """Rewrite the legacy WorkflowStage rows to match a new version.
 
         The engine still executes `workflow_stages`, so a saved edit has to be
@@ -1080,16 +1285,19 @@ class TemplateService:
                     await self.db.delete(stage)
             await self.db.flush()
 
-        for stage_req in sorted(stages, key=lambda s: s.sequence_order):
+        for i, stage_req in enumerate(sorted(stages, key=lambda s: s.sequence_order)):
+            sla_hours, requires_signature = self._legacy_stage_fields(
+                stage_req, built[i] if built and i < len(built) else None
+            )
             stage = await self.stage_repo.create(
                 template_id=tmpl.id,
                 name=stage_req.name,
                 sequence_order=stage_req.sequence_order,
                 stage_type=stage_req.stage_type,
                 min_approvals_required=stage_req.min_approvals_required,
-                sla_hours=stage_req.sla_hours,
+                sla_hours=sla_hours,
                 reapproval_on_revision=stage_req.reapproval_on_revision,
-                requires_signature=stage_req.requires_signature,
+                requires_signature=requires_signature,
             )
             for rule in stage_req.approver_rules:
                 await self.stage_repo.add_approver_rule(
@@ -1179,7 +1387,7 @@ class TemplateService:
             "template_archived" if archived else "template_restored",
             template_id=str(template_id), actor=str(actor_id),
         )
-        return WorkflowTemplateResponse.model_validate(tmpl)
+        return await self._to_response(tmpl)
 
     # ── Sharing (§5.1, WF-OWN-02..11) ───────────────────────────────────────
 

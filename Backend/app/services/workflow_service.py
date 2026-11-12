@@ -1691,7 +1691,7 @@ class WorkflowService:
 
         # Org Admin only. Not the workflow owner and not the submitter: this
         # changes who may approve, and §7.3 puts that with the admin.
-        if not (actor.is_superadmin or "admin" in actor.roles):
+        if not actor.is_org_admin():
             raise ForbiddenException(
                 "Only an organization admin can reassign an approval stage"
             )

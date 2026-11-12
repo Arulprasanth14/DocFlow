@@ -389,7 +389,7 @@ async def test_approval_history_shows_chain_of_custody(db_session, org, worker, 
 
     user = AuthUser(
         id=worker_user.id,
-        email=worker_user.email,
+
         org_id=org.id,
         roles=["worker"],
         permissions=[],

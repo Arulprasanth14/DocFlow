@@ -1,0 +1,95 @@
+- generic [ref=f8e3]:
+  - complementary [ref=f8e4]:
+    - generic "Collapse sidebar" [ref=f8e5] [cursor=pointer]: DocFlow
+    - navigation [ref=f8e11]:
+      - generic [ref=f8e12]: Workspace
+      - link "Dashboard" [ref=f8e13] [cursor=pointer]:
+        - /url: /dashboard
+      - link "Documents" [ref=f8e21] [cursor=pointer]:
+        - /url: /documents
+      - link "Workflows" [ref=f8e27] [cursor=pointer]:
+        - /url: /workflows
+      - link "Search" [ref=f8e36] [cursor=pointer]:
+        - /url: /search
+      - link "Analytics" [ref=f8e42] [cursor=pointer]:
+        - /url: /analytics
+      - link "Messages" [ref=f8e47] [cursor=pointer]:
+        - /url: /chat
+      - link "Drafts" [ref=f8e52] [cursor=pointer]:
+        - /url: /drafts
+      - link "Agent" [ref=f8e59] [cursor=pointer]:
+        - /url: /agent
+      - link "Settings" [ref=f8e65] [cursor=pointer]:
+        - /url: /settings
+    - generic [ref=f8e78]:
+      - generic [ref=f8e79]: Workspace
+      - generic [ref=f8e80]: SD Innovations
+  - main [ref=f8e84]:
+    - generic [ref=f8e85]:
+      - button [ref=f8e86] [cursor=pointer]
+      - button "Search documents, workflows, or users… ⌘K" [ref=f8e88] [cursor=pointer]:
+        - generic [ref=f8e92]: Search documents, workflows, or users…
+        - generic [ref=f8e93]: ⌘K
+      - generic [ref=f8e94]:
+        - button "Switch to Light Mode" [ref=f8e95] [cursor=pointer]
+        - button [ref=f8e104] [cursor=pointer]
+        - button "AM Arun Mehta" [ref=f8e110] [cursor=pointer]:
+          - generic [ref=f8e111]: AM
+          - generic [ref=f8e112]: Arun Mehta
+    - generic [ref=f8e116]:
+      - generic [ref=f8e117]: /workflows/wf-1/edit
+      - generic [ref=f8e118]:
+        - generic [ref=f8e119]:
+          - navigation "Breadcrumb" [ref=f8e120]:
+            - link "Workflows" [ref=f8e122] [cursor=pointer]:
+              - /url: /workflows
+          - generic [ref=f8e123]:
+            - generic [ref=f8e124]:
+              - heading "Edit workflow" [level=1] [ref=f8e125]
+              - paragraph [ref=f8e126]: Saving creates a new version. Documents already in approval keep running on the version they were submitted with.
+            - button "Back" [ref=f8e128] [cursor=pointer]
+        - generic [ref=f8e132]:
+          - navigation "Submission steps" [ref=f8e134]:
+            - button "Build" [ref=f8e136] [cursor=pointer]
+            - button "2 Preview" [disabled] [ref=f8e143]:
+              - generic [ref=f8e144]: "2"
+              - generic [ref=f8e145]: Preview
+          - paragraph [ref=f8e146]: This workflow is on version 3. Saving creates version 4; in-flight runs are unaffected.
+          - generic [ref=f8e150]:
+            - generic [ref=f8e151]:
+              - heading "Purchase approval over £5,000" [level=2] [ref=f8e152]
+              - paragraph [ref=f8e153]: "Two-step route for capital expenditure: the requester’s manager, then Finance for the signed authorisation."
+              - generic [ref=f8e154]:
+                - generic [ref=f8e155]: 2 stages
+                - generic [ref=f8e161]: Sequential approval
+                - generic [ref=f8e164]: "Full re-approval after changes: On"
+            - list [ref=f8e168]:
+              - listitem [ref=f8e169]:
+                - generic [ref=f8e170]:
+                  - generic [aria-hidden] [ref=f8e171]: "1"
+                  - generic [ref=f8e172]:
+                    - generic [ref=f8e173]:
+                      - generic [ref=f8e174]: Manager sign-off
+                      - generic [ref=f8e175]: Start
+                    - generic [ref=f8e178]:
+                      - generic [ref=f8e179]: Submitter’s manager (assigned when the document is submitted)
+                      - generic [ref=f8e185]: Operations
+                      - generic [ref=f8e190]: Due within 24 hours
+              - listitem [ref=f8e197]:
+                - generic [ref=f8e198]:
+                  - generic [aria-hidden] [ref=f8e199]: "2"
+                  - generic [ref=f8e200]:
+                    - generic [ref=f8e201]:
+                      - generic [ref=f8e202]: Finance authorisation
+                      - generic [ref=f8e203]: Final approval
+                    - generic [ref=f8e207]:
+                      - generic [ref=f8e208]: Priya Raman
+                      - generic [ref=f8e212]: Finance
+                      - generic [ref=f8e217]: Due within 3 days
+                      - generic [ref=f8e221]: Signature required
+            - generic [ref=f8e228]: Document approved
+        - generic [ref=f8e233]:
+          - button "Cancel" [ref=f8e234] [cursor=pointer]
+          - button "Edit workflow" [ref=f8e235] [cursor=pointer]
+          - button "Save workflow" [active] [ref=f8e236] [cursor=pointer]
+  - region "Notifications alt+T"

@@ -1,0 +1,86 @@
+- generic [ref=f4e3]:
+  - complementary [ref=f4e4]:
+    - generic "Collapse sidebar" [ref=f4e5] [cursor=pointer]: DocFlow
+    - navigation [ref=f4e11]:
+      - generic [ref=f4e12]: Workspace
+      - link "Dashboard" [ref=f4e13] [cursor=pointer]:
+        - /url: /dashboard
+      - link "Documents" [ref=f4e21] [cursor=pointer]:
+        - /url: /documents
+      - link "Workflows" [ref=f4e27] [cursor=pointer]:
+        - /url: /workflows
+      - link "Search" [ref=f4e36] [cursor=pointer]:
+        - /url: /search
+      - link "Analytics" [ref=f4e42] [cursor=pointer]:
+        - /url: /analytics
+      - link "Messages" [ref=f4e47] [cursor=pointer]:
+        - /url: /chat
+      - link "Drafts" [ref=f4e52] [cursor=pointer]:
+        - /url: /drafts
+      - link "Agent" [ref=f4e59] [cursor=pointer]:
+        - /url: /agent
+      - link "Settings" [ref=f4e65] [cursor=pointer]:
+        - /url: /settings
+    - generic [ref=f4e78]:
+      - generic [ref=f4e79]: Workspace
+      - generic [ref=f4e80]: SD Innovations
+  - main [ref=f4e84]:
+    - generic [ref=f4e85]:
+      - button "Search documents, workflows, or users… ⌘K" [ref=f4e86] [cursor=pointer]:
+        - generic [ref=f4e90]: Search documents, workflows, or users…
+        - generic [ref=f4e91]: ⌘K
+      - generic [ref=f4e92]:
+        - button "Switch to Dark Mode" [ref=f4e93] [cursor=pointer]
+        - button [ref=f4e98] [cursor=pointer]
+        - button "AM Arun Mehta" [ref=f4e104] [cursor=pointer]:
+          - generic [ref=f4e105]: AM
+          - generic [ref=f4e106]: Arun Mehta
+    - generic [ref=f4e110]:
+      - generic [ref=f4e111]: /workflows/wf-1
+      - generic [ref=f4e112]:
+        - generic [ref=f4e113]:
+          - navigation "Breadcrumb" [ref=f4e114]:
+            - link "Workflows" [ref=f4e116] [cursor=pointer]:
+              - /url: /workflows
+          - generic [ref=f4e117]:
+            - generic [ref=f4e118]:
+              - heading "Purchase approval over £5,000" [level=1] [ref=f4e119]
+              - paragraph [ref=f4e120]: "Two-step route for capital expenditure: the requester’s manager, then Finance for the signed authorisation."
+            - generic [ref=f4e122]:
+              - button "Back" [ref=f4e123] [cursor=pointer]
+              - button "Share" [ref=f4e126] [cursor=pointer]
+              - button "Edit" [ref=f4e133] [cursor=pointer]
+        - generic [ref=f4e138]:
+          - generic [ref=f4e139]:
+            - heading "Purchase approval over £5,000" [level=2] [ref=f4e140]
+            - paragraph [ref=f4e141]: "Two-step route for capital expenditure: the requester’s manager, then Finance for the signed authorisation."
+            - generic [ref=f4e142]:
+              - generic [ref=f4e143]: 2 stages
+              - generic [ref=f4e149]: Sequential approval
+              - generic [ref=f4e152]: "Full re-approval after changes: On"
+          - list [ref=f4e156]:
+            - listitem [ref=f4e157]:
+              - generic [ref=f4e158]:
+                - generic [aria-hidden] [ref=f4e159]: "1"
+                - generic [ref=f4e160]:
+                  - generic [ref=f4e161]:
+                    - generic [ref=f4e162]: Manager sign-off
+                    - generic [ref=f4e163]: Start
+                  - generic [ref=f4e166]:
+                    - generic [ref=f4e167]: Submitter’s manager (assigned when the document is submitted)
+                    - generic [ref=f4e173]: Operations
+                    - generic [ref=f4e178]: Due within 24 hours
+            - listitem [ref=f4e185]:
+              - generic [ref=f4e186]:
+                - generic [aria-hidden] [ref=f4e187]: "2"
+                - generic [ref=f4e188]:
+                  - generic [ref=f4e189]:
+                    - generic [ref=f4e190]: Finance authorisation
+                    - generic [ref=f4e191]: Final approval
+                  - generic [ref=f4e195]:
+                    - generic [ref=f4e196]: Priya Raman
+                    - generic [ref=f4e200]: Finance
+                    - generic [ref=f4e205]: Due within 3 days
+                    - generic [ref=f4e209]: Signature required
+          - generic [ref=f4e216]: Document approved
+  - region "Notifications alt+T"

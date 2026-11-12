@@ -342,7 +342,7 @@ async def test_an_unrelated_user_gets_404_for_the_file(
     )
 
     actor = AuthUser(
-        id=stranger.id, email=stranger.email, org_id=org.id,
+        id=stranger.id, org_id=org.id,
         roles=["worker"], permissions=[],
     )
     svc = ApprovalService(db_session)
@@ -362,7 +362,7 @@ async def test_another_org_gets_404_for_the_file(db_session, org, trainee):
         storage_key="orgs/x/files/a/report.pdf", mime="application/pdf",
     )
     outsider = AuthUser(
-        id=owner.id, email=owner.email, org_id=uuid.uuid4(),
+        id=owner.id, org_id=uuid.uuid4(),
         roles=["admin"], permissions=[],
     )
     with pytest.raises(NotFoundException):

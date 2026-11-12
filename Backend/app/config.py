@@ -253,9 +253,55 @@ class Settings(BaseSettings):
     # unrelated tests fail with 429 depending on how many ran before them.
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_GLOBAL: str = "120/minute"
+    # Deprecated: the coarse /api/v1/auth prefix bucket was replaced by the
+    # per-route limits below (core/rate_limit.py). Kept so existing .env
+    # files do not fail validation; nothing reads it.
     RATE_LIMIT_AUTH: str = "10/minute"
     RATE_LIMIT_AI_CHAT: str = "100/hour"
     RATE_LIMIT_UPLOADS: str = "5/minute"
+
+    # ── Per-route auth limits (Auth/RBAC spec Gap #4) ─────────────────────
+    # Sliding windows, enforced in core/rate_limit.py. "<count>/<window>"
+    # where the window is a number plus s/m/h/d.
+    RATE_LIMIT_LOGIN_FAILURES: str = "5/15m"    # failed /auth/login, per email
+    # Per ADDRESS, deliberately much higher than the per-email budget: an
+    # office behind one NAT shares it, and five mistyped passwords by five
+    # different people must not lock the building out. It is still a ceiling
+    # on spraying many accounts from one host.
+    RATE_LIMIT_LOGIN_FAILURES_PER_IP: str = "20/15m"
+    RATE_LIMIT_LOGIN_REQUESTS: str = "30/15m"   # all /auth/login requests, per IP
+    RATE_LIMIT_REGISTER: str = "5/1h"           # per IP
+    RATE_LIMIT_FIREBASE_LOGIN: str = "20/1m"    # per IP
+    RATE_LIMIT_REFRESH: str = "30/1m"           # per IP and per session
+
+    # The legacy bcrypt /auth/login and /auth/register endpoints. OFF: no
+    # DocFlow client calls them (the web app signs in through Firebase), and
+    # they are a second, weaker identity system. They answer 410 while off.
+    LEGACY_PASSWORD_AUTH_ENABLED: bool = False
+
+    # Expired sessions are hard-deleted this long after they expired.
+    SESSION_PURGE_AFTER_DAYS: int = 7
+
+    # ── Refresh-token rotation (Auth/RBAC Gap #5) ─────────────────────────
+    # OFF by default: rotation changes the cookie on every refresh, so it is
+    # shipped behind a flag that can be switched off without a redeploy. While
+    # it is off, /auth/refresh behaves exactly as it did before (same cookie,
+    # sliding expiry) - including the 30-day absolute cap, which only applies
+    # under rotation.
+    REFRESH_ROTATION_ENABLED: bool = False
+    # A rotated token presented again within this many seconds is treated as a
+    # legitimate parallel tab (RETRY_REFRESH), not as theft. 0 disables grace.
+    REFRESH_REUSE_GRACE_SECONDS: int = 10
+
+    # How often an open WebSocket re-checks that its session is still live.
+    # A socket that is never re-checked outlives revocation for as long as the
+    # user keeps it open, which was the whole of Gap #7.
+    WS_REVALIDATE_SECONDS: int = 300
+
+    # Addresses whose X-Forwarded-For header may be believed. Empty (the
+    # default) means the socket address is always used, which is the safe
+    # choice when no proxy is in front of the app.
+    TRUSTED_PROXIES: list[str] = []
 
     # ── Admin Seed (dev/staging only — NEVER log or expose in API responses) ──
     # Used exclusively by scripts/seed_admin.py to bootstrap the initial admin.
